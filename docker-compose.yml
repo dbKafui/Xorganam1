@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: xorganam-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: xorganam
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./xorganam-node-backend/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: xorganam-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./xorganam-node-backend
+      dockerfile: Dockerfile
+    container_name: xorganam-backend
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/xorganam
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGINS: http://localhost:5173,http://localhost:5174
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-replace-with-a-long-random-secret-never-commit-this}
+      JWT_SECRET: ${JWT_SECRET:-replace-with-a-different-long-random-secret-never-commit-this}
+      EGANOW_BASE_URL: ""
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./xorganam-node-backend/src:/app/src
+    command: npm run dev
+
+  backend-worker:
+    build:
+      context: ./xorganam-node-backend
+      dockerfile: Dockerfile
+    container_name: xorganam-backend-worker
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/xorganam
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-replace-with-a-long-random-secret-never-commit-this}
+      JWT_SECRET: ${JWT_SECRET:-replace-with-a-different-long-random-secret-never-commit-this}
+      EGANOW_BASE_URL: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./xorganam-node-backend/src:/app/src
+    command: npm run worker
+
+  backoffice-dashboard:
+    build:
+      context: ./backoffice-dashboard
+      dockerfile: Dockerfile
+    container_name: xorganam-backoffice-dashboard
+    environment:
+      VITE_API_URL: http://localhost:3000/api/v1
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./backoffice-dashboard/src:/app/src
+    command: npm run dev -- --host
+
+  checkout:
+    build:
+      context: ./xorganam-checkout
+      dockerfile: Dockerfile
+    container_name: xorganam-checkout
+    environment:
+      VITE_API_URL: http://localhost:3000/api/v1
+    ports:
+      - "5174:5174"
+    volumes:
+      - ./xorganam-checkout/src:/app/src
+    command: npm run dev -- --host
+
+volumes:
+  postgres_data:
+  redis_data:
