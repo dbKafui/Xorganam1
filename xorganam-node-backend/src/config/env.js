@@ -1,8 +1,8 @@
 import 'dotenv/config'
 
-function required(name, fallback) {
-  const value = process.env[name] ?? fallback
-  if (value === undefined) {
+function required(name) {
+  const value = process.env[name]
+  if (value === undefined || value === '') {
     throw new Error(`Missing required environment variable: ${name}`)
   }
   return value
@@ -17,11 +17,11 @@ export const env = {
     .filter(Boolean),
 
   database: {
-    connectionString: required('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/xorganam')
+    connectionString: required('DATABASE_URL')
   },
 
   redis: {
-    url: required('REDIS_URL', 'redis://localhost:6379')
+    url: required('REDIS_URL')
   },
 
   // Master key for the application-layer AES-256-GCM envelope encryption
@@ -30,15 +30,14 @@ export const env = {
   encryptionMasterKey: required('ENCRYPTION_MASTER_KEY'),
 
   jwt: {
-    secret: required('JWT_SECRET', 'replace-with-a-long-random-secret-never-commit-this')
+    secret: required('JWT_SECRET')
   },
 
   sms: {
     gatewayBaseUrl: process.env.SMS_GATEWAY_BASE_URL || 'https://api.smsgateway.example.com/',
     defaultSenderId: process.env.SMS_DEFAULT_SENDER_ID || 'XORGANAM'
-  }
+  },
 
-  ,eganow: {
-    callbackUrl: process.env.EGANOW_CALLBACK_URL || null
-  }
+  // Eganow callbacks must be configured per-tenant in the DB. Do not
+  // provide a global env-level callback URL to avoid accidental fallbacks.
 }

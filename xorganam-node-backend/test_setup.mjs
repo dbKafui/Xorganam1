@@ -24,10 +24,16 @@ async function setup() {
     const testTenantId = tenantRes.rows[0].id
     console.log('Test tenant created:', testTenantId)
 
-    const username = 'GH02339a5f25650bfc4f4590bed81fe73d458a'
-    const password = 'a812944ea64444d1c2b18b1811432ccfad5759a83bd5442c2ae9c60e1fcc2d0b'
-    const xAuth = 'GH0233R0gwMjMzOWE1ZjI1NjUwYmZjNGY0NTkwYmVkODFmZTczZDQ1OGE6YTgxMjk0NGVhNjQ0NDRkMWMyYjE4YjE4MTE0MzJjY2ZhZDU3NTlhODNiZDU0NDJjMmFlOWM2MGUxZmNjMmQwYg=='
-    const webhookSecret = 'test-webhook-secret-12345'
+    const username = process.env.EGANOW_TEST_API_USERNAME || ''
+    const password = process.env.EGANOW_TEST_API_PASSWORD || ''
+    const xAuth = process.env.EGANOW_TEST_XAUTH || ''
+    const webhookSecret = process.env.EGANOW_TEST_WEBHOOK_SECRET || 'test-webhook-secret-12345'
+    const eganowBaseUrl = process.env.EGANOW_TEST_BASE_URL || ''
+
+    if (!username || !password || !xAuth || !egnowBaseUrl) {
+      console.error('Missing Eganow test configuration. Set EGANOW_TEST_API_USERNAME, EGANOW_TEST_API_PASSWORD, EGANOW_TEST_XAUTH, and EGANOW_TEST_BASE_URL.')
+      process.exit(1)
+    }
 
     const usernameEnc = encrypt(username, apiKeySalt)
     const passwordEnc = encrypt(password, apiKeySalt)
@@ -37,7 +43,7 @@ async function setup() {
     await query(
       `INSERT INTO tenant_eganow_credentials (tenant_id, eganow_api_key_encrypted, eganow_client_secret_encrypted, eganow_access_token_encrypted, webhook_secret_encrypted, eganow_base_url, eganow_merchant_code, is_enabled)
        VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)`,
-      [testTenantId, usernameEnc, passwordEnc, xAuthEnc, webhookEnc, 'https://developer.deveganowapi.com', 'TEST_SERVICE']
+      [testTenantId, usernameEnc, passwordEnc, xAuthEnc, webhookEnc, eganowBaseUrl, 'TEST_SERVICE']
     )
     console.log('Eganow credentials configured')
 

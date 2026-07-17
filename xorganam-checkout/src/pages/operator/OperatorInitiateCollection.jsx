@@ -43,7 +43,7 @@ export default function OperatorInitiateCollection() {
       if (!normalizedMsisdn || normalizedMsisdn.length !== 12) {
         throw new Error('Enter a valid mobile number in local or international format.')
       }
-      const response = await operatorApi.collect({
+      const response = await operatorApi.collectForTenant(user.tenantId, {
         merchantId: form.merchantId,
         amount: Number(form.amount),
         msisdn: normalizedMsisdn,
@@ -73,10 +73,20 @@ export default function OperatorInitiateCollection() {
         {result && (
           <div className="status-banner success">
             <span className="status-icon">✓</span>
-            <span>
-              Collection <span className="mono">{result.internalReference}</span> started — status: {result.status}.{' '}
-              <Link to={`/operator/transactions/${result.id}`}>View it →</Link>
-            </span>
+            <div>
+              <div>
+                Collection <span className="mono">{result.internalReference}</span> started — status: {result.status}.
+              </div>
+              {result.paymentGatewayStatus && (
+                <div>Gateway status: <span className="mono">{result.paymentGatewayStatus}</span></div>
+              )}
+              {result.message && (
+                <div>Gateway message: <span className="mono">{result.message}</span></div>
+              )}
+              <div>
+                <Link to={`/operator/transactions/${result.id}`}>View it →</Link>
+              </div>
+            </div>
           </div>
         )}
 

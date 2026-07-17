@@ -1,8 +1,8 @@
 import { Worker } from 'bullmq'
 import crypto from 'node:crypto'
-import { getRedisConnection, COLLECT_FOR_ME_QUEUE } from '../queue/queue.js'
+import { getRedisConnection, COLLECT_FOR_ME_QUEUE, enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { query, withTransaction } from '../db/pool.js'
-import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError } from '../services/eganowClient.js'
+import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { TenantCredentialsError } from '../services/credentialsService.js'
 import { sendMerchantSms } from '../services/notificationService.js'
 
@@ -32,69 +32,126 @@ async function processCollectForMeJob(job) {
 
   const { merchant, collectionTxn } = context
 
-  if (collectionTxn.status !== 'RECEIVED') {
-    console.log(`[collect-for-me] transaction ${transactionId} already at status ${collectionTxn.status} - skipping (idempotent).`)
+  if (collectionTxn.status === 'PAID_OUT') {
+    console.log(`[collect-for-me] transaction ${transactionId} already paid out - skipping (idempotent).`)
     return { skipped: true, reason: 'not-in-received-state' }
   }
 
+  if (!['RECEIVED', 'SWEPT_INTERNAL'].includes(collectionTxn.status)) {
+    console.log(`[collect-for-me] transaction ${transactionId} at status ${collectionTxn.status} - skipping until collection is received.`)
+    return { skipped: true, reason: 'not-ready' }
+  }
+
   // ---- Step 1: Internal Transfer - collection account -> payout account
-  const transferTxn = await createChildTransaction({
-    tenantId,
-    merchantId,
-    parentTransactionId: collectionTxn.id,
-    type: 'INTERNAL_TRANSFER',
-    amount: collectionTxn.amount,
-    currency: collectionTxn.currency
-  })
+  let transferTxn = await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER')
 
-  try {
-    const transferResult = await sweepToPayoutAccount(tenantId, {
-      reference: transferTxn.internal_reference,
+  if (collectionTxn.status === 'RECEIVED') {
+    transferTxn = transferTxn || await createChildTransaction({
+      tenantId,
+      merchantId,
+      parentTransactionId: collectionTxn.id,
+      type: 'INTERNAL_TRANSFER',
       amount: collectionTxn.amount,
-      currency: collectionTxn.currency,
-      network: merchant.network_provider
+      currency: collectionTxn.currency
     })
 
-    await markTransactionResult(transferTxn.id, {
-      success: true,
-      status: 'SWEPT_INTERNAL',
-      eganowReference: transferResult.reference,
-      eganowTransactionId: transferResult.transactionId
-    })
-    await markTransactionResult(collectionTxn.id, { success: true, status: 'SWEPT_INTERNAL' })
-  } catch (err) {
-    await markTransactionResult(transferTxn.id, { success: false, status: 'FAILED', failureReason: err.message })
-    await markTransactionResult(collectionTxn.id, { success: false, status: 'FAILED', failureReason: `Sweep failed: ${err.message}` })
-    // Re-throw as a tagged, tenant-scoped error - this is what gives BullMQ
-    // a clean per-job failure. It does NOT touch any other job's promise,
-    // connection, or state; Tenant B/C jobs on this same worker process
-    // continue unaffected because each job invocation is independent.
-    throw taggedError(err, tenantId, 'InternalTransfer')
+    if (transferTxn.status !== 'SWEPT_INTERNAL') {
+      try {
+        const transferResult = await sweepToPayoutAccount(tenantId, {
+          amount: collectionTxn.amount,
+          network: merchant.network_provider,
+          narration: merchant.display_name || `Internal transfer for ${collectionTxn.internal_reference}`
+        })
+
+        if (isGatewayFailure(transferResult.status)) {
+          throw new EganowApiError(`Internal transfer failed with status ${transferResult.status}`, tenantId, null, transferResult.raw)
+        }
+
+        if (!isGatewaySuccess(transferResult.status)) {
+          await markTransactionResult(transferTxn.id, {
+            success: false,
+            status: 'PENDING',
+            paymentGatewayStatus: transferResult.status,
+            eganowReference: transferResult.reference,
+            eganowTransactionId: transferResult.transactionId
+          })
+          await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: transferTxn.id })
+          return { pending: true, stage: 'internal-transfer', transferTransactionId: transferTxn.id }
+        }
+
+        await markTransactionResult(transferTxn.id, {
+          success: true,
+          status: 'SWEPT_INTERNAL',
+          paymentGatewayStatus: transferResult.status,
+          eganowReference: transferResult.reference,
+          eganowTransactionId: transferResult.transactionId
+        })
+        await markTransactionResult(collectionTxn.id, { success: true, status: 'SWEPT_INTERNAL' })
+      } catch (err) {
+        await markTransactionResult(transferTxn.id, { success: false, status: 'FAILED', failureReason: err.message })
+        await markTransactionResult(collectionTxn.id, { success: false, status: 'FAILED', failureReason: `Sweep failed: ${err.message}` })
+        // Re-throw as a tagged, tenant-scoped error - this is what gives BullMQ
+        // a clean per-job failure. It does NOT touch any other job's promise,
+        // connection, or state; Tenant B/C jobs on this same worker process
+        // continue unaffected because each job invocation is independent.
+        throw taggedError(err, tenantId, 'InternalTransfer')
+      }
+    }
   }
 
   // ---- Step 2: External Disbursal - payout account -> merchant's MoMo -
-  const payoutTxn = await createChildTransaction({
+  transferTxn = transferTxn || await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER')
+  const payoutDestination = collectionTxn.payout_msisdn || merchant.mobile_money_number
+  const payoutParentId = transferTxn?.id || collectionTxn.id
+  const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT') || await createChildTransaction({
     tenantId,
     merchantId,
-    parentTransactionId: transferTxn.id,
+    parentTransactionId: payoutParentId,
     type: 'PAYOUT',
     amount: collectionTxn.amount,
-    currency: collectionTxn.currency
+    currency: collectionTxn.currency,
+    payoutMsisdn: payoutDestination
   })
+  await query('UPDATE transactions SET payout_msisdn = COALESCE(payout_msisdn, $2), updated_at = now() WHERE id = $1', [
+    payoutTxn.id,
+    payoutDestination
+  ])
+
+  if (payoutTxn.status === 'PAID_OUT') {
+    await markTransactionResult(collectionTxn.id, { success: true, status: 'PAID_OUT' })
+    return { success: true, payoutTransactionId: payoutTxn.id, alreadyPaid: true }
+  }
 
   try {
     const payoutResult = await disburseToMobileMoney(tenantId, {
       reference: payoutTxn.internal_reference,
       amount: collectionTxn.amount,
       currency: collectionTxn.currency,
-      accountNoOrCardNoOrMsisdn: merchant.mobile_money_number,
+      accountNoOrCardNoOrMsisdn: payoutDestination,
       network: merchant.network_provider,
       narration: `Payout for collection ${collectionTxn.internal_reference}`
     })
 
+    if (isGatewayFailure(payoutResult.status)) {
+      throw new EganowApiError(`Payout failed with status ${payoutResult.status}`, tenantId, null, payoutResult.raw)
+    }
+
+    if (!isGatewaySuccess(payoutResult.status)) {
+      await markTransactionResult(payoutTxn.id, {
+        success: false,
+        status: 'PENDING',
+        paymentGatewayStatus: payoutResult.status,
+        eganowReference: payoutResult.reference,
+        eganowTransactionId: payoutResult.transactionId
+      })
+      await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: payoutTxn.id })
+      return { pending: true, stage: 'payout', payoutTransactionId: payoutTxn.id }
+    }
+
     await markTransactionResult(payoutTxn.id, {
       success: true,
       status: 'PAID_OUT',
+      paymentGatewayStatus: payoutResult.status,
       eganowReference: payoutResult.reference,
       eganowTransactionId: payoutResult.transactionId
     })
@@ -109,7 +166,7 @@ async function processCollectForMeJob(job) {
 
   // ---- Step 3: notify the merchant ------------------------------------
   const message = `GHS ${Number(collectionTxn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${payoutTxn.internal_reference}.`
-  await sendMerchantSms(tenantId, merchant.mobile_money_number, message)
+  await sendMerchantSms(tenantId, payoutDestination, message)
 
   return { success: true, payoutTransactionId: payoutTxn.id }
 }
@@ -133,9 +190,9 @@ function taggedError(err, tenantId, stage) {
 async function loadJobContext(tenantId, merchantId, transactionId) {
   const { rows } = await query(
     `SELECT
-        m.id, m.eganow_collection_account_id, m.eganow_payout_account_id,
+        m.id, m.display_name, m.eganow_collection_account_id, m.eganow_payout_account_id,
         m.mobile_money_number, m.network_provider,
-        t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference
+        t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference, t.payout_msisdn
      FROM merchants m
      JOIN transactions t
        ON t.tenant_id = m.tenant_id AND t.merchant_id = m.id AND t.id = $3
@@ -149,6 +206,7 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
   return {
     merchant: {
       id: row.id,
+      display_name: row.display_name,
       eganow_collection_account_id: row.eganow_collection_account_id,
       eganow_payout_account_id: row.eganow_payout_account_id,
       mobile_money_number: row.mobile_money_number,
@@ -159,37 +217,65 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
       status: row.txn_status,
       amount: row.amount,
       currency: row.currency,
-      internal_reference: row.internal_reference
+      internal_reference: row.internal_reference,
+      payout_msisdn: row.payout_msisdn
     }
   }
 }
 
-async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, amount, currency }) {
+async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, amount, currency, payoutMsisdn = null }) {
   const internalReference = `${type === 'INTERNAL_TRANSFER' ? 'IT' : 'PO'}-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
 
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `INSERT INTO transactions
-         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference)
-       VALUES ($1, $2, $3, $4, 'RECEIVED', $5, $6, $7)
-       RETURNING id, internal_reference`,
-      [tenantId, merchantId, parentTransactionId, type, amount, currency, internalReference]
+         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference, payout_msisdn)
+       VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8)
+       ON CONFLICT ON CONSTRAINT uq_transactions_parent_type DO NOTHING
+       RETURNING id, internal_reference, status`,
+      [tenantId, merchantId, parentTransactionId, type, amount, currency, internalReference, payoutMsisdn]
     )
-    return rows[0]
+
+    if (rows.length > 0) {
+      return rows[0]
+    }
+
+    const { rows: existingRows } = await client.query(
+      `SELECT id, internal_reference, status
+         FROM transactions
+        WHERE parent_transaction_id = $1 AND type = $2
+        LIMIT 1`,
+      [parentTransactionId, type]
+    )
+
+    return existingRows[0]
   })
 }
 
-async function markTransactionResult(transactionId, { success, status, eganowReference, eganowTransactionId, failureReason }) {
+async function findChildTransaction(parentTransactionId, type) {
+  const { rows } = await query(
+    `SELECT id, internal_reference, status
+       FROM transactions
+      WHERE parent_transaction_id = $1 AND type = $2
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    [parentTransactionId, type]
+  )
+  return rows[0] || null
+}
+
+async function markTransactionResult(transactionId, { success, status, paymentGatewayStatus, eganowReference, eganowTransactionId, failureReason }) {
   await query(
     `UPDATE transactions
         SET status = $2,
             eganow_reference = COALESCE($3, eganow_reference),
             eganow_transaction_id = COALESCE($4, eganow_transaction_id),
             failure_reason = $5,
+            payment_gateway_status = COALESCE($7, payment_gateway_status),
             completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
             updated_at = now()
       WHERE id = $1`,
-    [transactionId, status, eganowReference || null, eganowTransactionId || null, failureReason || null, success]
+    [transactionId, status, eganowReference || null, eganowTransactionId || null, failureReason || null, success, paymentGatewayStatus || null]
   )
 }
 

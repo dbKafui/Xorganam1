@@ -4,13 +4,11 @@ import { query } from '../db/pool.js'
 import { authenticate, requireRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
-import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError } from '../services/eganowClient.js'
+import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { reconcileTransaction } from '../services/reconciliationService.js'
+import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 
-function getEganowCallbackUrl(req) {
-  const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim()
-  return process.env.EGANOW_CALLBACK_URL || `${proto}://${req.get('host')}/api/v1/webhooks/eganow`
-}
+// No env-level Eganow callback fallback: tenant-stored callback must be used.
 
 export const transactionsRouter = Router()
 
@@ -65,7 +63,8 @@ transactionsRouter.get(
     params.push(limit, offset)
     const { rows } = await query(
       `SELECT id, merchant_id, type, status, amount, fees, currency, internal_reference,
-              eganow_reference, failure_reason, created_at, completed_at
+              payment_gateway_status,
+              eganow_reference, failure_reason, collection_msisdn, kyc_msisdn, created_at, completed_at
          FROM transactions
         WHERE ${whereClause}
         ORDER BY created_at DESC
@@ -87,10 +86,13 @@ transactionsRouter.get(
   '/:transactionId',
   asyncHandler(async (req, res) => {
     const { rows } = await query(
-      `SELECT id, tenant_id, merchant_id, parent_transaction_id, type, status, amount, fees, currency,
-              internal_reference, eganow_reference, failure_reason, notification_sent, manually_triggered,
-              created_at, completed_at
-         FROM transactions WHERE id = $1`,
+      `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.status, t.amount, t.fees, t.currency,
+              t.internal_reference, t.eganow_reference, t.payment_gateway_status, t.failure_reason, t.notification_sent, t.manually_triggered,
+              t.collection_msisdn, t.kyc_msisdn, t.created_at, t.completed_at,
+              m.display_name AS merchant_display_name
+         FROM transactions t
+         JOIN merchants m ON m.id = t.merchant_id
+        WHERE t.id = $1`,
       [req.params.transactionId]
     )
     if (rows.length === 0) return res.status(404).json({ message: 'Transaction not found.' })
@@ -99,7 +101,7 @@ transactionsRouter.get(
     if (scopeOrRespond(req, res, txn.tenant_id) === null) return
 
     const children = await query(
-      `SELECT id, type, status, amount, fees, currency, internal_reference, created_at
+      `SELECT id, type, status, amount, fees, currency, internal_reference, payment_gateway_status, created_at
          FROM transactions WHERE parent_transaction_id = $1`,
       [txn.id]
     )
@@ -121,7 +123,7 @@ transactionsRouter.post(
   '/collect',
   requireRole('TENANT_OPERATOR'),
   asyncHandler(async (req, res) => {
-    const { merchantId, amount, msisdn, network, narration } = req.body || {}
+    const { merchantId, amount, msisdn, network, narration, payoutMsisdn, payoutMobileNumber, accountNoOrMsisdn } = req.body || {}
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
 
     const merchantRow = await query('SELECT tenant_id FROM merchants WHERE id = $1', [merchantId])
@@ -134,7 +136,8 @@ transactionsRouter.post(
         msisdn,
         network,
         narration,
-        callback: getEganowCallbackUrl(req)
+        payoutMsisdn: payoutMsisdn || payoutMobileNumber || accountNoOrMsisdn || null,
+        callback: undefined
       })
       if (result.status !== 'FAILED') {
         await query('UPDATE transactions SET manually_triggered = TRUE, initiated_by_user_id = $2 WHERE id = $1', [
@@ -142,9 +145,15 @@ transactionsRouter.post(
           req.user.id
         ])
       }
-      res.json({ id: result.transactionId, internalReference: result.internalReference, status: result.status })
+      res.json({
+        id: result.transactionId,
+        internalReference: result.internalReference,
+        status: result.status,
+        paymentGatewayStatus: result.paymentGatewayStatus || result.status
+      })
     } catch (err) {
       if (err instanceof CollectionRejectedError) return res.status(400).json({ message: err.message })
+      if (err.name === 'TenantCredentialsError') return res.status(400).json({ message: err.message })
       throw err
     }
   })
@@ -163,7 +172,7 @@ transactionsRouter.post(
 
     const sourceRows = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
-              m.eganow_collection_account_id, m.eganow_payout_account_id
+              m.eganow_collection_account_id, m.eganow_payout_account_id, m.network_provider
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
         WHERE t.id = $1`,
@@ -173,7 +182,9 @@ transactionsRouter.post(
     const source = sourceRows.rows[0]
 
     if (scopeOrRespond(req, res, source.tenant_id) === null) return
-    if (source.status !== 'RECEIVED') return res.status(400).json({ message: 'Source transaction must be in RECEIVED status.' })
+    if (source.status !== 'RECEIVED') {
+      return res.status(400).json({ message: 'Source transaction must be RECEIVED from the payment gateway before internal transfer.' })
+    }
 
     const existingChild = await query(
       `SELECT id FROM transactions WHERE parent_transaction_id = $1 AND type = 'INTERNAL_TRANSFER'`,
@@ -188,7 +199,7 @@ transactionsRouter.post(
       `INSERT INTO transactions
          (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference,
           manually_triggered, initiated_by_user_id)
-       VALUES ($1, $2, $3, 'INTERNAL_TRANSFER', 'RECEIVED', $4, $5, $6, TRUE, $7)
+       VALUES ($1, $2, $3, 'INTERNAL_TRANSFER', 'PENDING', $4, $5, $6, TRUE, $7)
        RETURNING id`,
       [source.tenant_id, source.merchant_id, source.id, transferAmount, source.currency, internalReference, req.user.id]
     )
@@ -196,15 +207,40 @@ transactionsRouter.post(
 
     try {
       const result = await sweepToPayoutAccount(source.tenant_id, {
-        reference: internalReference,
         amount: transferAmount,
-        currency: source.currency,
-        network: source.network_provider
+        network: source.network_provider,
+        narration: source.display_name || `Internal transfer for ${internalReference}`
       })
 
+      if (isGatewayFailure(result.status)) {
+        throw new EganowApiError(`Internal transfer failed with status ${result.status}`, source.tenant_id, null, result.raw)
+      }
+
+      if (!isGatewaySuccess(result.status)) {
+        await query(
+          `UPDATE transactions
+              SET status = 'PENDING',
+                  payment_gateway_status = $2,
+                  eganow_reference = COALESCE($3, eganow_reference),
+                  eganow_transaction_id = COALESCE($4, eganow_transaction_id),
+                  updated_at = now()
+            WHERE id = $1`,
+          [transferId, result.status || 'PENDING', result.reference || null, result.transactionId || null]
+        )
+        await enqueueCollectionStatusPollJob({ tenantId: source.tenant_id, merchantId: source.merchant_id, transactionId: transferId })
+        return res.json({ id: transferId, internalReference, status: 'PENDING', paymentGatewayStatus: result.status || 'PENDING' })
+      }
+
       await query(
-        `UPDATE transactions SET status = 'SWEPT_INTERNAL', eganow_reference = $2, eganow_transaction_id = $3, completed_at = now(), updated_at = now() WHERE id = $1`,
-        [transferId, result.reference || internalReference, result.transactionId || null]
+        `UPDATE transactions
+            SET status = 'SWEPT_INTERNAL',
+                payment_gateway_status = $4,
+                eganow_reference = $2,
+                eganow_transaction_id = $3,
+                completed_at = now(),
+                updated_at = now()
+          WHERE id = $1`,
+        [transferId, result.reference || internalReference, result.transactionId || null, result.status]
       )
       await query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [source.id])
 
@@ -229,7 +265,7 @@ transactionsRouter.post(
 
     const sourceRows = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
-              m.mobile_money_number, m.network_provider
+              m.display_name, m.mobile_money_number, m.network_provider
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
         WHERE t.id = $1`,
@@ -249,11 +285,11 @@ transactionsRouter.post(
 
     const inserted = await query(
       `INSERT INTO transactions
-         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference,
+         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference, payout_msisdn,
           manually_triggered, initiated_by_user_id)
-       VALUES ($1, $2, $3, 'PAYOUT', 'RECEIVED', $4, $5, $6, TRUE, $7)
+       VALUES ($1, $2, $3, 'PAYOUT', 'PENDING', $4, $5, $6, $7, TRUE, $8)
        RETURNING id`,
-      [source.tenant_id, source.merchant_id, source.id, payoutAmount, source.currency, internalReference, req.user.id]
+      [source.tenant_id, source.merchant_id, source.id, payoutAmount, source.currency, internalReference, destination, req.user.id]
     )
     const payoutId = inserted.rows[0].id
 
@@ -264,13 +300,38 @@ transactionsRouter.post(
         currency: source.currency,
         accountNoOrCardNoOrMsisdn: destination,
         network: network || source.network_provider,
-        narration: `Manual payout for ${source.internal_reference}`,
-        callback: getEganowCallbackUrl(req)
+        narration: `Manual payout for ${source.internal_reference}`
       })
 
+      if (isGatewayFailure(result.status)) {
+        throw new EganowApiError(`Payout failed with status ${result.status}`, source.tenant_id, null, result.raw)
+      }
+
+      if (!isGatewaySuccess(result.status)) {
+        await query(
+          `UPDATE transactions
+              SET status = 'PENDING',
+                  payment_gateway_status = $2,
+                  eganow_reference = COALESCE($3, eganow_reference),
+                  eganow_transaction_id = COALESCE($4, eganow_transaction_id),
+                  updated_at = now()
+            WHERE id = $1`,
+          [payoutId, result.status || 'PENDING', result.reference || null, result.transactionId || null]
+        )
+        await enqueueCollectionStatusPollJob({ tenantId: source.tenant_id, merchantId: source.merchant_id, transactionId: payoutId })
+        return res.json({ id: payoutId, internalReference, status: 'PENDING', paymentGatewayStatus: result.status || 'PENDING' })
+      }
+
       await query(
-        `UPDATE transactions SET status = 'PAID_OUT', eganow_reference = $2, eganow_transaction_id = $3, completed_at = now(), updated_at = now() WHERE id = $1`,
-        [payoutId, result.reference || internalReference, result.transactionId || null]
+        `UPDATE transactions
+            SET status = 'PAID_OUT',
+                payment_gateway_status = $4,
+                eganow_reference = $2,
+                eganow_transaction_id = $3,
+                completed_at = now(),
+                updated_at = now()
+          WHERE id = $1`,
+        [payoutId, result.reference || internalReference, result.transactionId || null, result.status]
       )
       await query(`UPDATE transactions SET status = 'PAID_OUT', updated_at = now() WHERE id = $1`, [source.id])
 
@@ -307,11 +368,15 @@ function mapTransaction(row) {
     merchantId: row.merchant_id,
     type: row.type,
     status: row.status,
+    paymentGatewayStatus: row.payment_gateway_status,
     amount: row.amount,
     fees: row.fees,
     currency: row.currency,
     internalReference: row.internal_reference,
     eganowReference: row.eganow_reference,
+    collectionMsisdn: row.collection_msisdn || null,
+    kycMsisdn: row.kyc_msisdn || null,
+    merchantName: row.merchant_display_name || null,
     failureReason: row.failure_reason,
     createdAt: row.created_at,
     completedAt: row.completed_at

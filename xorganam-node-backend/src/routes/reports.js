@@ -22,13 +22,13 @@ function scopeOrRespond(req, res, requestedTenantId) {
 async function computeTotals(whereClause, params) {
   const { rows } = await query(
     `SELECT
-        COALESCE(SUM(amount) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')), 0) AS total_collected,
+      COALESCE(SUM(amount) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')), 0) AS total_collected,
         COALESCE(SUM(amount) FILTER (WHERE type = 'PAYOUT' AND status = 'PAID_OUT'), 0) AS total_paid_out,
         COALESCE(SUM(fees), 0) AS total_fees,
         COUNT(*) FILTER (WHERE type = 'COLLECTION') AS collection_count,
-        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status = 'PAID_OUT') AS successful_count,
+        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')) AS successful_count,
         COUNT(*) FILTER (WHERE status = 'FAILED') AS failed_count,
-        COUNT(*) FILTER (WHERE status = 'RECEIVED') AS pending_count
+        COUNT(*) FILTER (WHERE status = 'PENDING') AS pending_count
      FROM transactions
      WHERE ${whereClause}`,
     params
@@ -57,7 +57,7 @@ reportsRouter.get(
     const totals = await computeTotals('merchant_id = $1', [merchantId])
 
     const recent = await query(
-      `SELECT id, type, status, amount, currency, internal_reference, created_at
+      `SELECT id, type, status, amount, currency, internal_reference, payment_gateway_status, created_at
          FROM transactions WHERE merchant_id = $1 ORDER BY created_at DESC LIMIT 10`,
       [merchantId]
     )
@@ -170,6 +170,7 @@ function mapTxnSummary(row) {
     id: row.id,
     type: row.type,
     status: row.status,
+    paymentGatewayStatus: row.payment_gateway_status,
     amount: row.amount,
     currency: row.currency,
     internalReference: row.internal_reference,

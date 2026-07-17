@@ -1,7 +1,9 @@
 import { Router } from 'express'
+import crypto from 'node:crypto'
 import { query } from '../db/pool.js'
 import { encrypt } from '../security/encryption.js'
 import { authenticate, requireRole, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { kycUpload, toDocumentUrl } from '../services/fileStorage.js'
 
@@ -21,6 +23,31 @@ tenantsRouter.get(
          FROM tenants ORDER BY created_at DESC`
     )
     res.json(rows.map(mapTenant))
+  })
+)
+
+tenantsRouter.post(
+  '/',
+  requirePlatformAdmin,
+  asyncHandler(async (req, res) => {
+    const { companyName, contactPhone, contactEmail, status = 'PENDING' } = req.body || {}
+
+    if (!companyName || !contactPhone || !contactEmail) {
+      return res.status(400).json({ message: 'companyName, contactPhone, and contactEmail are required.' })
+    }
+    if (!['PENDING', 'UNDER_REVIEW', 'ACTIVE', 'REJECTED', 'SUSPENDED'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid tenant status.' })
+    }
+
+    const apiKeySalt = crypto.randomBytes(16).toString('hex')
+    const { rows } = await query(
+      `INSERT INTO tenants (company_name, contact_phone, contact_email, api_key_salt, status, approved_at)
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 = 'ACTIVE' THEN now() ELSE NULL END)
+       RETURNING id, company_name, contact_phone, contact_email, status, created_at, approved_at`,
+      [companyName, contactPhone, contactEmail, apiKeySalt, status]
+    )
+
+    res.status(201).json(mapTenant(rows[0]))
   })
 )
 
@@ -49,6 +76,54 @@ tenantsRouter.get(
     )
 
     res.json({ ...mapTenant(rows[0]), documents: documents.rows.map(mapDocument) })
+  })
+)
+
+tenantsRouter.put(
+  '/:tenantId',
+  requirePlatformAdmin,
+  asyncHandler(async (req, res) => {
+    const { companyName, contactPhone, contactEmail, status } = req.body || {}
+    if (status && !['PENDING', 'UNDER_REVIEW', 'ACTIVE', 'REJECTED', 'SUSPENDED'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid tenant status.' })
+    }
+
+    const { rows } = await query(
+      `UPDATE tenants
+          SET company_name = COALESCE($2, company_name),
+              contact_phone = COALESCE($3, contact_phone),
+              contact_email = COALESCE($4, contact_email),
+              status = COALESCE($5, status),
+              approved_at = CASE
+                WHEN $5 = 'ACTIVE' AND approved_at IS NULL THEN now()
+                WHEN $5 IS NOT NULL AND $5 != 'ACTIVE' THEN NULL
+                ELSE approved_at
+              END
+        WHERE id = $1
+        RETURNING id, company_name, contact_phone, contact_email, status, created_at, approved_at`,
+      [req.params.tenantId, companyName || null, contactPhone || null, contactEmail || null, status || null]
+    )
+
+    if (rows.length === 0) return res.status(404).json({ message: 'Tenant not found.' })
+    res.json(mapTenant(rows[0]))
+  })
+)
+
+tenantsRouter.delete(
+  '/:tenantId',
+  requirePlatformAdmin,
+  asyncHandler(async (req, res) => {
+    const existing = await query('SELECT id FROM tenants WHERE id = $1', [req.params.tenantId])
+    if (existing.rows.length === 0) return res.status(404).json({ message: 'Tenant not found.' })
+
+    const txnCount = await query('SELECT COUNT(*)::int AS count FROM transactions WHERE tenant_id = $1', [req.params.tenantId])
+    if (txnCount.rows[0].count > 0) {
+      await query(`UPDATE tenants SET status = 'SUSPENDED' WHERE id = $1`, [req.params.tenantId])
+      return res.json({ deleted: false, status: 'SUSPENDED', message: 'Tenant has ledger history and was suspended instead.' })
+    }
+
+    await query('DELETE FROM tenants WHERE id = $1', [req.params.tenantId])
+    res.json({ deleted: true })
   })
 )
 
@@ -151,6 +226,8 @@ tenantsRouter.put(
       accessToken,
       webhookSecret,
       merchantCode,
+      eganowCallbackUrl,
+      callbackUrl,
       isEnabled
     } = req.body || {}
 
@@ -159,24 +236,14 @@ tenantsRouter.put(
     const xAuthValue = xAuth ?? accessToken ?? null
     const service = serviceName ?? merchantCode ?? null
     const tenantBaseUrl = eganowBaseUrl ?? baseUrl ?? null
+    const tenantCallbackUrl = eganowCallbackUrl ?? callbackUrl ?? null
 
     const tenantRows = await query('SELECT id, status, api_key_salt FROM tenants WHERE id = $1', [tenantId])
     if (tenantRows.rows.length === 0) return res.status(404).json({ message: 'Tenant not found.' })
     const tenant = tenantRows.rows[0]
 
-    // fetch existing tenant base url to validate enablement
-    const existingRow = await query('SELECT eganow_base_url FROM tenant_eganow_credentials WHERE tenant_id = $1', [tenantId])
-    const existingBaseUrl = existingRow.rows.length ? existingRow.rows[0].eganow_base_url : null
-
     if (isEnabled && tenant.status !== 'ACTIVE') {
       return res.status(400).json({ message: 'Tenant must complete KYC approval before Eganow can be enabled.' })
-    }
-
-    if (isEnabled) {
-      const finalBaseUrl = tenantBaseUrl || existingBaseUrl
-      if (!finalBaseUrl) {
-        return res.status(400).json({ message: 'Eganow base URL must be configured before enabling Eganow for this tenant.' })
-      }
     }
 
     await query(
@@ -185,9 +252,10 @@ tenantsRouter.put(
               eganow_client_secret_encrypted = COALESCE($3, eganow_client_secret_encrypted),
               eganow_access_token_encrypted = COALESCE($4, eganow_access_token_encrypted),
               eganow_base_url = COALESCE($5, eganow_base_url),
-              webhook_secret_encrypted = COALESCE($6, webhook_secret_encrypted),
-              eganow_merchant_code = COALESCE($7, eganow_merchant_code),
-              is_enabled = COALESCE($8, is_enabled)
+              eganow_callback_url = COALESCE($6, eganow_callback_url),
+              webhook_secret_encrypted = COALESCE($7, webhook_secret_encrypted),
+              eganow_merchant_code = COALESCE($8, eganow_merchant_code),
+              is_enabled = COALESCE($9, is_enabled)
         WHERE tenant_id = $1`,
       [
         tenantId,
@@ -195,6 +263,7 @@ tenantsRouter.put(
         password ? encrypt(password, tenant.api_key_salt) : null,
         xAuthValue ? encrypt(xAuthValue, tenant.api_key_salt) : null,
         tenantBaseUrl || null,
+        tenantCallbackUrl || null,
         webhookSecret ? encrypt(webhookSecret, tenant.api_key_salt) : null,
         service || null,
         typeof isEnabled === 'boolean' ? isEnabled : null
@@ -221,7 +290,7 @@ tenantsRouter.get(
 
     const { rows } = await query(
       `SELECT c.is_enabled AS eganow_enabled, c.eganow_merchant_code,
-              c.eganow_base_url,
+              c.eganow_base_url, c.eganow_callback_url,
               n.sms_enabled, n.sms_provider_name, n.sms_sender_id,
               n.email_enabled, n.email_provider_name, n.email_from_address
          FROM tenants t
@@ -281,6 +350,65 @@ tenantsRouter.put(
     res.json({ message: 'Notification configuration updated.' })
   })
 )
+
+  // Tenant-scoped collection endpoint - authenticated tenant/operator use
+  // (or platform admin acting on a tenant). This mirrors the manual
+  // collection endpoint under /transactions but is exposed under the
+  // tenant namespace so clients can explicitly target a tenant.
+  // ---------------------------------------------------------------------
+  tenantsRouter.post(
+    '/:tenantId/collect',
+    requireRole('TENANT_OPERATOR'),
+    asyncHandler(async (req, res) => {
+      let tenantId
+      try {
+        tenantId = resolveTenantScope(req, req.params.tenantId)
+      } catch (err) {
+        if (err instanceof ForbiddenError) return res.status(403).json({ message: err.message })
+        throw err
+      }
+
+      const { merchantId, amount, msisdn, network, narration, payoutMsisdn, payoutMobileNumber, accountNoOrMsisdn, callback: callbackOverride } = req.body || {}
+      if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
+
+      // Ensure the merchant belongs to the requested tenant
+      const merchantRow = await query('SELECT tenant_id FROM merchants WHERE id = $1', [merchantId])
+      if (merchantRow.rows.length === 0) return res.status(404).json({ message: 'Merchant not found.' })
+      if (String(merchantRow.rows[0].tenant_id) !== String(tenantId)) {
+        return res.status(403).json({ message: "Merchant does not belong to the specified tenant." })
+      }
+
+      try {
+        const result = await initiateCollection(merchantId, {
+          amount: Number(amount),
+          msisdn,
+          network,
+          narration,
+          payoutMsisdn: payoutMsisdn || payoutMobileNumber || accountNoOrMsisdn || null,
+          callback: callbackOverride || undefined
+        })
+
+        if (result.status !== 'FAILED') {
+          await query('UPDATE transactions SET manually_triggered = TRUE, initiated_by_user_id = $2 WHERE id = $1', [
+            result.transactionId,
+            req.user.id
+          ])
+        }
+
+        res.json({
+          id: result.transactionId,
+          internalReference: result.internalReference,
+          status: result.status,
+          paymentGatewayStatus: result.paymentGatewayStatus || result.status,
+          message: result.message || null
+        })
+      } catch (err) {
+        if (err instanceof CollectionRejectedError) return res.status(400).json({ message: err.message })
+        if (err.name === 'TenantCredentialsError') return res.status(400).json({ message: err.message })
+        throw err
+      }
+    })
+  )
 
 function mapTenant(row) {
   return {

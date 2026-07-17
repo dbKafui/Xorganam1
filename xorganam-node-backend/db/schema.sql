@@ -20,7 +20,7 @@ CREATE TYPE payout_mode AS ENUM ('AUTO_SWEEP', 'MANUAL');
 
 CREATE TYPE transaction_type AS ENUM ('COLLECTION', 'INTERNAL_TRANSFER', 'PAYOUT');
 
-CREATE TYPE transaction_status AS ENUM ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'FAILED');
+CREATE TYPE transaction_status AS ENUM ('PENDING', 'RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'FAILED');
 
 CREATE TYPE user_role AS ENUM ('PLATFORM_ADMIN', 'TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_OPERATOR', 'TENANT_VIEWER');
 
@@ -98,6 +98,7 @@ CREATE TABLE tenant_eganow_credentials (
     webhook_secret_encrypted        TEXT,
 
     eganow_base_url                 VARCHAR(255),
+    eganow_callback_url             VARCHAR(255),
 
     eganow_merchant_code            VARCHAR(100),
     is_enabled                      BOOLEAN NOT NULL DEFAULT FALSE,
@@ -226,7 +227,7 @@ CREATE TABLE transactions (
     parent_transaction_id   UUID REFERENCES transactions (id) ON DELETE SET NULL,
 
     type                    transaction_type NOT NULL,
-    status                  transaction_status NOT NULL DEFAULT 'RECEIVED',
+    status                  transaction_status NOT NULL DEFAULT 'PENDING',
 
     amount                  NUMERIC(18, 2) NOT NULL,
     fees                    NUMERIC(18, 2) NOT NULL DEFAULT 0,
@@ -235,6 +236,10 @@ CREATE TABLE transactions (
     internal_reference      VARCHAR(100) NOT NULL,
     eganow_reference         VARCHAR(150),
     eganow_transaction_id    VARCHAR(150),
+    payment_gateway_status   VARCHAR(100),
+    collection_msisdn        VARCHAR(30),
+    kyc_msisdn               VARCHAR(30),
+    payout_msisdn            VARCHAR(30),
 
     initiated_by_user_id     UUID REFERENCES users (id) ON DELETE SET NULL,
     manually_triggered        BOOLEAN NOT NULL DEFAULT FALSE,
@@ -248,6 +253,7 @@ CREATE TABLE transactions (
     completed_at              TIMESTAMPTZ,
 
     CONSTRAINT uq_transactions_internal_reference UNIQUE (internal_reference),
+    CONSTRAINT uq_transactions_parent_type UNIQUE (parent_transaction_id, type),
     CONSTRAINT fk_transactions_merchant_tenant
         FOREIGN KEY (tenant_id, merchant_id)
         REFERENCES merchants (tenant_id, id)
@@ -258,7 +264,7 @@ CREATE INDEX idx_transactions_tenant_merchant ON transactions (tenant_id, mercha
 CREATE INDEX idx_transactions_tenant_merchant_status ON transactions (tenant_id, merchant_id, status);
 CREATE INDEX idx_transactions_tenant_merchant_created ON transactions (tenant_id, merchant_id, created_at DESC);
 CREATE INDEX idx_transactions_tenant_created ON transactions (tenant_id, created_at DESC);
-CREATE INDEX idx_transactions_status ON transactions (status) WHERE status IN ('RECEIVED', 'SWEPT_INTERNAL');
+CREATE INDEX idx_transactions_status ON transactions (status) WHERE status IN ('PENDING', 'RECEIVED', 'SWEPT_INTERNAL');
 CREATE INDEX idx_transactions_eganow_reference ON transactions (eganow_reference);
 CREATE INDEX idx_transactions_parent ON transactions (parent_transaction_id);
 

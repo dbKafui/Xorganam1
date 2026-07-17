@@ -59,6 +59,7 @@ export default function OperatorTransactions() {
             <label>Status</label>
             <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1) }}>
               <option value="">All</option>
+              <option value="PENDING">Pending</option>
               <option value="RECEIVED">Received</option>
               <option value="SWEPT_INTERNAL">Swept internal</option>
               <option value="PAID_OUT">Paid out</option>
@@ -88,7 +89,7 @@ export default function OperatorTransactions() {
           <>
             <table className="ledger">
               <thead>
-                <tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th><th>Date</th></tr>
+                <tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway</th><th>Date</th></tr>
               </thead>
               <tbody>
                 {result.transactions.map((t) => (
@@ -97,6 +98,7 @@ export default function OperatorTransactions() {
                     <td>{t.type.replace('_', ' ')}</td>
                     <td className="mono">{money(t.amount)} {t.currency}</td>
                     <td><span className={`status-pill ${t.status.toLowerCase()}`}>{t.status.replace('_', ' ')}</span></td>
+                    <td className="mono">{t.paymentGatewayStatus || '—'}</td>
                     <td className="mono">{new Date(t.createdAt).toLocaleString()}</td>
                   </tr>
                 ))}

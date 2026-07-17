@@ -22,16 +22,19 @@ function scopeOrRespond(req, res, requestedTenantId) {
 merchantsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
-    const tenantId = scopeOrRespond(req, res, req.query.tenantId)
-    if (!tenantId) return
+    const listAllTenants = req.user.isPlatformAdmin && !req.query.tenantId
+    const tenantId = listAllTenants ? null : scopeOrRespond(req, res, req.query.tenantId)
+    if (!listAllTenants && !tenantId) return
 
     const { rows } = await query(
-      `SELECT m.id, m.display_name, m.mobile_money_number, m.network_provider, m.payout_mode,
+      `SELECT m.id, m.tenant_id, t.company_name AS tenant_company_name,
+              m.display_name, m.mobile_money_number, m.network_provider, m.payout_mode,
               m.eganow_collection_account_id, m.eganow_payout_account_id, m.is_active, m.onboarded_at,
               ms.allow_manual_control
          FROM merchants m
+         JOIN tenants t ON t.id = m.tenant_id
          LEFT JOIN merchant_settings ms ON ms.tenant_id = m.tenant_id AND ms.merchant_id = m.id
-        WHERE m.tenant_id = $1
+        WHERE ($1::uuid IS NULL OR m.tenant_id = $1)
         ORDER BY m.onboarded_at DESC`,
       [tenantId]
     )
@@ -151,6 +154,25 @@ merchantsRouter.put(
   })
 )
 
+merchantsRouter.delete(
+  '/:merchantId',
+  requireRole('TENANT_MANAGER'),
+  asyncHandler(async (req, res) => {
+    const existing = await query('SELECT tenant_id FROM merchants WHERE id = $1', [req.params.merchantId])
+    if (existing.rows.length === 0) return res.status(404).json({ message: 'Merchant not found.' })
+    if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
+
+    const txnCount = await query('SELECT COUNT(*)::int AS count FROM transactions WHERE merchant_id = $1', [req.params.merchantId])
+    if (txnCount.rows[0].count > 0) {
+      await query('UPDATE merchants SET is_active = FALSE WHERE id = $1', [req.params.merchantId])
+      return res.json({ deleted: false, isActive: false, message: 'Merchant has ledger history and was deactivated instead.' })
+    }
+
+    await query('DELETE FROM merchants WHERE id = $1', [req.params.merchantId])
+    res.json({ deleted: true })
+  })
+)
+
 merchantsRouter.put(
   '/:merchantId/settings',
   requireRole('TENANT_MANAGER'),
@@ -190,6 +212,8 @@ merchantsRouter.put(
 function mapMerchant(row) {
   return {
     id: row.id,
+    tenantId: row.tenant_id,
+    tenantCompanyName: row.tenant_company_name,
     displayName: row.display_name,
     mobileMoneyNumber: row.mobile_money_number,
     networkProvider: row.network_provider,

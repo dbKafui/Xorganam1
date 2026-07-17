@@ -11,7 +11,12 @@ export class ApiError extends Error {
 }
 
 function getToken() {
-  return localStorage.getItem(TOKEN_KEY)
+  const legacyToken = localStorage.getItem(TOKEN_KEY)
+  if (legacyToken) {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(USER_KEY)
+  }
+  return sessionStorage.getItem(TOKEN_KEY)
 }
 
 async function request(path, { method = 'GET', body, params, auth = false, isForm = false } = {}) {
@@ -66,15 +71,19 @@ export const operatorAuth = {
   login: (email, password) => request('/auth/login', { method: 'POST', body: { email, password } }),
   me: () => request('/auth/me', { auth: true }),
   saveSession: (result) => {
-    localStorage.setItem(TOKEN_KEY, result.token)
-    localStorage.setItem(USER_KEY, JSON.stringify(result.user))
+    sessionStorage.setItem(TOKEN_KEY, result.token)
+    sessionStorage.setItem(USER_KEY, JSON.stringify(result.user))
   },
   clearSession: () => {
+    sessionStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(USER_KEY)
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(USER_KEY)
   },
   getStoredUser: () => {
-    const stored = localStorage.getItem(USER_KEY)
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(USER_KEY)
+    const stored = sessionStorage.getItem(USER_KEY)
     return stored ? JSON.parse(stored) : null
   },
   hasToken: () => !!getToken()
@@ -105,6 +114,7 @@ export const operatorApi = {
   listTransactions: (params) => request('/transactions', { params: { ...params }, auth: true }),
   transactionDetail: (transactionId) => request(`/transactions/${transactionId}`, { auth: true }),
   collect: (payload) => request('/transactions/collect', { method: 'POST', body: payload, auth: true }),
+  collectForTenant: (tenantId, payload) => request(`/tenants/${tenantId}/collect`, { method: 'POST', body: payload, auth: true }),
   internalTransfer: (payload) => request('/transactions/internal-transfer', { method: 'POST', body: payload, auth: true }),
   payout: (payload) => request('/transactions/payout', { method: 'POST', body: payload, auth: true }),
   reconcile: (transactionId) => request(`/transactions/${transactionId}/reconcile`, { method: 'POST', auth: true }),

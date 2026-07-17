@@ -28,7 +28,7 @@ export default function TransactionDetail() {
     setReconciling(true)
     try {
       const updated = await transactionsApi.reconcile(transactionId)
-      setNotice(updated.status === 'RECEIVED' ? 'Still pending upstream — nothing changed yet.' : `Reconciled: now ${updated.status}.`)
+      setNotice(updated.status === 'PENDING' ? 'Still pending upstream — nothing changed yet.' : `Reconciled: now ${updated.status}.`)
       load()
     } catch (err) {
       setError(err.message)
@@ -47,9 +47,10 @@ export default function TransactionDetail() {
         <div>
           <h1 className="mono">{txn.internalReference}</h1>
           <p>{txn.type.replace('_', ' ')} · <StatusChip status={txn.status} /></p>
+          {txn.merchantName && <p>Merchant: <strong>{txn.merchantName}</strong></p>}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {txn.status === 'RECEIVED' && (
+          {txn.status === 'PENDING' && (
             <button className="btn btn-secondary" onClick={handleReconcile} disabled={reconciling}>
               {reconciling ? 'Checking…' : 'Check status now'}
             </button>
@@ -70,6 +71,9 @@ export default function TransactionDetail() {
         </div>
         <div className="form-grid single" style={{ marginTop: 16 }}>
           <div><strong>Eganow reference:</strong> <span className="mono">{txn.eganowReference || '—'}</span></div>
+          <div><strong>Payment gateway status:</strong> <span className="mono">{txn.paymentGatewayStatus || '—'}</span></div>
+          {txn.collectionMsisdn && <div><strong>Collection MSISDN:</strong> <span className="mono">{txn.collectionMsisdn}</span></div>}
+          {txn.kycMsisdn && <div><strong>KYC MSISDN:</strong> <span className="mono">{txn.kycMsisdn}</span></div>}
           {txn.failureReason && <div><strong>Failure reason:</strong> {txn.failureReason}</div>}
           <div><strong>Notification sent:</strong> {txn.notificationSent ? 'Yes' : 'No'}</div>
           <div><strong>Created:</strong> <span className="mono">{new Date(txn.createdAt).toLocaleString()}</span></div>
@@ -81,7 +85,7 @@ export default function TransactionDetail() {
         <div className="panel">
           <h2>Linked transactions</h2>
           <table className="ledger">
-            <thead><tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th></tr></thead>
+            <thead><tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway</th></tr></thead>
             <tbody>
               {txn.childTransactions.map((c) => (
                 <tr key={c.id}>
@@ -89,6 +93,7 @@ export default function TransactionDetail() {
                   <td>{c.type.replace('_', ' ')}</td>
                   <td className="mono">{money(c.amount)} {c.currency}</td>
                   <td><StatusChip status={c.status} /></td>
+                  <td className="mono">{c.paymentGatewayStatus || '—'}</td>
                 </tr>
               ))}
             </tbody>

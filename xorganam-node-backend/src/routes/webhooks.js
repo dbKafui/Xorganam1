@@ -215,7 +215,7 @@ function mapStatus(eganowStatus) {
     case 'declined':
       return 'FAILED'
     default:
-      return 'RECEIVED'
+      return 'PENDING'
   }
 }
 
@@ -235,8 +235,8 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
     if (existingByRef.rows.length > 0) {
       const existing = existingByRef.rows[0]
       
-      // If we already processed this webhook (status != RECEIVED), it's a duplicate
-      if (existing.status !== 'RECEIVED') {
+      // If we already processed this webhook, it's a duplicate.
+      if (existing.status !== 'PENDING') {
         return { id: existing.id, alreadyProcessed: true }
       }
 
@@ -244,9 +244,12 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
       await client.query(
         `UPDATE transactions
          SET status = $2, eganow_transaction_id = COALESCE($3, eganow_transaction_id),
-             raw_webhook_payload = $4, completed_at = now(), updated_at = now()
+             payment_gateway_status = $5,
+             raw_webhook_payload = $4,
+             completed_at = CASE WHEN $2 IN ('RECEIVED', 'FAILED') THEN now() ELSE completed_at END,
+             updated_at = now()
          WHERE id = $1`,
-        [existing.id, mappedStatus, eganowTransactionId, JSON.stringify(rawPayload)]
+        [existing.id, mappedStatus, eganowTransactionId, JSON.stringify(rawPayload), status]
       )
 
       return { id: existing.id, alreadyProcessed: false }
@@ -264,16 +267,19 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
     if (existingByTxnId.rows.length > 0) {
       const existing = existingByTxnId.rows[0]
       
-      if (existing.status !== 'RECEIVED') {
+      if (existing.status !== 'PENDING') {
         return { id: existing.id, alreadyProcessed: true }
       }
 
       await client.query(
         `UPDATE transactions
          SET status = $2, eganow_reference = COALESCE($3, eganow_reference),
-             raw_webhook_payload = $4, completed_at = now(), updated_at = now()
+             payment_gateway_status = $5,
+             raw_webhook_payload = $4,
+             completed_at = CASE WHEN $2 IN ('RECEIVED', 'FAILED') THEN now() ELSE completed_at END,
+             updated_at = now()
          WHERE id = $1`,
-        [existing.id, mappedStatus, eganowReference, JSON.stringify(rawPayload)]
+        [existing.id, mappedStatus, eganowReference, JSON.stringify(rawPayload), status]
       )
 
       return { id: existing.id, alreadyProcessed: false }
@@ -288,8 +294,9 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
       `INSERT INTO transactions
          (tenant_id, merchant_id, type, status, amount, currency,
           internal_reference, eganow_reference, eganow_transaction_id,
-          raw_webhook_payload, completed_at)
-       VALUES ($1, $2, 'COLLECTION', $3, $4, $5, $6, $7, $8, $9, now())
+          payment_gateway_status, raw_webhook_payload, completed_at)
+       VALUES ($1, $2, 'COLLECTION', $3, $4, $5, $6, $7, $8, $9, $10,
+               CASE WHEN $3 IN ('RECEIVED', 'FAILED') THEN now() ELSE NULL END)
        RETURNING id`,
       [
         tenantId,
@@ -300,6 +307,7 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
         internalReference,
         eganowReference,
         eganowTransactionId,
+        status,
         JSON.stringify(rawPayload)
       ]
     )

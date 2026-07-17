@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { publicApi } from '../api/client'
 
@@ -33,6 +33,8 @@ export default function Checkout() {
   const [stage, setStage] = useState('idle')
   const [reference, setReference] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
+  const [paymentGatewayStatus, setPaymentGatewayStatus] = useState('')
+  const pollingTimerRef = useRef(null)
 
   useEffect(() => {
     if (!merchantId) {
@@ -48,6 +50,11 @@ export default function Checkout() {
   async function handleSubmit(e) {
     e.preventDefault()
     setFormError('')
+
+    if (!merchant?.acceptingPayments) {
+      setFormError('This merchant is not currently accepting payments.')
+      return
+    }
 
     const numericAmount = Number(amount)
     if (!numericAmount || numericAmount <= 0) {
@@ -68,18 +75,94 @@ export default function Checkout() {
         return
       }
 
-      // This calls Eganow's Collection endpoint, which sends the real payment prompt
-      // to the customer's phone via their network. We don't build or simulate that
-      // prompt ourselves - this page only starts it and shows what we were told back.
       const result = await publicApi.collect({ merchantId, amount: numericAmount, msisdn: normalizedMsisdn })
       setReference(result.reference)
-      setStatusMessage(result.message)
-      setStage(result.status === 'FAILED' ? 'failed' : 'success')
+      setPaymentGatewayStatus(result.paymentGatewayStatus || result.status || '')
+      
+      if (result.status === 'FAILED') {
+        setStatusMessage(result.message || `Payment could not be started: ${result.failureReason || 'Unknown error'}`)
+        setStage('failed')
+      } else {
+        setStatusMessage(result.message || 'Payment prompt sent. Waiting for approval on your phone…')
+        setStage('pending')
+      }
     } catch (err) {
       setFormError(err.message)
       setStage('idle')
     }
   }
+
+  useEffect(() => {
+    if (!reference || stage !== 'pending') return
+
+    let cancelled = false
+    let attempts = 0
+    const MAX_ATTEMPTS = 20
+    const POLL_INTERVAL = 3000
+
+    async function pollStatus() {
+      if (cancelled) return
+
+      try {
+        const result = await publicApi.getStatus(reference)
+        if (cancelled) return
+
+        const status = String(result.status || '').toUpperCase()
+        setPaymentGatewayStatus(result.paymentGatewayStatus || result.status || '')
+
+        if (status === 'PENDING') {
+          attempts += 1
+          const secondsLeft = Math.max(0, (MAX_ATTEMPTS - attempts) * 3)
+          if (attempts >= MAX_ATTEMPTS) {
+            setStatusMessage(`Payment is processing. Check back in a few minutes, or refresh the page to check status.`)
+            return
+          }
+          const attemptsLeft = MAX_ATTEMPTS - attempts
+          setStatusMessage(`Payment prompt sent. Waiting for approval on your phone. Checking again in ${secondsLeft}s…`)
+          pollingTimerRef.current = window.setTimeout(pollStatus, POLL_INTERVAL)
+          return
+        }
+
+        if (status === 'RECEIVED' || status === 'PAID_OUT' || status === 'SWEPT_INTERNAL') {
+          setStatusMessage(result.failureReason ? result.failureReason : 'Payment completed successfully!')
+          setStage('success')
+          return
+        }
+
+        if (status === 'FAILED') {
+          setStatusMessage(result.failureReason || 'Payment was declined or cancelled.')
+          setStage('failed')
+          return
+        }
+
+        setStatusMessage(`Payment status: ${result.status || 'unknown'}. Please wait…`)
+        attempts += 1
+        if (attempts < MAX_ATTEMPTS) {
+          pollingTimerRef.current = window.setTimeout(pollStatus, POLL_INTERVAL)
+        } else {
+          setStatusMessage(`Payment is processing. Refresh the page to check status.`)
+        }
+      } catch (err) {
+        if (cancelled) return
+        setStatusMessage(err.message || 'Unable to check payment status.')
+        attempts += 1
+        if (attempts < MAX_ATTEMPTS) {
+          pollingTimerRef.current = window.setTimeout(pollStatus, POLL_INTERVAL)
+        } else {
+          setStage('failed')
+        }
+      }
+    }
+
+    pollStatus()
+
+    return () => {
+      cancelled = true
+      if (pollingTimerRef.current) {
+        clearTimeout(pollingTimerRef.current)
+      }
+    }
+  }, [reference, stage])
 
   function reset() {
     setStage('idle')
@@ -87,6 +170,7 @@ export default function Checkout() {
     setMsisdn('')
     setReference('')
     setStatusMessage('')
+    setPaymentGatewayStatus('')
   }
 
   return (
@@ -155,6 +239,8 @@ export default function Checkout() {
                 />
               </div>
 
+              <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0' }}>Payment via {merchant?.networkProvider || 'mobile money'}</p>
+
               <button type="submit" className="pay-btn">Pay now</button>
             </form>
           </>
@@ -167,15 +253,31 @@ export default function Checkout() {
           </div>
         )}
 
-        {stage === 'success' && (
+        {stage === 'pending' && (
           <>
-            <div className="status-banner success">
-              <span className="status-icon">✓</span>
-              <span>{statusMessage || 'Payment started — check your phone to approve the prompt.'}</span>
+            <div className="status-banner pending">
+              <span className="spinner" />
+              <span>{statusMessage || 'Payment prompt sent. Waiting for approval on your phone…'}</span>
             </div>
             <div className="receipt">
               <div className="receipt-row"><span>Amount</span><span className="mono">GHS {Number(amount).toFixed(2)}</span></div>
               <div className="receipt-row"><span>Reference</span><span className="mono">{reference}</span></div>
+              <div className="receipt-row"><span>Gateway status</span><span className="mono">{paymentGatewayStatus || 'PENDING'}</span></div>
+            </div>
+            <button className="secondary-btn" onClick={reset}>Start another payment</button>
+          </>
+        )}
+
+        {stage === 'success' && (
+          <>
+            <div className="status-banner success">
+              <span className="status-icon">✓</span>
+              <span>{statusMessage || 'Payment completed successfully.'}</span>
+            </div>
+            <div className="receipt">
+              <div className="receipt-row"><span>Amount</span><span className="mono">GHS {Number(amount).toFixed(2)}</span></div>
+              <div className="receipt-row"><span>Reference</span><span className="mono">{reference}</span></div>
+              <div className="receipt-row"><span>Gateway status</span><span className="mono">{paymentGatewayStatus || 'SUCCESSFUL'}</span></div>
             </div>
             <button className="secondary-btn" onClick={reset}>Make another payment</button>
           </>

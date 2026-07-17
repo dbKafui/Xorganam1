@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { tenantsApi } from '../../api/tenants'
 import { merchantsApi } from '../../api/merchants'
 import StatusChip from '../../components/StatusChip'
@@ -8,21 +8,41 @@ const TABS = ['overview', 'kyc', 'eganow', 'notifications']
 
 export default function TenantDetail() {
   const { tenantId } = useParams()
+  const navigate = useNavigate()
   const [tenant, setTenant] = useState(null)
+  const [tenantForm, setTenantForm] = useState(null)
   const [merchants, setMerchants] = useState([])
+  const [merchantForm, setMerchantForm] = useState({
+    displayName: '',
+    mobileMoneyNumber: '',
+    networkProvider: 'MTNGH',
+    payoutMode: 'MANUAL',
+    eganowCollectionAccountId: '',
+    eganowPayoutAccountId: ''
+  })
+  const [editMerchantForm, setEditMerchantForm] = useState(null)
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [rejectReasons, setRejectReasons] = useState({})
 
   const load = useCallback(() => {
-    tenantsApi.detail(tenantId).then(setTenant).catch((err) => setError(err.message))
+    tenantsApi.detail(tenantId).then((t) => {
+      setTenant(t)
+      setTenantForm({
+        companyName: t.companyName,
+        contactPhone: t.contactPhone,
+        contactEmail: t.contactEmail,
+        status: t.status
+      })
+    }).catch((err) => setError(err.message))
     tenantsApi.getConfig(tenantId).then((cfg) => {
       setEganowForm((f) => ({
         ...f,
         serviceName: cfg.eganow_merchant_code || f.serviceName,
         isEnabled: cfg.eganow_enabled ?? f.isEnabled,
-        eganowBaseUrl: cfg.eganow_base_url || f.eganowBaseUrl
+        eganowBaseUrl: cfg.eganow_base_url || f.eganowBaseUrl,
+        eganowCallbackUrl: cfg.eganow_callback_url || f.eganowCallbackUrl
       }))
     }).catch(() => {})
     merchantsApi.list(tenantId).then(setMerchants).catch(() => {})
@@ -47,7 +67,90 @@ export default function TenantDetail() {
     }
   }
 
-  const [eganowForm, setEganowForm] = useState({ apiUsername: '', apiPassword: '', eganowBaseUrl: '', xAuth: '', webhookSecret: '', serviceName: '', isEnabled: true })
+  async function saveTenant(e) {
+    e.preventDefault()
+    setError('')
+    setNotice('')
+    try {
+      const updated = await tenantsApi.update(tenantId, tenantForm)
+      setTenant(updated)
+      setTenantForm({
+        companyName: updated.companyName,
+        contactPhone: updated.contactPhone,
+        contactEmail: updated.contactEmail,
+        status: updated.status
+      })
+      setNotice('Tenant updated.')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function deleteTenant() {
+    setError('')
+    setNotice('')
+    try {
+      const result = await tenantsApi.remove(tenantId)
+      if (result.deleted) {
+        navigate('/tenants')
+      } else {
+        setNotice(result.message || 'Tenant suspended.')
+        load()
+      }
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function createMerchant(e) {
+    e.preventDefault()
+    setError('')
+    setNotice('')
+    try {
+      await merchantsApi.create({ ...merchantForm, tenantId })
+      setNotice('Merchant created.')
+      setMerchantForm({
+        displayName: '',
+        mobileMoneyNumber: '',
+        networkProvider: 'MTNGH',
+        payoutMode: 'MANUAL',
+        eganowCollectionAccountId: '',
+        eganowPayoutAccountId: ''
+      })
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function updateMerchant(e) {
+    e.preventDefault()
+    if (!editMerchantForm) return
+    setError('')
+    setNotice('')
+    try {
+      await merchantsApi.update(editMerchantForm.id, editMerchantForm)
+      setNotice('Merchant updated.')
+      setEditMerchantForm(null)
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function deleteMerchant(merchantId) {
+    setError('')
+    setNotice('')
+    try {
+      const result = await merchantsApi.remove(merchantId)
+      setNotice(result.message || 'Merchant deleted.')
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const [eganowForm, setEganowForm] = useState({ apiUsername: '', apiPassword: '', eganowBaseUrl: '', eganowCallbackUrl: '', xAuth: '', webhookSecret: '', serviceName: '', isEnabled: true })
   const [notifForm, setNotifForm] = useState({
     smsProviderName: '', smsProviderKey: '', smsSenderId: '', smsEnabled: true,
     emailProviderName: '', emailProviderKey: '', emailFromAddress: '', emailEnabled: false
@@ -79,7 +182,7 @@ export default function TenantDetail() {
     }
   }
 
-  if (!tenant) {
+  if (!tenant || !tenantForm) {
     return <div className="empty-state">{error || 'Loading…'}</div>
   }
 
@@ -90,9 +193,10 @@ export default function TenantDetail() {
           <h1>{tenant.companyName}</h1>
           <p>Status: <StatusChip status={tenant.status} /></p>
         </div>
-        <Link to={`/transactions?tenantId=${tenantId}`} className="btn btn-secondary">
-          View transactions
-        </Link>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Link to={`/transactions?tenantId=${tenantId}`} className="btn btn-secondary">View transactions</Link>
+          <button className="btn btn-danger" onClick={deleteTenant}>Delete</button>
+        </div>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
@@ -109,10 +213,37 @@ export default function TenantDetail() {
       {tab === 'overview' && (
         <>
           <div className="panel">
-            <h2>Contact</h2>
+            <h2>Tenant details</h2>
+            <form onSubmit={saveTenant}>
+              <div className="form-grid">
+                <div className="field">
+                  <label>Company</label>
+                  <input value={tenantForm.companyName} onChange={(e) => setTenantForm((f) => ({ ...f, companyName: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Phone</label>
+                  <input value={tenantForm.contactPhone} onChange={(e) => setTenantForm((f) => ({ ...f, contactPhone: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Email</label>
+                  <input type="email" value={tenantForm.contactEmail} onChange={(e) => setTenantForm((f) => ({ ...f, contactEmail: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Status</label>
+                  <select value={tenantForm.status} onChange={(e) => setTenantForm((f) => ({ ...f, status: e.target.value }))}>
+                    <option value="PENDING">Pending</option>
+                    <option value="UNDER_REVIEW">Under review</option>
+                    <option value="ACTIVE">Active</option>
+                    <option value="REJECTED">Rejected</option>
+                    <option value="SUSPENDED">Suspended</option>
+                  </select>
+                </div>
+              </div>
+              <div className="form-actions">
+                <button className="btn btn-primary">Save tenant</button>
+              </div>
+            </form>
             <div className="form-grid single">
-              <div><strong>Phone:</strong> {tenant.contactPhone}</div>
-              <div><strong>Email:</strong> {tenant.contactEmail}</div>
               <div><strong>Registered:</strong> <span className="mono">{new Date(tenant.createdAt).toLocaleString()}</span></div>
               {tenant.approvedAt && <div><strong>Approved:</strong> <span className="mono">{new Date(tenant.approvedAt).toLocaleString()}</span></div>}
             </div>
@@ -120,12 +251,90 @@ export default function TenantDetail() {
 
           <div className="panel">
             <h2>Merchants ({merchants.length})</h2>
+            <form onSubmit={createMerchant} style={{ marginBottom: 16 }}>
+              <div className="form-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+                <div className="field">
+                  <label>Name</label>
+                  <input required value={merchantForm.displayName} onChange={(e) => setMerchantForm((f) => ({ ...f, displayName: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>MoMo number</label>
+                  <input required value={merchantForm.mobileMoneyNumber} onChange={(e) => setMerchantForm((f) => ({ ...f, mobileMoneyNumber: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Network</label>
+                  <select value={merchantForm.networkProvider} onChange={(e) => setMerchantForm((f) => ({ ...f, networkProvider: e.target.value }))}>
+                    <option value="MTNGH">MTN</option>
+                    <option value="TCELGH">Vodafone</option>
+                    <option value="ATGH">AirtelTigo</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Payout mode</label>
+                  <select value={merchantForm.payoutMode} onChange={(e) => setMerchantForm((f) => ({ ...f, payoutMode: e.target.value }))}>
+                    <option value="MANUAL">Collection only</option>
+                    <option value="AUTO_SWEEP">Collect for me</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Collection account</label>
+                  <input required value={merchantForm.eganowCollectionAccountId} onChange={(e) => setMerchantForm((f) => ({ ...f, eganowCollectionAccountId: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Payout account</label>
+                  <input required value={merchantForm.eganowPayoutAccountId} onChange={(e) => setMerchantForm((f) => ({ ...f, eganowPayoutAccountId: e.target.value }))} />
+                </div>
+              </div>
+              <div className="form-actions">
+                <button className="btn btn-primary">Add merchant</button>
+              </div>
+            </form>
+            {editMerchantForm && (
+              <form onSubmit={updateMerchant} style={{ marginBottom: 16 }}>
+                <div className="form-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+                  <div className="field">
+                    <label>Name</label>
+                    <input required value={editMerchantForm.displayName} onChange={(e) => setEditMerchantForm((f) => ({ ...f, displayName: e.target.value }))} />
+                  </div>
+                  <div className="field">
+                    <label>MoMo number</label>
+                    <input required value={editMerchantForm.mobileMoneyNumber} onChange={(e) => setEditMerchantForm((f) => ({ ...f, mobileMoneyNumber: e.target.value }))} />
+                  </div>
+                  <div className="field">
+                    <label>Network</label>
+                    <select value={editMerchantForm.networkProvider} onChange={(e) => setEditMerchantForm((f) => ({ ...f, networkProvider: e.target.value }))}>
+                      <option value="MTNGH">MTN</option>
+                      <option value="TCELGH">Vodafone</option>
+                      <option value="ATGH">AirtelTigo</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Payout mode</label>
+                    <select value={editMerchantForm.payoutMode} onChange={(e) => setEditMerchantForm((f) => ({ ...f, payoutMode: e.target.value }))}>
+                      <option value="MANUAL">Collection only</option>
+                      <option value="AUTO_SWEEP">Collect for me</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Status</label>
+                    <select value={editMerchantForm.isActive ? 'true' : 'false'} onChange={(e) => setEditMerchantForm((f) => ({ ...f, isActive: e.target.value === 'true' }))}>
+                      <option value="true">Active</option>
+                      <option value="false">Inactive</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="form-actions">
+                  <button className="btn btn-primary">Save changes</button>
+                  <button type="button" className="btn btn-secondary" onClick={() => setEditMerchantForm(null)}>Cancel</button>
+                </div>
+              </form>
+            )}
             {merchants.length === 0 ? (
               <div className="empty-state">No merchants onboarded yet.</div>
             ) : (
               <table className="ledger">
                 <thead>
-                  <tr><th>Name</th><th>MoMo number</th><th>Payout mode</th><th>Status</th></tr>
+                  <tr><th>Name</th><th>MoMo number</th><th>Payout mode</th><th>Status</th><th></th></tr>
                 </thead>
                 <tbody>
                   {merchants.map((m) => (
@@ -133,7 +342,11 @@ export default function TenantDetail() {
                       <td>{m.displayName}</td>
                       <td className="mono">{m.mobileMoneyNumber}</td>
                       <td>{m.payoutMode === 'AUTO_SWEEP' ? 'Collect for me' : 'Collection only'}</td>
-                      <td><span className={`chip ${m.isActive ? 'chip-success' : 'chip-failed'}`}>{m.isActive ? 'Active' : 'Inactive'}</span></td>
+                      <td>{m.isActive ? 'Active' : 'Inactive'}</td>
+                      <td style={{ display: 'flex', gap: 6 }}>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setEditMerchantForm(m)}>Edit</button>
+                        <button className="btn btn-danger btn-sm" onClick={() => deleteMerchant(m.id)}>Delete</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -202,6 +415,10 @@ export default function TenantDetail() {
             <div className="field">
               <label>Eganow API base URL</label>
               <input value={eganowForm.eganowBaseUrl} onChange={(e) => setEganowForm((f) => ({ ...f, eganowBaseUrl: e.target.value }))} placeholder="Leave blank to keep current value" />
+            </div>
+            <div className="field">
+              <label>Webhook callback URL</label>
+              <input value={eganowForm.eganowCallbackUrl} onChange={(e) => setEganowForm((f) => ({ ...f, eganowCallbackUrl: e.target.value }))} placeholder="e.g. https://your-domain.com/api/v1/webhooks/eganow" />
             </div>
             <div className="field">
               <label>x-Auth</label>

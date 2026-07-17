@@ -6,15 +6,36 @@ import StatusChip from '../../components/StatusChip'
 export default function TenantsList() {
   const [tenants, setTenants] = useState([])
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(true)
+  const [form, setForm] = useState({ companyName: '', contactPhone: '', contactEmail: '', status: 'PENDING' })
 
-  useEffect(() => {
+  function load() {
+    setLoading(true)
     tenantsApi
       .list()
       .then(setTenants)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
   }, [])
+
+  async function createTenant(e) {
+    e.preventDefault()
+    setError('')
+    setNotice('')
+    try {
+      await tenantsApi.create(form)
+      setNotice('Tenant created.')
+      setForm({ companyName: '', contactPhone: '', contactEmail: '', status: 'PENDING' })
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
 
   return (
     <div>
@@ -29,6 +50,37 @@ export default function TenantsList() {
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
+      {notice && <div className="alert alert-success">{notice}</div>}
+
+      <form className="panel" onSubmit={createTenant}>
+        <h2>Add tenant</h2>
+        <div className="form-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+          <div className="field">
+            <label>Company</label>
+            <input required value={form.companyName} onChange={(e) => setForm((f) => ({ ...f, companyName: e.target.value }))} />
+          </div>
+          <div className="field">
+            <label>Phone</label>
+            <input required value={form.contactPhone} onChange={(e) => setForm((f) => ({ ...f, contactPhone: e.target.value }))} />
+          </div>
+          <div className="field">
+            <label>Email</label>
+            <input required type="email" value={form.contactEmail} onChange={(e) => setForm((f) => ({ ...f, contactEmail: e.target.value }))} />
+          </div>
+          <div className="field">
+            <label>Status</label>
+            <select value={form.status} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}>
+              <option value="PENDING">Pending</option>
+              <option value="UNDER_REVIEW">Under review</option>
+              <option value="ACTIVE">Active</option>
+              <option value="SUSPENDED">Suspended</option>
+            </select>
+          </div>
+        </div>
+        <div className="form-actions">
+          <button className="btn btn-primary">Create tenant</button>
+        </div>
+      </form>
 
       <div className="panel">
         {loading ? (

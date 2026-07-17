@@ -13,6 +13,7 @@ import OperatorMerchantDetail from './pages/operator/OperatorMerchantDetail'
 import OperatorTransactions from './pages/operator/OperatorTransactions'
 import OperatorTransactionDetail from './pages/operator/OperatorTransactionDetail'
 import OperatorInitiateCollection from './pages/operator/OperatorInitiateCollection'
+import OperatorReports from './pages/operator/OperatorReports'
 import OperatorTeam from './pages/operator/OperatorTeam'
 import OperatorAccount from './pages/operator/OperatorAccount'
 
@@ -40,6 +41,7 @@ export default function App() {
             <Route path="transactions" element={<OperatorTransactions />} />
             <Route path="transactions/new" element={<OperatorInitiateCollection />} />
             <Route path="transactions/:transactionId" element={<OperatorTransactionDetail />} />
+            <Route path="reports" element={<OperatorReports />} />
             <Route path="team" element={<OperatorTeam />} />
             <Route path="account" element={<OperatorAccount />} />
           </Route>

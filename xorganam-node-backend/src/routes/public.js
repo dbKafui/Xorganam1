@@ -8,11 +8,6 @@ import { initiateCollection, CollectionRejectedError } from '../services/collect
 
 export const publicRouter = Router()
 
-function getEganowCallbackUrl(req) {
-  const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim()
-  return process.env.EGANOW_CALLBACK_URL || `${proto}://${req.get('host')}/api/v1/webhooks/eganow`
-}
-
 // =====================================================================
 // Operator (Tenant) self-registration - the business holding Eganow
 // credentials and managing many market-woman Merchants underneath it.
@@ -111,7 +106,7 @@ publicRouter.get(
 publicRouter.post(
   '/collect',
   asyncHandler(async (req, res) => {
-    const { merchantId, amount, msisdn, network } = req.body || {}
+    const { merchantId, amount, msisdn, network, callback } = req.body || {}
 
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
 
@@ -121,12 +116,13 @@ publicRouter.post(
         msisdn,
         network,
         narration: 'Customer checkout payment',
-        callback: getEganowCallbackUrl(req)
+        callback: callback || undefined
       })
 
       res.json({
         reference: result.internalReference,
         status: result.status,
+        paymentGatewayStatus: result.paymentGatewayStatus || result.status,
         failureReason: result.status === 'FAILED' ? result.failureReason || null : null,
         message:
           result.status === 'FAILED'
@@ -149,7 +145,7 @@ publicRouter.get(
     // an acceptable ownership check for a status-only read with no side
     // effects - no MSISDN needs to be persisted/compared for this schema.
     const { rows } = await query(
-      `SELECT internal_reference, status, amount, failure_reason FROM transactions WHERE internal_reference = $1`,
+      `SELECT internal_reference, status, amount, payment_gateway_status, failure_reason FROM transactions WHERE internal_reference = $1`,
       [req.params.reference]
     )
 
@@ -159,6 +155,7 @@ publicRouter.get(
     res.json({
       reference: txn.internal_reference,
       status: txn.status,
+      paymentGatewayStatus: txn.payment_gateway_status,
       amount: txn.amount,
       failureReason: txn.status === 'FAILED' ? txn.failure_reason : null
     })

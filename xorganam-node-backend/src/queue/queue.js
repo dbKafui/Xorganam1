@@ -26,11 +26,12 @@ function createRedisConnection() {
 
   connection.on('error', (err) => {
     connectError = err
-    console.warn('[queue] Redis error:', err.message)
+    console.error('[queue] Redis error:', err.message)
   })
 
   connection.on('connect', () => {
     connectError = null
+    console.log('[queue] Redis connection established')
   })
 
   return connection
@@ -42,6 +43,13 @@ export function getRedisConnection() {
 
 export const COLLECT_FOR_ME_QUEUE = 'collect-for-me'
 export const COLLECTION_STATUS_POLL_QUEUE = 'collection-status-poll'
+
+export function getRedisHealth() {
+  return {
+    available: !connectError,
+    error: connectError?.message || null
+  }
+}
 
 function makeSafeJobId(prefix, id) {
   const cleanId = String(id || '').replace(/:/g, '-').replace(/\s+/g, '_')
@@ -90,7 +98,7 @@ export async function enqueueCollectForMeJob(jobData) {
     return null
   }
 
-    try {
+  try {
     return await queue.add('process-collection', jobData, {
       // Idempotent: a redelivered webhook for the same transaction won't
       // queue a duplicate sweep+payout job. Use a sanitized jobId

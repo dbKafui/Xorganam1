@@ -5,13 +5,15 @@ const AuthContext = createContext(null)
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
-    const stored = localStorage.getItem('xorganam_user')
+    localStorage.removeItem('xorganam_token')
+    localStorage.removeItem('xorganam_user')
+    const stored = sessionStorage.getItem('xorganam_user')
     return stored ? JSON.parse(stored) : null
   })
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    const token = localStorage.getItem('xorganam_token')
+    const token = sessionStorage.getItem('xorganam_token')
     if (!token) {
       setReady(true)
       return
@@ -20,17 +22,17 @@ export function AuthProvider({ children }) {
       .me()
       .then((profile) => {
         if (!profile.isPlatformAdmin) {
-          localStorage.removeItem('xorganam_token')
-          localStorage.removeItem('xorganam_user')
+          sessionStorage.removeItem('xorganam_token')
+          sessionStorage.removeItem('xorganam_user')
           setUser(null)
           return
         }
         setUser(profile)
-        localStorage.setItem('xorganam_user', JSON.stringify(profile))
+        sessionStorage.setItem('xorganam_user', JSON.stringify(profile))
       })
       .catch(() => {
-        localStorage.removeItem('xorganam_token')
-        localStorage.removeItem('xorganam_user')
+        sessionStorage.removeItem('xorganam_token')
+        sessionStorage.removeItem('xorganam_user')
         setUser(null)
       })
       .finally(() => setReady(true))
@@ -45,13 +47,15 @@ export function AuthProvider({ children }) {
       )
     }
 
-    localStorage.setItem('xorganam_token', result.token)
-    localStorage.setItem('xorganam_user', JSON.stringify(result.user))
+    sessionStorage.setItem('xorganam_token', result.token)
+    sessionStorage.setItem('xorganam_user', JSON.stringify(result.user))
     setUser(result.user)
     return result.user
   }, [])
 
   const logout = useCallback(() => {
+    sessionStorage.removeItem('xorganam_token')
+    sessionStorage.removeItem('xorganam_user')
     localStorage.removeItem('xorganam_token')
     localStorage.removeItem('xorganam_user')
     setUser(null)

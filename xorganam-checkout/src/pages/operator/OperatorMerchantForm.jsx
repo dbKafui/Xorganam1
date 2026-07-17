@@ -6,7 +6,7 @@ import { operatorApi } from '../../api/client'
 const initialForm = {
   displayName: '',
   mobileMoneyNumber: '',
-  networkProvider: 'MTN',
+  networkProvider: 'MTNGH',
   payoutMode: 'AUTO_SWEEP',
   eganowCollectionAccountId: '',
   eganowPayoutAccountId: ''
@@ -63,9 +63,9 @@ export default function OperatorMerchantForm() {
           <div className="field">
             <label>Network</label>
             <select value={form.networkProvider} onChange={set('networkProvider')}>
-              <option value="MTN">MTN</option>
-              <option value="Vodafone">Vodafone</option>
-              <option value="AirtelTigo">AirtelTigo</option>
+              <option value="MTNGH">MTN</option>
+              <option value="TCELGH">Vodafone</option>
+              <option value="ATGH">AirtelTigo</option>
             </select>
           </div>
         </div>

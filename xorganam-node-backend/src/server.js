@@ -14,6 +14,8 @@ import { reportsRouter } from './routes/reports.js'
 import { usersRouter } from './routes/users.js'
 import { UPLOAD_ROOT } from './services/fileStorage.js'
 import { ForbiddenError } from './middleware/auth.js'
+import { getRedisConnection } from './queue/queue.js'
+import './workers/eganowTokenRefreshWorker.js'
 
 const app = express()
 
@@ -44,9 +46,12 @@ app.use('/kyc-uploads', express.static(UPLOAD_ROOT))
 app.get('/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1')
+    const redis = getRedisConnection()
+    await redis.ping()
     res.json({ status: 'ok' })
   } catch (err) {
-    res.status(503).json({ status: 'db_unreachable', error: err.message })
+    console.error('[health] dependency check failed', err)
+    res.status(503).json({ status: 'unhealthy', error: err.message })
   }
 })
 
@@ -66,6 +71,12 @@ const registrationLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many registration attempts, please try again later.' }
+})
+
+// Log all incoming HTTP requests for debugging frontend → backend flow
+app.use((req, res, next) => {
+  console.log(`[http] ${req.method} ${req.path}`)
+  next()
 })
 
 app.use('/api/v1/webhooks', webhooksRouter)

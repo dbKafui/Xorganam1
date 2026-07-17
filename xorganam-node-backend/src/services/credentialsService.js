@@ -30,6 +30,7 @@ export async function getTenantEganowContext(tenantId) {
             c.eganow_client_secret_encrypted,
             c.eganow_access_token_encrypted,
               c.eganow_base_url,
+              c.eganow_callback_url,
             c.webhook_secret_encrypted,
             c.eganow_merchant_code
        FROM tenants t
@@ -51,7 +52,8 @@ export async function getTenantEganowContext(tenantId) {
   return {
     tenantId: row.tenant_id,
     companyName: row.company_name,
-      baseUrl: row.eganow_base_url,
+    baseUrl: row.eganow_base_url,
+    callbackUrl: row.eganow_callback_url || null,
     serviceName: row.eganow_merchant_code,
     apiUsername: decrypt(row.eganow_api_key_encrypted, row.api_key_salt),
     apiPassword: decrypt(row.eganow_client_secret_encrypted, row.api_key_salt),

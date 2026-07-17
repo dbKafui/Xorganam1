@@ -114,9 +114,9 @@ export default function OperatorMerchantDetail() {
           <div className="field">
             <label>Network</label>
             <select value={editForm.networkProvider} onChange={(e) => setEditForm((f) => ({ ...f, networkProvider: e.target.value }))}>
-              <option value="MTN">MTN</option>
-              <option value="Vodafone">Vodafone</option>
-              <option value="AirtelTigo">AirtelTigo</option>
+              <option value="MTNGH">MTN</option>
+              <option value="TCELGH">Vodafone</option>
+              <option value="ATGH">AirtelTigo</option>
             </select>
           </div>
           <div className="field">

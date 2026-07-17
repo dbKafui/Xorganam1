@@ -17,6 +17,9 @@ export default function OperatorLayout() {
         <NavLink to="/operator/transactions" className={({ isActive }) => (isActive ? 'active' : '')}>
           Transactions
         </NavLink>
+        <NavLink to="/operator/reports" className={({ isActive }) => (isActive ? 'active' : '')}>
+          Reports
+        </NavLink>
         <NavLink to="/operator/team" className={({ isActive }) => (isActive ? 'active' : '')}>
           Team
         </NavLink>

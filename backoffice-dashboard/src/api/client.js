@@ -1,7 +1,12 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api/v1'
 
 function getToken() {
-  return localStorage.getItem('xorganam_token')
+  const legacyToken = localStorage.getItem('xorganam_token')
+  if (legacyToken) {
+    localStorage.removeItem('xorganam_token')
+    localStorage.removeItem('xorganam_user')
+  }
+  return sessionStorage.getItem('xorganam_token')
 }
 
 export class ApiError extends Error {
@@ -34,6 +39,8 @@ async function request(path, { method = 'GET', body, isForm = false, params } = 
   })
 
   if (response.status === 401) {
+    sessionStorage.removeItem('xorganam_token')
+    sessionStorage.removeItem('xorganam_user')
     localStorage.removeItem('xorganam_token')
     localStorage.removeItem('xorganam_user')
     if (!window.location.pathname.startsWith('/login')) {

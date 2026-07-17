@@ -39,7 +39,7 @@ export default function OperatorTransactionDetail() {
     setReconciling(true)
     try {
       const updated = await operatorApi.reconcile(txn.id)
-      setNotice(updated.status === 'RECEIVED' ? 'Still pending upstream — nothing changed yet.' : `Reconciled: now ${updated.status}.`)
+      setNotice(updated.status === 'PENDING' ? 'Still pending upstream — nothing changed yet.' : `Reconciled: now ${updated.status}.`)
       load()
     } catch (err) {
       setError(err.message)
@@ -92,7 +92,7 @@ export default function OperatorTransactionDetail() {
           <p>{txn.type.replace('_', ' ')} · <span className={`status-pill ${txn.status.toLowerCase()}`}>{txn.status.replace('_', ' ')}</span></p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {txn.status === 'RECEIVED' && txn.type === 'COLLECTION' && (
+          {txn.status === 'PENDING' && txn.type === 'COLLECTION' && (
             <button className="btn btn-secondary" onClick={handleReconcile} disabled={reconciling}>
               {reconciling ? 'Checking…' : 'Check status now'}
             </button>
@@ -113,6 +113,7 @@ export default function OperatorTransactionDetail() {
       <div className="card">
         <h2>Details</h2>
         <div className="kv-row"><span>Eganow reference</span><span className="mono">{txn.eganowReference || '—'}</span></div>
+        <div className="kv-row"><span>Payment gateway status</span><span className="mono">{txn.paymentGatewayStatus || '—'}</span></div>
         {txn.failureReason && <div className="kv-row"><span>Failure reason</span><span>{txn.failureReason}</span></div>}
         <div className="kv-row"><span>Created</span><span className="mono">{new Date(txn.createdAt).toLocaleString()}</span></div>
         {txn.completedAt && <div className="kv-row"><span>Completed</span><span className="mono">{new Date(txn.completedAt).toLocaleString()}</span></div>}
@@ -122,7 +123,7 @@ export default function OperatorTransactionDetail() {
         <div className="card">
           <h2>Linked transactions</h2>
           <table className="ledger">
-            <thead><tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th></tr></thead>
+            <thead><tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway</th></tr></thead>
             <tbody>
               {txn.childTransactions.map((c) => (
                 <tr key={c.id}>
@@ -130,6 +131,7 @@ export default function OperatorTransactionDetail() {
                   <td>{c.type.replace('_', ' ')}</td>
                   <td className="mono">{money(c.amount)} {c.currency}</td>
                   <td><span className={`status-pill ${c.status.toLowerCase()}`}>{c.status.replace('_', ' ')}</span></td>
+                  <td className="mono">{c.paymentGatewayStatus || '—'}</td>
                 </tr>
               ))}
             </tbody>
