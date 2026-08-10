@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { transactionsApi } from '../../api/transactions'
 import StatusChip from '../../components/StatusChip'
+import { maskAccount } from '../../lib/mask'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -72,8 +73,8 @@ export default function TransactionDetail() {
         <div className="form-grid single" style={{ marginTop: 16 }}>
           <div><strong>Eganow reference:</strong> <span className="mono">{txn.eganowReference || '—'}</span></div>
           <div><strong>Payment gateway status:</strong> <span className="mono">{txn.paymentGatewayStatus || '—'}</span></div>
-          {txn.collectionMsisdn && <div><strong>Collection MSISDN:</strong> <span className="mono">{txn.collectionMsisdn}</span></div>}
-          {txn.kycMsisdn && <div><strong>KYC MSISDN:</strong> <span className="mono">{txn.kycMsisdn}</span></div>}
+          {txn.collectionMsisdn && <div><strong>Collection MSISDN:</strong> <span className="mono">{maskAccount(txn.collectionMsisdn)}</span></div>}
+          {txn.kycName ? <div><strong>KYC name:</strong> <span className="mono">{txn.kycName}</span></div> : txn.kycMsisdn && <div><strong>KYC MSISDN:</strong> <span className="mono">{maskAccount(txn.kycMsisdn)}</span></div>}
           {txn.failureReason && <div><strong>Failure reason:</strong> {txn.failureReason}</div>}
           <div><strong>Notification sent:</strong> {txn.notificationSent ? 'Yes' : 'No'}</div>
           <div><strong>Created:</strong> <span className="mono">{new Date(txn.createdAt).toLocaleString()}</span></div>

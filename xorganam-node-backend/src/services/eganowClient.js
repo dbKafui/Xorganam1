@@ -415,7 +415,7 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
 export async function sweepToPayoutAccount(tenantId, { amount, network, narration }) {
   const { client } = await createEganowClientForTenant(tenantId)
   const paypartnerCode = normalizePaypartnerCode(network)
-  const narrationValue = paypartnerCode || narration || 'InternalTransfer'
+  const narrationValue = narration || 'InternalTransfer'
 
   return withRetry(
     async () => {

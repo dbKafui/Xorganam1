@@ -42,8 +42,19 @@ transactionsRouter.get(
     const conditions = ['tenant_id = $1']
     const params = [tenantId]
 
-    if (merchantId) {
-      params.push(merchantId)
+    // Enforce merchant scoping: if the authenticated user is assigned to a specific
+    // merchant, they may only view that merchant's transactions (unless they are
+    // platform admin or tenant-wide user with merchantId == null).
+    let effectiveMerchantId = merchantId
+    if (req.user?.merchantId) {
+      if (effectiveMerchantId && effectiveMerchantId !== String(req.user.merchantId)) {
+        return res.status(403).json({ message: 'You do not have access to other merchants.' })
+      }
+      effectiveMerchantId = String(req.user.merchantId)
+    }
+
+    if (effectiveMerchantId) {
+      params.push(effectiveMerchantId)
       conditions.push(`merchant_id = $${params.length}`)
     }
     if (status) {
@@ -64,7 +75,7 @@ transactionsRouter.get(
     const { rows } = await query(
       `SELECT id, merchant_id, type, status, amount, fees, currency, internal_reference,
               payment_gateway_status,
-              eganow_reference, failure_reason, collection_msisdn, kyc_msisdn, created_at, completed_at
+              eganow_reference, failure_reason, collection_msisdn, kyc_msisdn, kyc_name, payout_msisdn, created_at, completed_at
          FROM transactions
         WHERE ${whereClause}
         ORDER BY created_at DESC
@@ -88,7 +99,7 @@ transactionsRouter.get(
     const { rows } = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.status, t.amount, t.fees, t.currency,
               t.internal_reference, t.eganow_reference, t.payment_gateway_status, t.failure_reason, t.notification_sent, t.manually_triggered,
-              t.collection_msisdn, t.kyc_msisdn, t.created_at, t.completed_at,
+              t.collection_msisdn, t.kyc_msisdn, t.kyc_name, t.payout_msisdn, t.created_at, t.completed_at,
               m.display_name AS merchant_display_name
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
@@ -99,6 +110,11 @@ transactionsRouter.get(
 
     const txn = rows[0]
     if (scopeOrRespond(req, res, txn.tenant_id) === null) return
+
+    // Enforce merchant scoping for transaction detail
+    if (req.user?.merchantId && String(txn.merchant_id) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'You do not have access to this transaction.' })
+    }
 
     const children = await query(
       `SELECT id, type, status, amount, fees, currency, internal_reference, payment_gateway_status, created_at
@@ -129,6 +145,10 @@ transactionsRouter.post(
     const merchantRow = await query('SELECT tenant_id FROM merchants WHERE id = $1', [merchantId])
     if (merchantRow.rows.length === 0) return res.status(404).json({ message: 'Merchant not found.' })
     if (scopeOrRespond(req, res, merchantRow.rows[0].tenant_id) === null) return
+    // If user is merchant-scoped, they may only initiate collections for their merchant
+    if (req.user?.merchantId && String(req.user.merchantId) !== String(merchantId)) {
+      return res.status(403).json({ message: 'You do not have access to this merchant.' })
+    }
 
     try {
       const result = await initiateCollection(merchantId, {
@@ -172,7 +192,7 @@ transactionsRouter.post(
 
     const sourceRows = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
-              m.eganow_collection_account_id, m.eganow_payout_account_id, m.network_provider
+              m.eganow_collection_account_id, m.eganow_payout_account_id, m.network_provider, m.display_name
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
         WHERE t.id = $1`,
@@ -182,6 +202,10 @@ transactionsRouter.post(
     const source = sourceRows.rows[0]
 
     if (scopeOrRespond(req, res, source.tenant_id) === null) return
+    // Enforce merchant scoping for operations on a specific transaction
+    if (req.user?.merchantId && String(source.merchant_id) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'You do not have access to this transaction.' })
+    }
     if (source.status !== 'RECEIVED') {
       return res.status(400).json({ message: 'Source transaction must be RECEIVED from the payment gateway before internal transfer.' })
     }
@@ -275,6 +299,9 @@ transactionsRouter.post(
     const source = sourceRows.rows[0]
 
     if (scopeOrRespond(req, res, source.tenant_id) === null) return
+    if (req.user?.merchantId && String(source.merchant_id) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'You do not have access to this transaction.' })
+    }
     if (source.status !== 'SWEPT_INTERNAL') {
       return res.status(400).json({ message: 'Source transaction must be SWEPT_INTERNAL before payout.' })
     }
@@ -351,9 +378,12 @@ transactionsRouter.post(
   '/:transactionId/reconcile',
   requireRole('TENANT_OPERATOR'),
   asyncHandler(async (req, res) => {
-    const ownerCheck = await query('SELECT tenant_id FROM transactions WHERE id = $1', [req.params.transactionId])
+    const ownerCheck = await query('SELECT tenant_id, merchant_id FROM transactions WHERE id = $1', [req.params.transactionId])
     if (ownerCheck.rows.length === 0) return res.status(404).json({ message: 'Transaction not found.' })
     if (scopeOrRespond(req, res, ownerCheck.rows[0].tenant_id) === null) return
+    if (req.user?.merchantId && String(ownerCheck.rows[0].merchant_id) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'You do not have access to this transaction.' })
+    }
 
     const updated = await reconcileTransaction(req.params.transactionId, req.user.isPlatformAdmin ? null : req.user.tenantId)
     if (!updated) return res.status(404).json({ message: 'Transaction not found.' })
@@ -374,8 +404,10 @@ function mapTransaction(row) {
     currency: row.currency,
     internalReference: row.internal_reference,
     eganowReference: row.eganow_reference,
-    collectionMsisdn: row.collection_msisdn || null,
-    kycMsisdn: row.kyc_msisdn || null,
+      collectionMsisdn: row.collection_msisdn || null,
+      kycMsisdn: row.kyc_msisdn || null,
+      kycName: row.kyc_name || null,
+      payoutMsisdn: row.payout_msisdn || null,
     merchantName: row.merchant_display_name || null,
     failureReason: row.failure_reason,
     createdAt: row.created_at,

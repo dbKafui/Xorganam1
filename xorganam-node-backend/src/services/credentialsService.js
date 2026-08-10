@@ -49,26 +49,32 @@ export async function getTenantEganowContext(tenantId) {
     throw new TenantCredentialsError(`Tenant is not ACTIVE (status=${row.status}).`, tenantId)
   }
 
+  // Decrypt once per unique ciphertext (not once per field) so a
+  // credential set with N legacy-named aliases only costs one Vault
+  // unwrap call each, not N.
+  const [apiUsername, apiPassword, xAuth, webhookSecret] = await Promise.all([
+    decrypt(row.eganow_api_key_encrypted, row.api_key_salt),
+    decrypt(row.eganow_client_secret_encrypted, row.api_key_salt),
+    row.eganow_access_token_encrypted ? decrypt(row.eganow_access_token_encrypted, row.api_key_salt) : null,
+    decrypt(row.webhook_secret_encrypted, row.api_key_salt)
+  ])
+
   return {
     tenantId: row.tenant_id,
     companyName: row.company_name,
     baseUrl: row.eganow_base_url,
     callbackUrl: row.eganow_callback_url || null,
     serviceName: row.eganow_merchant_code,
-    apiUsername: decrypt(row.eganow_api_key_encrypted, row.api_key_salt),
-    apiPassword: decrypt(row.eganow_client_secret_encrypted, row.api_key_salt),
-    xAuth: row.eganow_access_token_encrypted
-      ? decrypt(row.eganow_access_token_encrypted, row.api_key_salt)
-      : null,
-    webhookSecret: decrypt(row.webhook_secret_encrypted, row.api_key_salt),
+    apiUsername,
+    apiPassword,
+    xAuth,
+    webhookSecret,
     // Backwards compatibility for any callers still using legacy names
-    secretUsername: decrypt(row.eganow_api_key_encrypted, row.api_key_salt),
-    secretPassword: decrypt(row.eganow_client_secret_encrypted, row.api_key_salt),
-    apiKey: decrypt(row.eganow_api_key_encrypted, row.api_key_salt),
-    clientSecret: decrypt(row.eganow_client_secret_encrypted, row.api_key_salt),
-    accessToken: row.eganow_access_token_encrypted
-      ? decrypt(row.eganow_access_token_encrypted, row.api_key_salt)
-      : null,
+    secretUsername: apiUsername,
+    secretPassword: apiPassword,
+    apiKey: apiUsername,
+    clientSecret: apiPassword,
+    accessToken: xAuth,
     merchantCode: row.eganow_merchant_code
   }
 }
@@ -90,5 +96,5 @@ export async function getTenantWebhookSecret(tenantId) {
     throw new TenantCredentialsError('Tenant credentials not found.', tenantId)
   }
 
-  return decrypt(rows[0].webhook_secret_encrypted, rows[0].api_key_salt)
+  return await decrypt(rows[0].webhook_secret_encrypted, rows[0].api_key_salt)
 }

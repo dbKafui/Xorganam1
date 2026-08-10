@@ -12,7 +12,7 @@ export default function OperatorAccount() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
-  const [uploadForm, setUploadForm] = useState({ kycType: 'BUSINESS', documentType: '', documentNumber: '', file: null })
+  const [uploadForm, setUploadForm] = useState({ kycType: 'BUSINESS', entries: [] })
   const [uploading, setUploading] = useState(false)
 
   const load = useCallback(() => {
@@ -28,21 +28,25 @@ export default function OperatorAccount() {
     e.preventDefault()
     setError('')
     setNotice('')
-    if (!uploadForm.file) {
-      setError('Choose a document file first.')
+    if (!uploadForm.entries || uploadForm.entries.length === 0) {
+      setError('Choose at least one document file first.')
       return
     }
     setUploading(true)
     try {
       const formData = new FormData()
       formData.append('kycType', uploadForm.kycType)
-      formData.append('documentType', uploadForm.documentType)
-      formData.append('documentNumber', uploadForm.documentNumber)
-      formData.append('document', uploadForm.file)
+      // Append per-file metadata in the same order as files so the server can
+      // accept arrays of documentType/documentNumber and associate them.
+      for (const entry of uploadForm.entries) {
+        formData.append('documentType', entry.documentType || '')
+        formData.append('documentNumber', entry.documentNumber || '')
+        formData.append('document', entry.file)
+      }
 
       await operatorApi.submitKycDocument(user.tenantId, formData)
       setNotice('Document submitted for review.')
-      setUploadForm({ kycType: 'BUSINESS', documentType: '', documentNumber: '', file: null })
+      setUploadForm({ kycType: 'BUSINESS', entries: [] })
       load()
     } catch (err) {
       setError(err.message)
@@ -115,9 +119,43 @@ export default function OperatorAccount() {
           <input required placeholder="e.g. Certificate of Incorporation" value={uploadForm.documentType} onChange={(e) => setUploadForm((f) => ({ ...f, documentType: e.target.value }))} />
         </div>
         <div className="field">
-          <label>File</label>
-          <input required type="file" onChange={(e) => setUploadForm((f) => ({ ...f, file: e.target.files?.[0] || null }))} />
+          <label>Files</label>
+          <input required type="file" multiple onChange={(e) => {
+            const files = Array.from(e.target.files || [])
+            setUploadForm((f) => ({ ...f, entries: files.map((file) => ({ file, documentType: '', documentNumber: '' })) }))
+          }} />
         </div>
+
+        {uploadForm.entries && uploadForm.entries.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <h3 style={{ marginTop: 0, marginBottom: 8 }}>Per-file metadata</h3>
+            {uploadForm.entries.map((entry, idx) => (
+              <div key={idx} style={{ border: '1px solid var(--line)', padding: 8, marginBottom: 8 }}>
+                <div style={{ fontSize: 13, marginBottom: 6 }}><strong>File:</strong> {entry.file.name}</div>
+                <div className="two-col">
+                  <div className="field">
+                    <label>Document type</label>
+                    <input value={entry.documentType} onChange={(e) => setUploadForm((f) => {
+                      const next = { ...f }
+                      next.entries = next.entries.slice()
+                      next.entries[idx] = { ...next.entries[idx], documentType: e.target.value }
+                      return next
+                    })} />
+                  </div>
+                  <div className="field">
+                    <label>Document number</label>
+                    <input value={entry.documentNumber} onChange={(e) => setUploadForm((f) => {
+                      const next = { ...f }
+                      next.entries = next.entries.slice()
+                      next.entries[idx] = { ...next.entries[idx], documentNumber: e.target.value }
+                      return next
+                    })} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <button className="btn btn-primary" disabled={uploading}>{uploading ? 'Uploading…' : 'Submit document'}</button>
       </form>
     </div>

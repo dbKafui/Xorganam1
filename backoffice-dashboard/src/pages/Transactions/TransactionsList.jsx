@@ -4,6 +4,7 @@ import { tenantsApi } from '../../api/tenants'
 import { merchantsApi } from '../../api/merchants'
 import { transactionsApi } from '../../api/transactions'
 import StatusChip from '../../components/StatusChip'
+import { maskAccount } from '../../lib/mask'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -109,13 +110,14 @@ export default function TransactionsList() {
               <table className="ledger">
                 <thead>
                   <tr>
-                    <th>Reference</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway</th><th>Date</th>
+                    <th>Reference</th><th>MSISDN</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway</th><th>Date</th>
                   </tr>
                 </thead>
                 <tbody>
                   {result.transactions.map((t) => (
                     <tr key={t.id}>
                       <td className="mono"><Link to={`/transactions/${t.id}`}>{t.internalReference}</Link></td>
+                      <td className="mono">{t.kycName ? t.kycName : maskAccount(t.collectionMsisdn)}</td>
                       <td>{t.type.replace('_', ' ')}</td>
                       <td className="mono">{money(t.amount)} {t.currency}</td>
                       <td><StatusChip status={t.status} /></td>

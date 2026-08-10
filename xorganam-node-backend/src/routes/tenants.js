@@ -70,7 +70,7 @@ tenantsRouter.get(
     if (rows.length === 0) return res.status(404).json({ message: 'Tenant not found.' })
 
     const documents = await query(
-      `SELECT id, kyc_type, document_type, document_number, verification_status, rejection_reason, created_at
+      `SELECT id, kyc_type, document_type, document_number, document_url, verification_status, rejection_reason, created_at
          FROM kyc_documents WHERE tenant_id = $1 ORDER BY created_at DESC`,
       [tenantId]
     )
@@ -132,7 +132,8 @@ tenantsRouter.delete(
 // ---------------------------------------------------------------------
 tenantsRouter.post(
   '/:tenantId/kyc-documents',
-  kycUpload.single('document'),
+  // Accept multiple uploaded files to allow KYB submissions with several documents
+  kycUpload.any(),
   asyncHandler(async (req, res) => {
     let tenantId
     try {
@@ -141,28 +142,43 @@ tenantsRouter.post(
       if (err instanceof ForbiddenError) return res.status(403).json({ message: err.message })
       throw err
     }
+    const { kycType } = req.body
+    const files = req.files || []
+    if (!files.length) return res.status(400).json({ message: 'At least one document file is required.' })
+    if (!kycType) return res.status(400).json({ message: 'kycType is required.' })
 
-    const { kycType, documentType, documentNumber } = req.body
-    if (!req.file) return res.status(400).json({ message: 'A document file is required.' })
-    if (!kycType || !documentType || !documentNumber) {
-      return res.status(400).json({ message: 'kycType, documentType, and documentNumber are required.' })
+    // Accept documentType and documentNumber as either single values or arrays
+    const documentTypes = Array.isArray(req.body.documentType)
+      ? req.body.documentType
+      : req.body.documentType
+      ? [req.body.documentType]
+      : []
+    const documentNumbers = Array.isArray(req.body.documentNumber)
+      ? req.body.documentNumber
+      : req.body.documentNumber
+      ? [req.body.documentNumber]
+      : []
+
+    const insertedRows = []
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      const documentType = documentTypes[i] || documentTypes[0] || null
+      const documentNumber = documentNumbers[i] || documentNumbers[0] || null
+
+      const documentUrl = toDocumentUrl(tenantId, file)
+
+      const { rows } = await query(
+        `INSERT INTO kyc_documents (tenant_id, kyc_type, document_type, document_number, document_url, verification_status)
+         VALUES ($1, $2, $3, $4, $5, 'PENDING')
+         RETURNING id, document_type, document_number, document_url, verification_status, created_at`,
+        [tenantId, kycType, documentType, documentNumber, documentUrl]
+      )
+      insertedRows.push(rows[0])
     }
 
-    const documentUrl = toDocumentUrl(tenantId, req.file)
+    await query(`UPDATE tenants SET status = 'UNDER_REVIEW' WHERE id = $1 AND status = 'PENDING'`, [tenantId])
 
-    const { rows } = await query(
-      `INSERT INTO kyc_documents (tenant_id, kyc_type, document_type, document_number, document_url, verification_status)
-       VALUES ($1, $2, $3, $4, $5, 'PENDING')
-       RETURNING id, document_type, verification_status, created_at`,
-      [tenantId, kycType, documentType, documentNumber, documentUrl]
-    )
-
-    await query(
-      `UPDATE tenants SET status = 'UNDER_REVIEW' WHERE id = $1 AND status = 'PENDING'`,
-      [tenantId]
-    )
-
-    res.status(201).json(mapDocument(rows[0]))
+    res.status(201).json(insertedRows.map(mapDocument))
   })
 )
 
@@ -246,6 +262,13 @@ tenantsRouter.put(
       return res.status(400).json({ message: 'Tenant must complete KYC approval before Eganow can be enabled.' })
     }
 
+    const [encryptedUsername, encryptedPassword, encryptedXAuth, encryptedWebhookSecret] = await Promise.all([
+      username ? encrypt(username, tenant.api_key_salt) : null,
+      password ? encrypt(password, tenant.api_key_salt) : null,
+      xAuthValue ? encrypt(xAuthValue, tenant.api_key_salt) : null,
+      webhookSecret ? encrypt(webhookSecret, tenant.api_key_salt) : null
+    ])
+
     await query(
       `UPDATE tenant_eganow_credentials
           SET eganow_api_key_encrypted = COALESCE($2, eganow_api_key_encrypted),
@@ -259,12 +282,12 @@ tenantsRouter.put(
         WHERE tenant_id = $1`,
       [
         tenantId,
-        username ? encrypt(username, tenant.api_key_salt) : null,
-        password ? encrypt(password, tenant.api_key_salt) : null,
-        xAuthValue ? encrypt(xAuthValue, tenant.api_key_salt) : null,
+        encryptedUsername,
+        encryptedPassword,
+        encryptedXAuth,
         tenantBaseUrl || null,
         tenantCallbackUrl || null,
-        webhookSecret ? encrypt(webhookSecret, tenant.api_key_salt) : null,
+        encryptedWebhookSecret,
         service || null,
         typeof isEnabled === 'boolean' ? isEnabled : null
       ]
@@ -323,6 +346,11 @@ tenantsRouter.put(
     const { smsProviderName, smsProviderKey, smsSenderId, smsEnabled, emailProviderName, emailProviderKey, emailFromAddress, emailEnabled } =
       req.body || {}
 
+    const [encryptedSmsKey, encryptedEmailKey] = await Promise.all([
+      smsProviderKey ? encrypt(smsProviderKey, salt) : null,
+      emailProviderKey ? encrypt(emailProviderKey, salt) : null
+    ])
+
     await query(
       `UPDATE tenant_notification_settings
           SET sms_provider_name = COALESCE($2, sms_provider_name),
@@ -337,11 +365,11 @@ tenantsRouter.put(
       [
         tenantId,
         smsProviderName || null,
-        smsProviderKey ? encrypt(smsProviderKey, salt) : null,
+        encryptedSmsKey,
         smsSenderId || null,
         typeof smsEnabled === 'boolean' ? smsEnabled : null,
         emailProviderName || null,
-        emailProviderKey ? encrypt(emailProviderKey, salt) : null,
+        encryptedEmailKey,
         emailFromAddress || null,
         typeof emailEnabled === 'boolean' ? emailEnabled : null
       ]
@@ -426,6 +454,7 @@ function mapDocument(row) {
   return {
     id: row.id,
     documentType: row.document_type,
+    documentUrl: row.document_url || null,
     verificationStatus: row.verification_status,
     rejectionReason: row.rejection_reason,
     createdAt: row.created_at

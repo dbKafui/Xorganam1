@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { operatorApi } from '../../api/client'
+import { maskAccount } from '../../lib/mask'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -114,6 +115,9 @@ export default function OperatorTransactionDetail() {
         <h2>Details</h2>
         <div className="kv-row"><span>Eganow reference</span><span className="mono">{txn.eganowReference || '—'}</span></div>
         <div className="kv-row"><span>Payment gateway status</span><span className="mono">{txn.paymentGatewayStatus || '—'}</span></div>
+        {txn.kycName ? <div className="kv-row"><span>KYC name</span><span className="mono">{txn.kycName}</span></div> : txn.kycMsisdn && <div className="kv-row"><span>KYC MSISDN</span><span className="mono">{maskAccount(txn.kycMsisdn)}</span></div>}
+        {txn.collectionMsisdn && <div className="kv-row"><span>Collection MSISDN</span><span className="mono">{maskAccount(txn.collectionMsisdn)}</span></div>}
+        {txn.payoutMsisdn && <div className="kv-row"><span>Payout account</span><span className="mono">{maskAccount(txn.payoutMsisdn)}</span></div>}
         {txn.failureReason && <div className="kv-row"><span>Failure reason</span><span>{txn.failureReason}</span></div>}
         <div className="kv-row"><span>Created</span><span className="mono">{new Date(txn.createdAt).toLocaleString()}</span></div>
         {txn.completedAt && <div className="kv-row"><span>Completed</span><span className="mono">{new Date(txn.completedAt).toLocaleString()}</span></div>}

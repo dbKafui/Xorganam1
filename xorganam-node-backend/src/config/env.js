@@ -24,9 +24,14 @@ export const env = {
     url: required('REDIS_URL')
   },
 
-  // Master key for the application-layer AES-256-GCM envelope encryption
-  // used on tenant_eganow_credentials.*. In production this should come
-  // from a secrets manager (AWS KMS / Vault / etc), not a plain env var.
+  // Legacy master key, used only to DECRYPT credential rows that were
+  // encrypted before the HashiCorp Vault Transit migration (see
+  // src/security/encryption.js). New writes no longer use this - the L1
+  // master key now lives in Vault Transit and never enters app memory.
+  // Configure Vault via VAULT_ADDR + (VAULT_ROLE_ID/VAULT_SECRET_ID or
+  // VAULT_TOKEN for local dev) + VAULT_TRANSIT_MOUNT/VAULT_TRANSIT_KEY;
+  // these are read directly from process.env in vaultClient.js so this
+  // module can still load in contexts (e.g. tests) that don't set them.
   encryptionMasterKey: required('ENCRYPTION_MASTER_KEY'),
 
   jwt: {

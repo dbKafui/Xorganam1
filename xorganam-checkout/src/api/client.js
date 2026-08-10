@@ -120,8 +120,14 @@ export const operatorApi = {
   reconcile: (transactionId) => request(`/transactions/${transactionId}/reconcile`, { method: 'POST', auth: true }),
 
   // Team (tenant staff)
-  listUsers: (tenantId) => request('/users', { params: { tenantId }, auth: true }),
+  listUsers: (tenantId, merchantId) => request('/users', { params: { tenantId, merchantId }, auth: true }),
   createUser: (payload) => request('/users', { method: 'POST', body: payload, auth: true }),
+  updateUser: (userId, payload) => request(`/users/${userId}`, { method: 'PUT', body: payload, auth: true }),
   updateUserStatus: (userId, isActive) => request(`/users/${userId}/status`, { method: 'PUT', body: { isActive }, auth: true }),
-  assignRole: (userId, role) => request(`/users/${userId}/assign-role`, { method: 'POST', body: { role }, auth: true })
+  assignRole: (userId, role) => request(`/users/${userId}/assign-role`, { method: 'POST', body: { role }, auth: true }),
+  assignMerchant: (userId, merchantId) => request(`/users/${userId}/assign-merchant`, { method: 'POST', body: { merchantId }, auth: true }),
+  unassignMerchant: (userId) => request(`/users/${userId}/unassign-merchant`, { method: 'POST', auth: true }),
+  listUserPermissions: (userId) => request(`/users/${userId}/permissions`, { auth: true }),
+  grantPermission: (userId, payload) => request(`/users/${userId}/permissions`, { method: 'POST', body: payload, auth: true }),
+  revokePermission: (userId, permissionId) => request(`/users/${userId}/permissions/${permissionId}`, { method: 'DELETE', auth: true })
 }

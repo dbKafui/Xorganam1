@@ -54,6 +54,7 @@ CREATE INDEX idx_tenants_status ON tenants (status);
 CREATE TABLE users (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id          UUID REFERENCES tenants (id) ON DELETE CASCADE,
+    merchant_id        UUID,
 
     first_name         VARCHAR(100) NOT NULL,
     last_name          VARCHAR(100) NOT NULL,
@@ -190,6 +191,14 @@ CREATE INDEX idx_merchants_payout_account ON merchants (eganow_payout_account_id
 -- really belongs to this tenant" at the database level.
 CREATE UNIQUE INDEX uq_merchants_tenant_id_id ON merchants (tenant_id, id);
 
+ALTER TABLE users ADD CONSTRAINT fk_users_merchant_tenant
+    FOREIGN KEY (tenant_id, merchant_id)
+    REFERENCES merchants (tenant_id, id)
+    ON DELETE CASCADE;
+
+CREATE INDEX idx_users_merchant ON users (merchant_id);
+CREATE INDEX idx_users_tenant_merchant ON users (tenant_id, merchant_id);
+
 -- ---------------------------------------------------------------------
 -- merchant_settings
 -- Permission overlay, independent of payout_mode.
@@ -240,6 +249,7 @@ CREATE TABLE transactions (
     collection_msisdn        VARCHAR(30),
     kyc_msisdn               VARCHAR(30),
     payout_msisdn            VARCHAR(30),
+    kyc_name                 VARCHAR(255),
 
     initiated_by_user_id     UUID REFERENCES users (id) ON DELETE SET NULL,
     manually_triggered        BOOLEAN NOT NULL DEFAULT FALSE,

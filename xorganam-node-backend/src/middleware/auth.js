@@ -22,7 +22,7 @@ export async function authenticate(req, res, next) {
 
   try {
     const { rows } = await query(
-      `SELECT id, tenant_id, role, is_active, first_name, last_name, email FROM users WHERE id = $1`,
+      `SELECT id, tenant_id, merchant_id, role, is_active, first_name, last_name, email FROM users WHERE id = $1`,
       [payload.sub]
     )
 
@@ -34,6 +34,7 @@ export async function authenticate(req, res, next) {
     req.user = {
       id: user.id,
       tenantId: user.tenant_id,
+      merchantId: user.merchant_id,
       role: user.role,
       firstName: user.first_name,
       lastName: user.last_name,
@@ -115,4 +116,67 @@ export function resolveTenantScope(req, requestedTenantId) {
   }
 
   return req.user.tenantId
+}
+
+/**
+ * Checks if a user has a specific permission.
+ * @param userId The user ID to check
+ * @param permissionType The permission type (e.g., 'EDIT_MERCHANTS')
+ * @param resourceId Optional resource ID (e.g., merchant ID)
+ * @returns true if the user has the permission, false otherwise
+ */
+export async function userHasPermission(userId, permissionType, resourceId = null) {
+  const { rows } = await query(
+    `SELECT 1 FROM user_permissions
+      WHERE user_id = $1
+        AND permission_type = $2
+        AND (resource_id IS NULL OR resource_id = $3)
+      LIMIT 1`,
+    [userId, permissionType, resourceId]
+  )
+  return rows.length > 0
+}
+
+/**
+ * Middleware to check if a user has a specific permission.
+ * Usage: router.post('/edit', authenticate, requirePermission('EDIT_MERCHANTS'), handler)
+ */
+export function requirePermission(permissionType) {
+  return async (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
+    
+    // Platform admins always have all permissions
+    if (req.user.isPlatformAdmin) return next()
+
+    // Check if user has the permission
+    const hasPermission = await userHasPermission(req.user.id, permissionType)
+    if (!hasPermission) {
+      return res.status(403).json({ message: `You do not have ${permissionType} permission.` })
+    }
+    next()
+  }
+}
+
+/**
+ * Middleware to check if a user has permission for a specific resource.
+ * Usage: router.post('/merchants/:merchantId/edit', authenticate, requireResourcePermission('EDIT_MERCHANTS', 'merchantId'), handler)
+ */
+export function requireResourcePermission(permissionType, resourceIdParam) {
+  return async (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
+    
+    // Platform admins always have all permissions
+    if (req.user.isPlatformAdmin) return next()
+
+    const resourceId = req.params[resourceIdParam] || req.body[resourceIdParam] || req.query[resourceIdParam]
+    if (!resourceId) {
+      return res.status(400).json({ message: `${resourceIdParam} is required.` })
+    }
+
+    const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId)
+    if (!hasPermission) {
+      return res.status(403).json({ message: `You do not have ${permissionType} permission for this resource.` })
+    }
+    next()
+  }
 }

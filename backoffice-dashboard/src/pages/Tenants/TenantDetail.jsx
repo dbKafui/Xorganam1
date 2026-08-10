@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { tenantsApi } from '../../api/tenants'
 import { merchantsApi } from '../../api/merchants'
 import StatusChip from '../../components/StatusChip'
+import { BASE_URL } from '../../api/client'
 
 const TABS = ['overview', 'kyc', 'eganow', 'notifications']
 
@@ -364,7 +365,7 @@ export default function TenantDetail() {
           ) : (
             <table className="ledger">
               <thead>
-                <tr><th>Document type</th><th>Status</th><th>Submitted</th><th></th></tr>
+                <tr><th>Document type</th><th>Status</th><th>Submitted</th><th>File</th><th></th></tr>
               </thead>
               <tbody>
                 {tenant.documents.map((d) => (
@@ -372,6 +373,13 @@ export default function TenantDetail() {
                     <td>{d.documentType}</td>
                     <td><StatusChip status={d.verificationStatus} /></td>
                     <td className="mono">{new Date(d.createdAt).toLocaleDateString()}</td>
+                    <td>
+                      {d.documentUrl ? (
+                        <a href={`${BASE_URL.replace('/api/v1','')}${d.documentUrl}`} target="_blank" rel="noopener noreferrer">View</a>
+                      ) : (
+                        <span className="helper-text">No file</span>
+                      )}
+                    </td>
                     <td>
                       {d.verificationStatus === 'PENDING' || d.verificationStatus === 'UNDER_REVIEW' ? (
                         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>

@@ -275,12 +275,23 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       // continue to attempt collection
     }
 
+    const accountName = kycResponse?.data?.accountName || null
+
+    // Persist the KYC / name-enquiry result for display in transaction views
+    try {
+      if (accountName) {
+        await query(`UPDATE transactions SET kyc_name = $2 WHERE id = $1`, [transactionId, accountName])
+      }
+    } catch (updErr) {
+      console.error('[collection] failed to persist kyc_name', { tenantId: merchant.tenant_id, merchantId: merchant.id, err: updErr.message })
+    }
+
     const body = {
       paypartnerCode,
       amount,
       accountNoOrCardNoOrMSISDN: normalizedMsisdn,
       countryCode,
-      accountName: kycResponse?.data?.accountName || merchant.display_name,
+      accountName: accountName || merchant.display_name,
       transactionId: internalReference,
       transCurrencyIso: 'GHS',
       languageId: 'en',

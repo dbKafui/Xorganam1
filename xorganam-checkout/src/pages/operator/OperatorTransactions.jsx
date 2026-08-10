@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi } from '../../api/client'
+import { maskAccount } from '../../lib/mask'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -89,7 +90,16 @@ export default function OperatorTransactions() {
           <>
             <table className="ledger">
               <thead>
-                <tr><th>Reference</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway</th><th>Date</th></tr>
+                <tr>
+                  <th>Reference</th>
+                  <th>Type</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                  <th>Gateway</th>
+                  <th>KYC</th>
+                  <th>Account</th>
+                  <th>Date</th>
+                </tr>
               </thead>
               <tbody>
                 {result.transactions.map((t) => (
@@ -99,6 +109,8 @@ export default function OperatorTransactions() {
                     <td className="mono">{money(t.amount)} {t.currency}</td>
                     <td><span className={`status-pill ${t.status.toLowerCase()}`}>{t.status.replace('_', ' ')}</span></td>
                     <td className="mono">{t.paymentGatewayStatus || '—'}</td>
+                    <td className="mono">{t.kycName ? t.kycName : maskAccount(t.kycMsisdn || t.collectionMsisdn)}</td>
+                    <td className="mono">{maskAccount(t.payoutMsisdn)}</td>
                     <td className="mono">{new Date(t.createdAt).toLocaleString()}</td>
                   </tr>
                 ))}
