@@ -412,9 +412,8 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
 /**
  * Internal transfer: merchant's collection account -> payout account.
  */
-export async function sweepToPayoutAccount(tenantId, { amount, network, narration }) {
+export async function sweepToPayoutAccount(tenantId, { amount, network: _network, narration }) {
   const { client } = await createEganowClientForTenant(tenantId)
-  const paypartnerCode = normalizePaypartnerCode(network)
   const narrationValue = narration || 'InternalTransfer'
 
   return withRetry(
@@ -516,10 +515,23 @@ export async function queryTransactionStatus(tenantId, reference) {
   )
 }
 
-// Eganow's balance endpoint is not documented in this integration. Keep this
-// explicit so periodic settlement fails closed instead of guessing an API.
-export async function getPayoutWalletBalance(_tenantId, _accountId) {
-  throw new EganowApiError('Payout-wallet balance lookup is not available in the configured Eganow adapter.', _tenantId)
+export async function getPayoutWalletBalance(tenantId, _accountId) {
+  const { client } = await createEganowClientForTenant(tenantId)
+
+  return withRetry(
+    async () => {
+      const response = await client.get('/api/transactions/collection/get-balance', {
+        data: {},
+        headers: { 'Content-Type': 'application/json' }
+      })
+      const balance = Number(response.data?.balance)
+      if (!Number.isFinite(balance) || balance < 0) {
+        throw new EganowApiError('Eganow returned an invalid payout-wallet balance.', tenantId, response.status, response.data)
+      }
+      return balance
+    },
+    { tenantId, operation: 'PayoutWalletBalance' }
+  )
 }
 
 export { TenantCredentialsError }

@@ -45,6 +45,19 @@ function dateDifferenceInPeriods(anchor, now, schedule) {
 
 function completedPeriod(anchor, schedule, now = new Date()) {
   const today = now.toISOString().slice(0, 10)
+  if (schedule.unit === 'YEARS') {
+    const anchorYear = Number(String(anchor).slice(0, 4))
+    const currentYear = now.getUTCFullYear()
+    const elapsedYears = currentYear - anchorYear
+    const block = Math.floor(elapsedYears / schedule.interval)
+    if (block < 1) return null
+    const endYear = anchorYear + block * schedule.interval
+    return {
+      key: `${endYear - schedule.interval}-01-01`,
+      start: `${endYear - schedule.interval}-01-01`,
+      end: `${endYear}-01-01`
+    }
+  }
   const periodsElapsed = dateDifferenceInPeriods(anchor, today, schedule)
   if (periodsElapsed < 1) return null
   return {
@@ -146,7 +159,7 @@ async function createSweep(config) {
     )
     if (!parent.rows[0]) {
       const existing = await client.query(
-        `SELECT id FROM transactions
+        `SELECT id, amount FROM transactions
           WHERE tenant_id = $1 AND merchant_id = $2 AND institution_id = $3
             AND period_key = $4 AND type = 'SWEEP_PAYOUT'`,
         [config.tenant_id, config.merchant_id, config.institution_id, config.period.key]
@@ -161,7 +174,8 @@ async function createSweep(config) {
       return {
         ...existing.rows[0],
         institutionAmount: Number(existingLedger[0]?.institution_amount || 0),
-        vendorAmount: Number(existingLedger[0]?.vendor_amount || 0)
+        vendorAmount: Number(existingLedger[0]?.vendor_amount || 0),
+        amount: Number(existing.rows[0].amount)
       }
     }
 
@@ -174,7 +188,7 @@ async function createSweep(config) {
        ON CONFLICT (sweep_transaction_id) DO NOTHING`,
       [config.institution_id, config.tenant_id, config.merchant_id, sweep.id, vendorAmount, institutionAmount, config.period.key]
     )
-    return { ...sweep, institutionAmount, vendorAmount }
+    return { ...sweep, institutionAmount, vendorAmount, amount: institutionAmount + vendorAmount }
   })
 }
 
@@ -236,9 +250,11 @@ async function settleLeg(leg, config, network) {
     `UPDATE transactions SET status = $2, eganow_reference = COALESCE($3, eganow_reference),
             eganow_transaction_id = COALESCE($4, eganow_transaction_id),
             payment_gateway_status = $5, failure_reason = $6,
+            raw_webhook_payload = $7,
             completed_at = CASE WHEN $2 = 'PAID_OUT' THEN now() ELSE completed_at END, updated_at = now()
       WHERE id = $1`,
-    [leg.id, status, result.reference, result.transactionId, result.status, status === 'FAILED' ? `Eganow returned ${result.status}.` : null]
+    [leg.id, status, result.reference, result.transactionId, result.status,
+      status === 'FAILED' ? `Eganow returned ${result.status}.` : null, result.raw]
   )
   if (status === 'PENDING') throw new SweepPendingError(`Sweep leg ${leg.id} is still pending.`)
   return status
@@ -282,8 +298,24 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
     const vendorLeg = config.vendor_payout_mode === 'PERIODIC'
       ? await createLeg(parent, config, 'VENDOR', parent.vendorAmount, config.mobile_money_number)
       : null
-    const institutionStatus = await settleLeg(institutionLeg, config)
-    const vendorStatus = vendorLeg ? await settleLeg(vendorLeg, config, config.network_provider) : 'PAID_OUT'
+    let institutionStatus
+    let vendorStatus = 'PAID_OUT'
+    try {
+      institutionStatus = await settleLeg(institutionLeg, config)
+      vendorStatus = vendorLeg ? await settleLeg(vendorLeg, config, config.network_provider) : 'PAID_OUT'
+    } catch (error) {
+      await query(
+        `UPDATE institution_sweep_ledger
+            SET status = 'PENDING',
+                institution_leg_status = $2,
+                vendor_leg_status = $3,
+                failure_reason = $4,
+                updated_at = now()
+          WHERE sweep_transaction_id = $1`,
+        [parent.id, institutionStatus || institutionLeg.status, vendorStatus, error.message]
+      )
+      throw error
+    }
     const status = institutionStatus === 'PAID_OUT' && vendorStatus === 'PAID_OUT'
       ? 'SETTLED'
       : institutionStatus === 'FAILED' || vendorStatus === 'FAILED'

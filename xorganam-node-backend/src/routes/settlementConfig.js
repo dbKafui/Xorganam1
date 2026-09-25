@@ -139,10 +139,6 @@ settlementConfigRouter.put(
     if (priorityDeductionSelected && !bound.priority_deduction_allowed) {
       return res.status(400).json({ message: 'Priority deduction is not allowed by the institution policy.' })
     }
-    if (priorityDeductionSelected) {
-      return res.status(400).json({ message: 'Priority deduction allocation is not configured yet.' })
-    }
-
     const anchorDate = scheduleAnchorDate || new Date().toISOString().slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)) {
       return res.status(400).json({ message: 'scheduleAnchorDate must be YYYY-MM-DD.' })
