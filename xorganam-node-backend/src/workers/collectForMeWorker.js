@@ -5,6 +5,7 @@ import { query, withTransaction } from '../db/pool.js'
 import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { TenantCredentialsError } from '../services/credentialsService.js'
 import { sendMerchantSms } from '../services/notificationService.js'
+import { processSplitPayout } from '../services/splitPaymentService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '10', 10)
 
@@ -99,15 +100,36 @@ async function processCollectForMeJob(job) {
     }
   }
 
+  if (context.splitRule) {
+    const splitResult = await processSplitPayout({
+      tenantId,
+      merchantId,
+      collectionTxn,
+      merchant,
+      rule: context.splitRule
+    })
+    if (!splitResult.skipped) {
+      if (splitResult.status === 'PAID_OUT') {
+        await sendMerchantSms(
+          tenantId,
+          collectionTxn.payout_msisdn || merchant.mobile_money_number,
+          `GHS ${Number(splitResult.vendorAmount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${collectionTxn.internal_reference}.`
+        )
+      }
+      return splitResult
+    }
+  }
+
   // ---- Step 2: External Disbursal - payout account -> merchant's MoMo -
-  transferTxn = transferTxn || await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER')
+  transferTxn = transferTxn || await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER', 'NONE')
   const payoutDestination = collectionTxn.payout_msisdn || merchant.mobile_money_number
   const payoutParentId = transferTxn?.id || collectionTxn.id
-  const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT') || await createChildTransaction({
+  const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT', 'NONE') || await createChildTransaction({
     tenantId,
     merchantId,
     parentTransactionId: payoutParentId,
     type: 'PAYOUT',
+    payoutLeg: 'NONE',
     amount: collectionTxn.amount,
     currency: collectionTxn.currency,
     payoutMsisdn: payoutDestination
@@ -192,10 +214,26 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
     `SELECT
         m.id, m.display_name, m.eganow_collection_account_id, m.eganow_payout_account_id,
         m.mobile_money_number, m.network_provider,
-        t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference, t.payout_msisdn
+        t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference, t.payout_msisdn,
+        sr.id AS split_rule_id, sr.mode AS split_rule_mode, sr.type AS split_rule_type,
+        sr.amount AS split_rule_amount, sr.leg_execution_order,
+        i.id AS split_institution_id, i.settlement_msisdn
      FROM merchants m
      JOIN transactions t
        ON t.tenant_id = m.tenant_id AND t.merchant_id = m.id AND t.id = $3
+     LEFT JOIN LATERAL (
+       SELECT r.*
+         FROM split_rules r
+        WHERE r.tenant_id = t.tenant_id
+          AND r.active
+          AND r.effective_from <= now()
+          AND (r.effective_to IS NULL OR r.effective_to > now())
+          AND (r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = t.merchant_id
+               OR r.scope_level = 'TENANT_DEFAULT' AND r.merchant_id IS NULL)
+        ORDER BY CASE WHEN r.merchant_id = t.merchant_id THEN 0 ELSE 1 END, r.created_at DESC
+        LIMIT 1
+     ) sr ON TRUE
+     LEFT JOIN institutions i ON i.id = sr.institution_id
      WHERE m.tenant_id = $1 AND m.id = $2`,
     [tenantId, merchantId, transactionId]
   )
@@ -219,21 +257,32 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
       currency: row.currency,
       internal_reference: row.internal_reference,
       payout_msisdn: row.payout_msisdn
-    }
+    },
+    splitRule: row.split_rule_id
+      ? {
+          id: row.split_rule_id,
+          mode: row.split_rule_mode,
+          type: row.split_rule_type,
+          amount: row.split_rule_amount,
+          leg_execution_order: row.leg_execution_order,
+          institution_id: row.split_institution_id,
+          settlement_msisdn: row.settlement_msisdn
+        }
+      : null
   }
 }
 
-async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, amount, currency, payoutMsisdn = null }) {
+async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, payoutLeg = 'NONE', amount, currency, payoutMsisdn = null }) {
   const internalReference = `${type === 'INTERNAL_TRANSFER' ? 'IT' : 'PO'}-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
 
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `INSERT INTO transactions
-         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference, payout_msisdn)
-       VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8)
-       ON CONFLICT ON CONSTRAINT uq_transactions_parent_type DO NOTHING
+         (tenant_id, merchant_id, parent_transaction_id, type, payout_leg, status, amount, currency, internal_reference, payout_msisdn)
+       VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9)
+       ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
        RETURNING id, internal_reference, status`,
-      [tenantId, merchantId, parentTransactionId, type, amount, currency, internalReference, payoutMsisdn]
+      [tenantId, merchantId, parentTransactionId, type, payoutLeg, amount, currency, internalReference, payoutMsisdn]
     )
 
     if (rows.length > 0) {
@@ -243,23 +292,23 @@ async function createChildTransaction({ tenantId, merchantId, parentTransactionI
     const { rows: existingRows } = await client.query(
       `SELECT id, internal_reference, status
          FROM transactions
-        WHERE parent_transaction_id = $1 AND type = $2
+        WHERE parent_transaction_id = $1 AND type = $2 AND payout_leg = $3
         LIMIT 1`,
-      [parentTransactionId, type]
+      [parentTransactionId, type, payoutLeg]
     )
 
     return existingRows[0]
   })
 }
 
-async function findChildTransaction(parentTransactionId, type) {
+async function findChildTransaction(parentTransactionId, type, payoutLeg = 'NONE') {
   const { rows } = await query(
     `SELECT id, internal_reference, status
        FROM transactions
-      WHERE parent_transaction_id = $1 AND type = $2
+      WHERE parent_transaction_id = $1 AND type = $2 AND payout_leg = $3
       ORDER BY created_at ASC
       LIMIT 1`,
-    [parentTransactionId, type]
+    [parentTransactionId, type, payoutLeg]
   )
   return rows[0] || null
 }

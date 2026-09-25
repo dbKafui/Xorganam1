@@ -11,6 +11,7 @@ import { env } from '../config/env.js'
 let connection = null
 let collectForMeQueue = null
 let collectionStatusPollQueue = null
+let periodicSettlementQueue = null
 let connectError = null
 
 function createRedisConnection() {
@@ -43,6 +44,7 @@ export function getRedisConnection() {
 
 export const COLLECT_FOR_ME_QUEUE = 'collect-for-me'
 export const COLLECTION_STATUS_POLL_QUEUE = 'collection-status-poll'
+export const PERIODIC_SETTLEMENT_QUEUE = 'periodic-settlement'
 
 export function getRedisHealth() {
   return {
@@ -121,7 +123,7 @@ export async function enqueueCollectionStatusPollJob(jobData) {
     return null
   }
 
-    try {
+  try {
     return await queue.add('poll-collection-status', jobData, {
       // Use sanitized jobId to avoid characters rejected by BullMQ.
       jobId: makeSafeJobId('status-poll', jobData.transactionId),
@@ -134,4 +136,17 @@ export async function enqueueCollectionStatusPollJob(jobData) {
     console.warn('[queue] status poll queue add failed:', jobData, err.message)
     return null
   }
+}
+
+export async function enqueuePeriodicSettlementJob(jobData = {}) {
+  if (!periodicSettlementQueue) {
+    periodicSettlementQueue = new Queue(PERIODIC_SETTLEMENT_QUEUE, { connection: getRedisConnection() })
+  }
+  return periodicSettlementQueue.add('run-due-sweeps', jobData, {
+    jobId: `periodic-settlement-${jobData.tenantId || 'all'}-${Date.now()}`,
+    attempts: 20,
+    backoff: { type: 'fixed', delay: 30_000 },
+    removeOnComplete: { age: 7 * 24 * 60 * 60 },
+    removeOnFail: { age: 30 * 24 * 60 * 60 }
+  })
 }

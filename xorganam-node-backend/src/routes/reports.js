@@ -22,11 +22,11 @@ function scopeOrRespond(req, res, requestedTenantId) {
 async function computeTotals(whereClause, params) {
   const { rows } = await query(
     `SELECT
-      COALESCE(SUM(amount) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')), 0) AS total_collected,
+      COALESCE(SUM(amount) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED')), 0) AS total_collected,
         COALESCE(SUM(amount) FILTER (WHERE type = 'PAYOUT' AND status = 'PAID_OUT'), 0) AS total_paid_out,
         COALESCE(SUM(fees), 0) AS total_fees,
         COUNT(*) FILTER (WHERE type = 'COLLECTION') AS collection_count,
-        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')) AS successful_count,
+        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED')) AS successful_count,
         COUNT(*) FILTER (WHERE status = 'FAILED') AS failed_count,
         COUNT(*) FILTER (WHERE status = 'PENDING') AS pending_count
      FROM transactions
@@ -87,7 +87,7 @@ reportsRouter.get(
 
     const perMerchant = await query(
       `SELECT m.id, m.display_name,
-              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'COLLECTION' AND t.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT')), 0) AS total_collected,
+              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'COLLECTION' AND t.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT','PARTIALLY_SETTLED')), 0) AS total_collected,
               COUNT(t.id) FILTER (WHERE t.type = 'COLLECTION') AS transaction_count
          FROM merchants m
          LEFT JOIN transactions t ON t.merchant_id = m.id
@@ -129,7 +129,7 @@ reportsRouter.get(
 
     const topTenants = await query(
       `SELECT t.id, t.company_name,
-              COALESCE(SUM(tr.amount) FILTER (WHERE tr.type = 'COLLECTION' AND tr.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT')), 0) AS total_volume,
+              COALESCE(SUM(tr.amount) FILTER (WHERE tr.type = 'COLLECTION' AND tr.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT','PARTIALLY_SETTLED')), 0) AS total_volume,
               COUNT(tr.id) FILTER (WHERE tr.type = 'COLLECTION') AS transaction_count
          FROM tenants t
          LEFT JOIN transactions tr ON tr.tenant_id = t.id

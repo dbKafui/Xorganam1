@@ -3,6 +3,7 @@ import { getRedisConnection, COLLECTION_STATUS_POLL_QUEUE, enqueueCollectForMeJo
 import { query } from '../db/pool.js'
 import { queryTransactionStatus, EganowApiError, isGatewayPending, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { sendMerchantSms } from '../services/notificationService.js'
+import { refreshSplitParentStatus } from '../services/splitPaymentService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10)
 const POLL_DELAY_MS = parseInt(process.env.COLLECTION_STATUS_POLL_DELAY_MS || '5000', 10)
@@ -14,7 +15,7 @@ function sleep(ms) {
 
 async function loadTransactionContext(transactionId, tenantId, merchantId) {
   const { rows } = await query(
-    `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.status, t.amount, t.currency, t.internal_reference,
+    `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.payout_leg, t.status, t.amount, t.currency, t.internal_reference,
             t.eganow_reference, t.eganow_transaction_id, t.payout_msisdn,
             m.payout_mode, m.mobile_money_number
        FROM transactions t
@@ -115,20 +116,26 @@ async function markPayoutSuccessful(txn, gatewayStatus) {
 
   const rootCollectionId = await findRootCollectionId(txn.id)
   if (rootCollectionId) {
-    await query(
-      `UPDATE transactions
-          SET status = 'PAID_OUT',
-              updated_at = now()
-        WHERE id = $1`,
-      [rootCollectionId]
-    )
+    if (txn.payout_leg === 'VENDOR' || txn.payout_leg === 'INSTITUTION') {
+      await refreshSplitParentStatus(rootCollectionId)
+    } else {
+      await query(
+        `UPDATE transactions
+            SET status = 'PAID_OUT',
+                updated_at = now()
+          WHERE id = $1`,
+        [rootCollectionId]
+      )
+    }
   }
 
-  await sendMerchantSms(
-    txn.tenant_id,
-    txn.payout_msisdn || txn.mobile_money_number,
-    `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`
-  )
+  if (txn.payout_leg !== 'INSTITUTION') {
+    await sendMerchantSms(
+      txn.tenant_id,
+      txn.payout_msisdn || txn.mobile_money_number,
+      `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`
+    )
+  }
 }
 
 async function processCollectionStatusPollJob(job) {

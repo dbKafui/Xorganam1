@@ -516,4 +516,10 @@ export async function queryTransactionStatus(tenantId, reference) {
   )
 }
 
+// Eganow's balance endpoint is not documented in this integration. Keep this
+// explicit so periodic settlement fails closed instead of guessing an API.
+export async function getPayoutWalletBalance(_tenantId, _accountId) {
+  throw new EganowApiError('Payout-wallet balance lookup is not available in the configured Eganow adapter.', _tenantId)
+}
+
 export { TenantCredentialsError }

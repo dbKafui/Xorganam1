@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "worker": "node src/workers/index.js",
     "dev": "node --watch src/server.js",
+    "db:migrate": "node src/scripts/migrate.js",
     "seed:admin": "node src/scripts/seedPlatformAdmin.js",
     "lint": "eslint . --ext .js",
     "format": "prettier --write .",

@@ -12,6 +12,28 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto"; -- gen_random_uuid()
 
 -- ---------------------------------------------------------------------
+-- Migration history
+-- ---------------------------------------------------------------------
+CREATE TABLE schema_migrations (
+    name        VARCHAR(255) PRIMARY KEY,
+    checksum    CHAR(64) NOT NULL,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The clean baseline includes all migrations that predate the split
+-- payment work. They are recorded so the runner does not replay schema
+-- changes already present in this bootstrap.
+INSERT INTO schema_migrations (name, checksum)
+VALUES
+    ('20260715_payment_gateway_status.sql', repeat('0', 64)),
+    ('20260716_transactions_parent_type.sql', repeat('0', 64)),
+    ('20260716_transactions_payout_msisdn.sql', repeat('0', 64)),
+    ('20260717_add_kyc_name_to_transactions.sql', repeat('0', 64)),
+    ('20260717_backfill_transactions_msisdn.sql', repeat('0', 64)),
+    ('20260717_transactions_kyc_and_collection_msisdn.sql', repeat('0', 64)),
+    ('20260717_user_merchant_assignment.sql', repeat('0', 64));
+
+-- ---------------------------------------------------------------------
 -- ENUM types
 -- ---------------------------------------------------------------------
 CREATE TYPE tenant_status AS ENUM ('PENDING', 'UNDER_REVIEW', 'ACTIVE', 'REJECTED', 'SUSPENDED');
@@ -36,9 +58,6 @@ CREATE TABLE tenants (
     company_name    VARCHAR(255) NOT NULL,
     contact_phone   VARCHAR(20) NOT NULL,
     contact_email   VARCHAR(255) NOT NULL,
-    -- Per-tenant salt mixed into webhook-signature / credential-encryption
-    -- derivation, so a compromised key for one tenant never helps decrypt
-    -- another tenant's secrets.
     api_key_salt    VARCHAR(255) NOT NULL,
     status          tenant_status NOT NULL DEFAULT 'PENDING',
     approved_at     TIMESTAMPTZ,
@@ -55,22 +74,16 @@ CREATE TABLE users (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id          UUID REFERENCES tenants (id) ON DELETE CASCADE,
     merchant_id        UUID,
-
     first_name         VARCHAR(100) NOT NULL,
     last_name          VARCHAR(100) NOT NULL,
     email              VARCHAR(255) NOT NULL UNIQUE,
     phone_number       VARCHAR(20),
     password_hash      VARCHAR(255) NOT NULL,
-
     role               user_role NOT NULL,
     is_active          BOOLEAN NOT NULL DEFAULT TRUE,
-
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login_at      TIMESTAMPTZ,
-
-    -- Only PLATFORM_ADMIN may have a null tenant_id; every other role
-    -- must belong to exactly one tenant.
     CONSTRAINT chk_users_tenant_role CHECK (
         (role = 'PLATFORM_ADMIN' AND tenant_id IS NULL) OR
         (role != 'PLATFORM_ADMIN' AND tenant_id IS NOT NULL)
@@ -82,50 +95,38 @@ CREATE INDEX idx_users_email ON users (email);
 
 -- ---------------------------------------------------------------------
 -- tenant_eganow_credentials
--- One row per tenant. Values are stored encrypted (application-layer
--- AES-256-GCM, see src/security/encryption.js).
 -- ---------------------------------------------------------------------
 CREATE TABLE tenant_eganow_credentials (
     id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id                       UUID NOT NULL UNIQUE REFERENCES tenants (id) ON DELETE CASCADE,
-
     eganow_api_key_encrypted        TEXT,
     eganow_client_secret_encrypted  TEXT,
     eganow_access_token_encrypted   TEXT,
     eganow_refresh_token_encrypted  TEXT,
     access_token_expires_at         TIMESTAMPTZ,
-
-    -- HMAC secret Eganow signs webhook payloads with for this tenant.
     webhook_secret_encrypted        TEXT,
-
     eganow_base_url                 VARCHAR(255),
     eganow_callback_url             VARCHAR(255),
-
     eganow_merchant_code            VARCHAR(100),
     is_enabled                      BOOLEAN NOT NULL DEFAULT FALSE,
-
     created_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------
 -- tenant_notification_settings
--- Pluggable SMS/email provider config, one row per tenant.
 -- ---------------------------------------------------------------------
 CREATE TABLE tenant_notification_settings (
     id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id                   UUID NOT NULL UNIQUE REFERENCES tenants (id) ON DELETE CASCADE,
-
     sms_provider_name           VARCHAR(100),
     sms_provider_key_encrypted  TEXT,
     sms_sender_id               VARCHAR(20),
     sms_enabled                 BOOLEAN NOT NULL DEFAULT FALSE,
-
-    email_provider_name           VARCHAR(100),
-    email_provider_key_encrypted  TEXT,
-    email_from_address             VARCHAR(255),
-    email_enabled                  BOOLEAN NOT NULL DEFAULT FALSE,
-
+    email_provider_name         VARCHAR(100),
+    email_provider_key_encrypted TEXT,
+    email_from_address          VARCHAR(255),
+    email_enabled               BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -135,20 +136,16 @@ CREATE TABLE tenant_notification_settings (
 CREATE TABLE kyc_documents (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id            UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
-
     kyc_type             kyc_type NOT NULL,
     document_type        VARCHAR(100) NOT NULL,
     document_number      VARCHAR(100) NOT NULL,
     document_url         VARCHAR(1024) NOT NULL,
-
     verification_status  verification_status NOT NULL DEFAULT 'PENDING',
     rejection_reason     TEXT,
     verified_by_user_id  UUID REFERENCES users (id) ON DELETE SET NULL,
     verified_at          TIMESTAMPTZ,
-
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-
     CONSTRAINT uq_kyc_documents UNIQUE (tenant_id, document_type, document_number)
 );
 
@@ -157,27 +154,20 @@ CREATE INDEX idx_kyc_documents_status ON kyc_documents (verification_status);
 
 -- ---------------------------------------------------------------------
 -- merchants
--- One row per sub-account (market woman) under a tenant.
 -- ---------------------------------------------------------------------
 CREATE TABLE merchants (
     id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id                       UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
-
     display_name                    VARCHAR(255) NOT NULL,
     mobile_money_number             VARCHAR(20) NOT NULL,
-    network_provider                VARCHAR(50) NOT NULL, -- MTN, Vodafone, AirtelTigo, ...
-
+    network_provider                VARCHAR(50) NOT NULL,
     payout_mode                     payout_mode NOT NULL DEFAULT 'MANUAL',
-
-    -- The two Eganow wallet legs this merchant's money moves through.
     eganow_collection_account_id    VARCHAR(150) NOT NULL,
     eganow_payout_account_id        VARCHAR(150) NOT NULL,
-
     is_active                       BOOLEAN NOT NULL DEFAULT TRUE,
     onboarded_at                    TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
-
     CONSTRAINT uq_merchant_collection_account UNIQUE (tenant_id, eganow_collection_account_id),
     CONSTRAINT uq_merchant_payout_account UNIQUE (tenant_id, eganow_payout_account_id)
 );
@@ -186,9 +176,6 @@ CREATE INDEX idx_merchants_tenant ON merchants (tenant_id);
 CREATE INDEX idx_merchants_tenant_active ON merchants (tenant_id, is_active);
 CREATE INDEX idx_merchants_collection_account ON merchants (eganow_collection_account_id);
 CREATE INDEX idx_merchants_payout_account ON merchants (eganow_payout_account_id);
--- Lets a composite FK from merchant_settings / transactions reference
--- (tenant_id, id) together, so those tables can enforce "this merchant
--- really belongs to this tenant" at the database level.
 CREATE UNIQUE INDEX uq_merchants_tenant_id_id ON merchants (tenant_id, id);
 
 ALTER TABLE users ADD CONSTRAINT fk_users_merchant_tenant
@@ -201,20 +188,16 @@ CREATE INDEX idx_users_tenant_merchant ON users (tenant_id, merchant_id);
 
 -- ---------------------------------------------------------------------
 -- merchant_settings
--- Permission overlay, independent of payout_mode.
 -- ---------------------------------------------------------------------
 CREATE TABLE merchant_settings (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id               UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
     merchant_id             UUID NOT NULL REFERENCES merchants (id) ON DELETE CASCADE,
-
     allow_manual_control    BOOLEAN NOT NULL DEFAULT FALSE,
     notify_sms              BOOLEAN NOT NULL DEFAULT TRUE,
     notify_email            BOOLEAN NOT NULL DEFAULT FALSE,
     contact_email           VARCHAR(255),
-
-    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_merchant_settings UNIQUE (tenant_id, merchant_id),
     CONSTRAINT fk_merchant_settings_merchant_tenant
         FOREIGN KEY (tenant_id, merchant_id)
@@ -226,42 +209,33 @@ CREATE INDEX idx_merchant_settings_tenant_merchant ON merchant_settings (tenant_
 
 -- ---------------------------------------------------------------------
 -- transactions
--- Every row scoped by BOTH tenant_id and merchant_id.
 -- ---------------------------------------------------------------------
 CREATE TABLE transactions (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id               UUID NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
     merchant_id             UUID NOT NULL REFERENCES merchants (id) ON DELETE RESTRICT,
-
     parent_transaction_id   UUID REFERENCES transactions (id) ON DELETE SET NULL,
-
     type                    transaction_type NOT NULL,
     status                  transaction_status NOT NULL DEFAULT 'PENDING',
-
     amount                  NUMERIC(18, 2) NOT NULL,
     fees                    NUMERIC(18, 2) NOT NULL DEFAULT 0,
     currency                VARCHAR(10) NOT NULL DEFAULT 'GHS',
-
     internal_reference      VARCHAR(100) NOT NULL,
-    eganow_reference         VARCHAR(150),
-    eganow_transaction_id    VARCHAR(150),
-    payment_gateway_status   VARCHAR(100),
-    collection_msisdn        VARCHAR(30),
+    eganow_reference        VARCHAR(150),
+    eganow_transaction_id   VARCHAR(150),
+    payment_gateway_status  VARCHAR(100),
+    collection_msisdn       VARCHAR(30),
     kyc_msisdn               VARCHAR(30),
     payout_msisdn            VARCHAR(30),
     kyc_name                 VARCHAR(255),
-
     initiated_by_user_id     UUID REFERENCES users (id) ON DELETE SET NULL,
-    manually_triggered        BOOLEAN NOT NULL DEFAULT FALSE,
-
-    failure_reason           TEXT,
-    raw_webhook_payload       JSONB,
-    notification_sent        BOOLEAN NOT NULL DEFAULT FALSE,
-
-    created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at              TIMESTAMPTZ,
-
+    manually_triggered      BOOLEAN NOT NULL DEFAULT FALSE,
+    failure_reason          TEXT,
+    raw_webhook_payload     JSONB,
+    notification_sent       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at            TIMESTAMPTZ,
     CONSTRAINT uq_transactions_internal_reference UNIQUE (internal_reference),
     CONSTRAINT uq_transactions_parent_type UNIQUE (parent_transaction_id, type),
     CONSTRAINT fk_transactions_merchant_tenant
@@ -330,9 +304,7 @@ CREATE TRIGGER trg_merchants_default_settings AFTER INSERT ON merchants
     FOR EACH ROW EXECUTE FUNCTION create_default_merchant_settings();
 
 -- ---------------------------------------------------------------------
--- Idempotent tenant_eganow_credentials + tenant_notification_settings
--- row on tenant creation, so every downstream read can assume the row
--- exists rather than null-checking a missing 1:1 row everywhere.
+-- Idempotent tenant config rows on tenant creation.
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION create_default_tenant_config_rows()
 RETURNS TRIGGER AS $$

@@ -12,6 +12,8 @@ import { merchantsRouter } from './routes/merchants.js'
 import { transactionsRouter } from './routes/transactions.js'
 import { reportsRouter } from './routes/reports.js'
 import { usersRouter } from './routes/users.js'
+import { settlementConfigRouter } from './routes/settlementConfig.js'
+import { periodicSettlementsRouter } from './routes/periodicSettlements.js'
 import { UPLOAD_ROOT } from './services/fileStorage.js'
 import { ForbiddenError } from './middleware/auth.js'
 import { getRedisConnection } from './queue/queue.js'
@@ -89,6 +91,8 @@ app.use('/api/v1/merchants', merchantsRouter)
 app.use('/api/v1/transactions', transactionsRouter)
 app.use('/api/v1/reports', reportsRouter)
 app.use('/api/v1/users', usersRouter)
+app.use('/api/v1/settlement-config', settlementConfigRouter)
+app.use('/api/v1/periodic-settlements', periodicSettlementsRouter)
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Not found.' })
