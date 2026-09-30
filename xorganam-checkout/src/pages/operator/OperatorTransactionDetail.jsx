@@ -2,12 +2,14 @@ import { useEffect, useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { operatorApi } from '../../api/client'
 import { maskAccount } from '../../lib/mask'
+import { useOperatorAuth } from '../../context/OperatorAuthContext'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 export default function OperatorTransactionDetail() {
+  const { user } = useOperatorAuth()
   const { transactionId } = useParams()
   const [txn, setTxn] = useState(null)
   const [error, setError] = useState('')
@@ -16,6 +18,7 @@ export default function OperatorTransactionDetail() {
   const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '' })
   const [busy, setBusy] = useState(false)
   const [reconciling, setReconciling] = useState(false)
+  const [disputeReason, setDisputeReason] = useState('')
 
   const load = useCallback(() => {
     operatorApi.transactionDetail(transactionId).then(setTxn).catch((err) => setError(err.message))
@@ -31,8 +34,9 @@ export default function OperatorTransactionDetail() {
 
   const hasTransfer = txn.childTransactions.some((c) => c.type === 'INTERNAL_TRANSFER')
   const hasPayout = txn.childTransactions.some((c) => c.type === 'PAYOUT')
-  const canManuallyProcess = txn.type === 'COLLECTION' && txn.status === 'RECEIVED'
-  const canPayout = txn.type === 'COLLECTION' && txn.status === 'SWEPT_INTERNAL'
+  const branchManualAllowed = user?.role !== 'TENANT_BRANCH_MANAGER' || txn.allowManualControl
+  const canManuallyProcess = branchManualAllowed && txn.type === 'COLLECTION' && txn.status === 'RECEIVED'
+  const canPayout = branchManualAllowed && txn.type === 'COLLECTION' && txn.status === 'SWEPT_INTERNAL'
 
   async function handleReconcile() {
     setError('')
@@ -85,6 +89,18 @@ export default function OperatorTransactionDetail() {
     }
   }
 
+  async function raiseDispute(e) {
+    e.preventDefault()
+    setError('')
+    setNotice('')
+    setBusy(true)
+    try {
+      await operatorApi.raiseDispute({ merchantId: txn.merchantId, transactionId: txn.id, reason: disputeReason.trim() })
+      setNotice('Your payout concern was sent to the institution for review.')
+      setDisputeReason('')
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
+  }
+
   return (
     <div>
       <div className="portal-header">
@@ -104,6 +120,23 @@ export default function OperatorTransactionDetail() {
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
+
+      {txn.status === 'SWEPT_INTERNAL' && (txn.vendorLegStatus === 'PENDING' || txn.institutionLegStatus === 'PENDING') && (
+        <div className="status-banner" role="status">Your payout is still processing. This can take a moment; no action is needed.</div>
+      )}
+      {(txn.status === 'PARTIALLY_SETTLED' || txn.vendorLegStatus === 'FAILED' || txn.institutionLegStatus === 'FAILED') && (
+        <div className="card">
+          <h2>Part of this payment went through, part did not</h2>
+          <p>Your share: {txn.vendorLegStatus || 'Not available'}{txn.vendorFailureReason ? ` — ${txn.vendorFailureReason}` : ''}</p>
+          <p>Institution share: {txn.institutionLegStatus || 'Not available'}{txn.institutionFailureReason ? ` — ${txn.institutionFailureReason}` : ''}</p>
+          <form onSubmit={raiseDispute}>
+            <div className="field"><label htmlFor="dispute-reason">Something wrong with this payout?</label>
+              <textarea id="dispute-reason" required value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Tell us what you noticed." />
+            </div>
+            <button className="btn btn-primary" disabled={busy}>{busy ? 'Sending…' : 'Raise a dispute'}</button>
+          </form>
+        </div>
+      )}
 
       <div className="metrics-row">
         <div className="metric"><div className="label">Amount</div><div className="value">{money(txn.amount)} {txn.currency}</div></div>

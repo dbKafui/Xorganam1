@@ -42,6 +42,7 @@ async function computeTotals(whereClause, params) {
 reportsRouter.get(
   '/merchant',
   asyncHandler(async (req, res) => {
+    if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to reports.' })
     const { merchantId } = req.query
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
 
@@ -77,6 +78,7 @@ reportsRouter.get(
 reportsRouter.get(
   '/tenant',
   asyncHandler(async (req, res) => {
+    if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to tenant-wide reports.' })
     const tenantId = scopeOrRespond(req, res, req.query.tenantId)
     if (!tenantId) return
 

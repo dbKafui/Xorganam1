@@ -14,7 +14,7 @@ authRouter.post('/login', async (req, res) => {
   }
 
   const { rows } = await query(
-    `SELECT u.id, u.tenant_id, u.first_name, u.last_name, u.email, u.password_hash, u.role, u.is_active,
+    `SELECT u.id, u.tenant_id, u.merchant_id, u.first_name, u.last_name, u.email, u.password_hash, u.role, u.is_active,
             t.company_name AS tenant_company_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -49,7 +49,7 @@ authRouter.post('/login', async (req, res) => {
 
 authRouter.get('/me', authenticate, async (req, res) => {
   const { rows } = await query(
-    `SELECT u.id, u.tenant_id, u.first_name, u.last_name, u.email, u.role, u.is_active,
+    `SELECT u.id, u.tenant_id, u.merchant_id, u.first_name, u.last_name, u.email, u.role, u.is_active,
             t.company_name AS tenant_company_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -66,6 +66,7 @@ function mapUser(row) {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    merchantId: row.merchant_id || null,
     tenantCompanyName: row.tenant_company_name || null,
     firstName: row.first_name,
     lastName: row.last_name,

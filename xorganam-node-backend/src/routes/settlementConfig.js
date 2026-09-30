@@ -53,6 +53,7 @@ settlementConfigRouter.get(
 
     const { rows } = await query(
       `SELECT l.institution_id, i.name AS institution_name,
+              l.min_percentage, l.max_percentage, l.min_fixed_amount, l.max_fixed_amount,
               COALESCE(p.frequency_mode_min, l.frequency_mode_min) AS frequency_mode_min,
               COALESCE(p.frequency_mode_max, l.frequency_mode_max) AS frequency_mode_max,
               COALESCE(p.periodic_schedule_min, l.periodic_schedule_min) AS periodic_schedule_min,
@@ -63,7 +64,7 @@ settlementConfigRouter.get(
          JOIN institutions i ON i.id = l.institution_id
          LEFT JOIN institution_policy p
            ON p.institution_id = l.institution_id AND p.effective_to IS NULL
-        WHERE l.tenant_id = $1 AND l.status = 'ACTIVE'
+        WHERE l.tenant_id = $1 AND l.status = 'ACTIVE' AND l.verification_status = 'APPROVED'
         ORDER BY i.name`,
       [tenantId]
     )
@@ -71,6 +72,10 @@ settlementConfigRouter.get(
     res.json(rows.map((row) => ({
       institutionId: row.institution_id,
       institutionName: row.institution_name,
+      splitBounds: {
+        percentage: { minimum: row.min_percentage, maximum: row.max_percentage },
+        fixed: { minimum: row.min_fixed_amount, maximum: row.max_fixed_amount }
+      },
       frequencyMode: {
         minimum: row.frequency_mode_min,
         maximum: row.frequency_mode_max
@@ -92,6 +97,9 @@ settlementConfigRouter.put(
     if (!tenantId) return
 
     const { merchantId, institutionId } = req.params
+    if (req.user.role === 'TENANT_BRANCH_MANAGER' && String(req.user.merchantId) !== String(merchantId)) {
+      return res.status(403).json({ message: 'Branch managers can only configure their assigned merchant.' })
+    }
     const { frequencyMode, periodicSchedule, priorityDeductionSelected, vendorPayoutMode, scheduleAnchorDate } = req.body || {}
     if (!['PER_TRANSACTION', 'PERIODIC'].includes(frequencyMode)) {
       return res.status(400).json({ message: 'frequencyMode must be PER_TRANSACTION or PERIODIC.' })
@@ -112,7 +120,8 @@ settlementConfigRouter.put(
          FROM tenant_institution_links l
          LEFT JOIN institution_policy p
            ON p.institution_id = l.institution_id AND p.effective_to IS NULL
-        WHERE l.tenant_id = $1 AND l.institution_id = $2 AND l.status = 'ACTIVE'`,
+        WHERE l.tenant_id = $1 AND l.institution_id = $2 AND l.status = 'ACTIVE'
+          AND l.verification_status = 'APPROVED'`,
       [tenantId, institutionId]
     )
     if (bounds.length === 0) return res.status(404).json({ message: 'Active institution link not found.' })
@@ -145,10 +154,13 @@ settlementConfigRouter.put(
     }
 
     const merchant = await query(
-      'SELECT 1 FROM merchants WHERE id = $1 AND tenant_id = $2 AND is_active',
+      'SELECT account_setup_status FROM merchants WHERE id = $1 AND tenant_id = $2 AND is_active',
       [merchantId, tenantId]
     )
     if (merchant.rows.length === 0) return res.status(404).json({ message: 'Active merchant not found.' })
+    if (merchant.rows[0].account_setup_status && merchant.rows[0].account_setup_status !== 'ACTIVE') {
+      return res.status(409).json({ message: 'Activate your branch before configuring split settlement.' })
+    }
 
     const { rows } = await query(
       `INSERT INTO tenant_merchant_settlement_config

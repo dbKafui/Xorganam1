@@ -8,8 +8,6 @@ const initialForm = {
   mobileMoneyNumber: '',
   networkProvider: 'MTNGH',
   payoutMode: 'AUTO_SWEEP',
-  eganowCollectionAccountId: '',
-  eganowPayoutAccountId: ''
 }
 
 export default function OperatorMerchantForm() {
@@ -42,7 +40,7 @@ export default function OperatorMerchantForm() {
       <div className="portal-header">
         <div>
           <h1>Add a merchant</h1>
-          <p>Set up a market woman's wallet pair so her payments can be collected and paid out.</p>
+          <p>Add a branch now. Platform operations will connect its Eganow accounts before it can accept payments.</p>
         </div>
         <Link to="/operator/merchants" className="btn btn-secondary">Back to merchants</Link>
       </div>
@@ -78,18 +76,8 @@ export default function OperatorMerchantForm() {
           </select>
         </div>
 
-        <div className="two-col">
-          <div className="field">
-            <label>Eganow collection account ID</label>
-            <input required value={form.eganowCollectionAccountId} onChange={set('eganowCollectionAccountId')} />
-          </div>
-          <div className="field">
-            <label>Eganow payout account ID</label>
-            <input required value={form.eganowPayoutAccountId} onChange={set('eganowPayoutAccountId')} />
-          </div>
-        </div>
         <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -8, marginBottom: 16 }}>
-          These come from Eganow when you provision a new sub-account for this merchant.
+          This branch will appear in your dashboard immediately. Collections and payouts stay unavailable until platform operations completes account setup.
         </p>
 
         <button className="btn btn-primary" disabled={saving}>{saving ? 'Adding…' : 'Add merchant'}</button>

@@ -12,20 +12,21 @@
     "seed:admin": "node src/scripts/seedPlatformAdmin.js",
     "lint": "eslint . --ext .js",
     "format": "prettier --write .",
-    "test": "node --test ./test/env.test.js"
+    "test": "node --test ./test/*.test.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "pg": "^8.12.0",
-    "bullmq": "^5.12.12",
-    "ioredis": "^5.4.1",
-    "dotenv": "^16.4.5",
     "axios": "^1.7.7",
-    "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3",
-    "multer": "^1.4.5-lts.1",
+    "bullmq": "^5.12.12",
     "cors": "^2.8.5",
-    "express-rate-limit": "^7.4.0"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.12.0",
+    "sanitize-html": "^2.17.7"
   },
   "devDependencies": {
     "eslint": "^8.56.0",

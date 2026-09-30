@@ -21,6 +21,26 @@ function scheduleValue(schedule) {
   return { unit, interval }
 }
 
+function duePeriods(anchor, schedule, now = new Date()) {
+  const count = schedule.unit === 'YEARS'
+    ? Math.floor((now.getUTCFullYear() - Number(String(anchor).slice(0, 4))) / schedule.interval)
+    : dateDifferenceInPeriods(anchor, now.toISOString().slice(0, 10), schedule)
+  if (count < 1) return []
+  if (schedule.unit === 'YEARS') {
+    const anchorYear = Number(String(anchor).slice(0, 4))
+    return Array.from({ length: count }, (_, index) => {
+      const startYear = anchorYear + index * schedule.interval
+      const endYear = startYear + schedule.interval
+      return { key: `${startYear}-01-01`, start: `${startYear}-01-01`, end: `${endYear}-01-01` }
+    })
+  }
+  return Array.from({ length: count }, (_, index) => ({
+    key: addPeriod(anchor, schedule, index),
+    start: addPeriod(anchor, schedule, index),
+    end: addPeriod(anchor, schedule, index + 1)
+  }))
+}
+
 function addPeriod(date, schedule, count) {
   const result = new Date(`${date}T00:00:00.000Z`)
   const amount = schedule.interval * count
@@ -85,16 +105,27 @@ async function loadDueConfigurations(now) {
   const { rows } = await query(
     `SELECT c.*, i.name AS institution_name, i.settlement_msisdn,
             i.settlement_account_name, m.display_name, m.mobile_money_number,
-         m.network_provider, m.eganow_payout_account_id
+         m.network_provider, m.eganow_payout_account_id,
+         COALESCE(l.status, 'INACTIVE') AS institution_link_status,
+         t.status AS tenant_status
        FROM tenant_merchant_settlement_config c
        JOIN institutions i ON i.id = c.institution_id
        JOIN merchants m ON m.id = c.merchant_id AND m.tenant_id = c.tenant_id
-      WHERE c.frequency_mode = 'PERIODIC' AND m.is_active
+       JOIN tenants t ON t.id = c.tenant_id
+       JOIN tenant_institution_links l
+         ON l.tenant_id = c.tenant_id AND l.institution_id = c.institution_id
+      WHERE c.frequency_mode = 'PERIODIC'
+        AND m.is_active
+        AND i.status = 'ACTIVE'
+        AND l.status = 'ACTIVE'
+        AND t.status = 'ACTIVE'
       ORDER BY c.created_at`,
     []
   )
-  return rows.map((row) => ({ ...row, period: completedPeriod(row.schedule_anchor_date, scheduleValue(row.periodic_schedule), now) }))
-    .filter((row) => row.period)
+  return rows.map((row) => ({
+    ...row,
+    periods: duePeriods(row.schedule_anchor_date, scheduleValue(row.periodic_schedule), now)
+  })).filter((row) => row.periods.length > 0)
 }
 
 async function accrueConfiguration(config) {
@@ -124,7 +155,7 @@ async function accrueConfiguration(config) {
       `INSERT INTO periodic_accrual_ledger
          (tenant_id, merchant_id, institution_id, split_rule_id, source_transaction_id, accrued_amount, period_key)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (source_transaction_id) DO NOTHING`,
+       ON CONFLICT (source_transaction_id, institution_id) DO NOTHING`,
       [config.tenant_id, config.merchant_id, config.institution_id, source.split_rule_id, source.id, institutionAmount, config.period.key]
     )
   }
@@ -265,13 +296,21 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
   const selected = tenantId ? configs.filter((config) => config.tenant_id === tenantId) : configs
   const results = []
   for (const config of selected) {
-    await accrueConfiguration(config)
-    const parent = await createSweep(config)
+    for (const period of config.periods) {
+      const periodConfig = { ...config, period }
+      await accrueConfiguration(periodConfig)
+      const parent = await createSweep(periodConfig)
     if (!parent) continue
 
+    const institutionLeg = await createLeg(parent, periodConfig, 'INSTITUTION', parent.institutionAmount, periodConfig.settlement_msisdn)
+    const vendorLeg = periodConfig.vendor_payout_mode === 'PERIODIC'
+      ? await createLeg(parent, periodConfig, 'VENDOR', parent.vendorAmount, periodConfig.mobile_money_number)
+      : null
+    const pendingLegs = [institutionLeg, vendorLeg].filter((leg) => leg && leg.status !== 'PAID_OUT' && leg.status !== 'FAILED')
+    const outstandingAmount = pendingLegs.reduce((total, leg) => total + Number(leg.amount), 0)
     let balance
     try {
-      balance = await getPayoutWalletBalance(config.tenant_id, config.eganow_payout_account_id)
+      balance = await getPayoutWalletBalance(periodConfig.tenant_id, periodConfig.eganow_payout_account_id)
     } catch (error) {
       await query(
         `UPDATE institution_sweep_ledger
@@ -283,7 +322,7 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
       continue
     }
 
-    if (Number(balance) < Number(parent.amount)) {
+    if (Number(balance) < outstandingAmount) {
       await query(
         `UPDATE institution_sweep_ledger SET status = 'ACCRUED_UNSWEPT',
                 failure_reason = 'Insufficient payout-wallet balance.', updated_at = now()
@@ -293,16 +332,11 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
       results.push({ sweepId: parent.id, status: 'ACCRUED_UNSWEPT' })
       continue
     }
-
-    const institutionLeg = await createLeg(parent, config, 'INSTITUTION', parent.institutionAmount, config.settlement_msisdn)
-    const vendorLeg = config.vendor_payout_mode === 'PERIODIC'
-      ? await createLeg(parent, config, 'VENDOR', parent.vendorAmount, config.mobile_money_number)
-      : null
     let institutionStatus
     let vendorStatus = 'PAID_OUT'
     try {
-      institutionStatus = await settleLeg(institutionLeg, config)
-      vendorStatus = vendorLeg ? await settleLeg(vendorLeg, config, config.network_provider) : 'PAID_OUT'
+      institutionStatus = await settleLeg(institutionLeg, periodConfig)
+      vendorStatus = vendorLeg ? await settleLeg(vendorLeg, periodConfig, periodConfig.network_provider) : 'PAID_OUT'
     } catch (error) {
       await query(
         `UPDATE institution_sweep_ledger
@@ -332,13 +366,14 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
         `UPDATE periodic_accrual_ledger
             SET status = 'SWEPT', swept_transaction_id = $1, swept_at = now()
           WHERE tenant_id = $2 AND merchant_id = $3 AND institution_id = $4
-            AND period_key = $5 AND status = 'PENDING'`,
-        [parent.id, config.tenant_id, config.merchant_id, config.institution_id, config.period.key]
+            AND period_key = $5 AND source_transaction_id IS NOT NULL AND status = 'PENDING'`,
+        [parent.id, periodConfig.tenant_id, periodConfig.merchant_id, periodConfig.institution_id, periodConfig.period.key]
       )
     }
     results.push({ sweepId: parent.id, status })
+    }
   }
   return results
 }
 
-export const periodicSettlementInternals = { completedPeriod, scheduleValue, RETRY_WINDOW_MS }
+export const periodicSettlementInternals = { completedPeriod, duePeriods, scheduleValue, RETRY_WINDOW_MS }

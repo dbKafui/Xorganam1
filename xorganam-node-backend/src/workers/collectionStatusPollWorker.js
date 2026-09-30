@@ -1,9 +1,11 @@
 import { Worker } from 'bullmq'
 import { getRedisConnection, COLLECTION_STATUS_POLL_QUEUE, enqueueCollectForMeJob } from '../queue/queue.js'
-import { query } from '../db/pool.js'
+import { query, withTransaction } from '../db/pool.js'
 import { queryTransactionStatus, EganowApiError, isGatewayPending, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { sendMerchantSms } from '../services/notificationService.js'
 import { refreshSplitParentStatus } from '../services/splitPaymentService.js'
+import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
+import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10)
 const POLL_DELAY_MS = parseInt(process.env.COLLECTION_STATUS_POLL_DELAY_MS || '5000', 10)
@@ -82,25 +84,19 @@ async function findRootCollectionId(transactionId) {
 }
 
 async function markInternalTransferSuccessful(txn, gatewayStatus) {
-  await query(
-    `UPDATE transactions
-        SET status = 'SWEPT_INTERNAL',
-            payment_gateway_status = $2,
-            completed_at = now(),
-            updated_at = now()
-      WHERE id = $1`,
-    [txn.id, gatewayStatus]
-  )
-
-  if (txn.parent_transaction_id) {
-    await query(
-      `UPDATE transactions
-          SET status = 'SWEPT_INTERNAL',
-              updated_at = now()
-        WHERE id = $1 AND status IN ('RECEIVED', 'PENDING')`,
-      [txn.parent_transaction_id]
+  await withTransaction(async (client) => {
+    await client.query(
+      `UPDATE transactions SET status = 'SWEPT_INTERNAL', payment_gateway_status = $2,
+              completed_at = now(), updated_at = now() WHERE id = $1`, [txn.id, gatewayStatus]
     )
-  }
+    if (txn.parent_transaction_id) {
+      await client.query(
+        `UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now()
+          WHERE id = $1 AND status IN ('RECEIVED', 'PENDING')`, [txn.parent_transaction_id]
+      )
+      await markCreditInstallmentCollected(client, txn.parent_transaction_id)
+    }
+  })
 }
 
 async function markPayoutSuccessful(txn, gatewayStatus) {
@@ -235,15 +231,15 @@ async function processCollectionStatusPollJob(job) {
 
       // Gateway success confirms the collection. The payout lifecycle is
       // tracked separately as SWEPT_INTERNAL / PAID_OUT.
-      await query(
-        `UPDATE transactions
-         SET status = 'RECEIVED',
-             payment_gateway_status = $2,
-             completed_at = now(),
-             updated_at = now()
-         WHERE id = $1`,
-        [transactionId, result.status]
-      )
+      await withTransaction(async (tx) => {
+        await tx.query(
+          `UPDATE transactions
+           SET status = 'RECEIVED', payment_gateway_status = $2,
+               completed_at = now(), updated_at = now()
+           WHERE id = $1`, [transactionId, result.status]
+        )
+        await markStorefrontOrderPaid(tx, transactionId)
+      })
 
       console.log(`[status-poll] transaction ${transactionId} marked RECEIVED`) 
 

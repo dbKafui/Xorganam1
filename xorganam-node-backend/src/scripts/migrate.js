@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -26,7 +27,12 @@ async function getMigrations() {
 }
 
 async function run() {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is required to run database migrations.');
+  }
+
+  const client = new Client({ connectionString });
   await client.connect();
 
   try {

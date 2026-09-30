@@ -54,6 +54,7 @@ tenantsRouter.post(
 tenantsRouter.get(
   '/:tenantId',
   asyncHandler(async (req, res) => {
+    if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to tenant-wide settings.' })
     let tenantId
     try {
       tenantId = resolveTenantScope(req, req.params.tenantId)

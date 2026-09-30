@@ -549,3 +549,62 @@ table.ledger a {
 .kv-row span:first-child {
   color: var(--muted);
 }
+
+.credit-customer-content {
+  width: min(920px, 100%);
+}
+
+.credit-customer-content .pay-card {
+  margin: 0 auto 16px;
+}
+
+.credit-customer-plan .pay-btn {
+  margin-top: 14px;
+}
+
+.credit-installments {
+  margin-top: 12px;
+}
+
+.credit-plan-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+}
+
+button.credit-plan-row {
+  cursor: pointer;
+}
+
+.credit-plan-row small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.credit-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 600px) {
+  .credit-customer-content .portal-header {
+    align-items: center;
+  }
+  .credit-customer-plan .kv-row {
+    gap: 12px;
+    align-items: center;
+  }
+}

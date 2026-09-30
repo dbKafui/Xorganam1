@@ -14,12 +14,28 @@ import { reportsRouter } from './routes/reports.js'
 import { usersRouter } from './routes/users.js'
 import { settlementConfigRouter } from './routes/settlementConfig.js'
 import { periodicSettlementsRouter } from './routes/periodicSettlements.js'
+import { tenantInstitutionLinksRouter } from './routes/tenantInstitutionLinks.js'
+import { tenantPortalRouter } from './routes/tenantPortal.js'
+import { notificationsRouter } from './routes/notifications.js'
+import { creditPlansRouter, creditPaymentsRouter } from './routes/creditPlans.js'
+import { creditCustomerPublicRouter, creditCustomerRouter } from './routes/creditCustomers.js'
+import { creditWebhooksRouter } from './routes/creditWebhooks.js'
+import { publicStorefrontRouter, storefrontRouter, storefrontCustomerRouter, storefrontAdminRouter } from './routes/storefront.js'
+import { institutionAuthRouter, institutionPortalRouter } from './routes/institutionPortal.js'
 import { UPLOAD_ROOT } from './services/fileStorage.js'
 import { ForbiddenError } from './middleware/auth.js'
 import { getRedisConnection } from './queue/queue.js'
 import './workers/eganowTokenRefreshWorker.js'
 
 const app = express()
+
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https: http://localhost:3000 ws:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  next()
+})
 
 app.use(
   cors({
@@ -75,6 +91,22 @@ const registrationLimiter = rateLimit({
   message: { message: 'Too many registration attempts, please try again later.' }
 })
 
+const creditCustomerAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many verification requests. Please try again later.' }
+})
+
+const institutionLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many login attempts. Please try again later.' }
+})
+
 // Log all incoming HTTP requests for debugging frontend → backend flow
 app.use((req, res, next) => {
   console.log(`[http] ${req.method} ${req.path}`)
@@ -83,15 +115,30 @@ app.use((req, res, next) => {
 
 app.use('/api/v1/webhooks', webhooksRouter)
 app.use('/api/v1/public/tenants/register', registrationLimiter)
+app.use('/api/v1/public/credit-customer', creditCustomerAuthLimiter, creditCustomerPublicRouter)
+app.use('/api/v1/public/credit-installments', publicLimiter, creditPaymentsRouter)
+app.use('/api/v1/public', publicLimiter, publicStorefrontRouter)
 app.use('/api/v1/public', publicLimiter, publicRouter)
 
 app.use('/api/v1/auth', authRouter)
+app.use('/api/v1/institution-auth/login', institutionLoginLimiter)
+app.use('/api/v1/institution-auth', institutionAuthRouter)
+app.use('/api/v1/institution-portal', institutionPortalRouter)
 app.use('/api/v1/tenants', tenantsRouter)
 app.use('/api/v1/merchants', merchantsRouter)
 app.use('/api/v1/transactions', transactionsRouter)
 app.use('/api/v1/reports', reportsRouter)
 app.use('/api/v1/users', usersRouter)
 app.use('/api/v1/settlement-config', settlementConfigRouter)
+app.use('/api/v1/tenant-institution-links', tenantInstitutionLinksRouter)
+app.use('/api/v1/tenant-portal', tenantPortalRouter)
+app.use('/api/v1/notifications', notificationsRouter)
+app.use('/api/v1/credit-plans', creditPlansRouter)
+app.use('/api/v1/credit-customer', creditCustomerRouter)
+app.use('/api/v1/credit-webhooks', creditWebhooksRouter)
+app.use('/api/v1/storefront', storefrontRouter)
+app.use('/api/v1/storefront-customer', storefrontCustomerRouter)
+app.use('/api/v1/storefront-admin', storefrontAdminRouter)
 app.use('/api/v1/periodic-settlements', periodicSettlementsRouter)
 
 app.use((req, res) => {

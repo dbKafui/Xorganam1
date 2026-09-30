@@ -1,12 +1,14 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { operatorApi } from '../../api/client'
+import { useOperatorAuth } from '../../context/OperatorAuthContext'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 export default function OperatorMerchantDetail() {
+  const { user } = useOperatorAuth()
   const { merchantId } = useParams()
   const [merchant, setMerchant] = useState(null)
   const [report, setReport] = useState(null)
@@ -17,8 +19,8 @@ export default function OperatorMerchantDetail() {
 
   const load = useCallback(() => {
     operatorApi.getMerchant(merchantId).then((m) => { setMerchant(m); setEditForm(m) }).catch((err) => setError(err.message))
-    operatorApi.merchantReport(merchantId).then(setReport).catch(() => {})
-  }, [merchantId])
+    if (user?.role !== 'TENANT_BRANCH_MANAGER') operatorApi.merchantReport(merchantId).then(setReport).catch(() => {})
+  }, [merchantId, user?.role])
 
   useEffect(() => {
     load()
@@ -67,13 +69,18 @@ export default function OperatorMerchantDetail() {
       <div className="portal-header">
         <div>
           <h1>{merchant.displayName}</h1>
-          <p>{merchant.payoutMode === 'AUTO_SWEEP' ? 'Collect for me' : 'Collection only'} · Eganow accounts on file</p>
+          <p>{merchant.payoutMode === 'AUTO_SWEEP' ? 'We move your money automatically' : 'You control when it moves'}</p>
         </div>
         <Link to="/operator/merchants" className="btn btn-secondary">Back to merchants</Link>
       </div>
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
+      {merchant.accountSetupStatus !== 'ACTIVE' && (
+        <div className="status-banner error" role="status">
+          <span className="status-icon">!</span><span>Eganow account setup is pending. This branch cannot collect or pay out until platform operations completes setup.</span>
+        </div>
+      )}
 
       {report && (
         <div className="metrics-row">
@@ -84,21 +91,21 @@ export default function OperatorMerchantDetail() {
       )}
 
       <div className="card">
-        <h2>Manual control</h2>
+        <h2>How you get paid</h2>
         <p style={{ fontSize: 13, marginBottom: 12 }}>
           {merchant.payoutMode === 'AUTO_SWEEP'
-            ? "This merchant is on Collect for me — her money moves automatically. Granting manual control lets her (or your staff) still trigger a transfer/payout by hand if needed."
-            : 'This merchant is on Collection only — manual control is how her money actually moves.'}
+            ? 'We move your money automatically. Allow manual release to let authorized staff trigger a transfer by hand when needed.'
+            : 'Collected money waits for an authorized person to release it manually.'}
         </p>
         <div className="kv-row">
-          <span>Allow manual control</span>
-          <button className="btn btn-secondary btn-sm" onClick={toggleManualControl}>
-            {merchant.allowManualControl ? 'Enabled — click to disable' : 'Disabled — click to enable'}
-          </button>
+          <span>Allow manual release even in automatic mode</span>
+          {user?.role === 'TENANT_BRANCH_MANAGER'
+            ? <strong>{merchant.allowManualControl ? 'Enabled' : 'Disabled'}</strong>
+            : <button className="btn btn-secondary btn-sm" onClick={toggleManualControl}>{merchant.allowManualControl ? 'Enabled — click to disable' : 'Disabled — click to enable'}</button>}
         </div>
       </div>
 
-      <form className="card" onSubmit={saveDetails}>
+      {user?.role !== 'TENANT_BRANCH_MANAGER' && <form className="card" onSubmit={saveDetails}>
         <h2>Details</h2>
         <div className="two-col">
           <div className="field">
@@ -135,7 +142,7 @@ export default function OperatorMerchantDetail() {
           </select>
         </div>
         <button className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
-      </form>
+      </form>}
 
       <div className="card">
         <h2>Payment link</h2>

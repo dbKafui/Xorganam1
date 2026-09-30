@@ -5,6 +5,7 @@ import { getTenantWebhookSecret, TenantCredentialsError } from '../services/cred
 import { hmacSha256Hex, timingSafeEqualHex } from '../security/encryption.js'
 import { enqueueCollectForMeJob } from '../queue/queue.js'
 import { sendMerchantSms, sendMerchantEmail } from '../services/notificationService.js'
+import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
 
 export const webhooksRouter = Router()
 
@@ -227,7 +228,7 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
     // initiated by the frontend/backend and is waiting for a webhook confirmation.
     // This matches on eganow_reference (set by the collection endpoint) and type.
     const existingByRef = await client.query(
-      `SELECT id, status FROM transactions 
+      `SELECT id, status, order_id FROM transactions
        WHERE tenant_id = $1 AND eganow_reference = $2 AND type = 'COLLECTION'`,
       [tenantId, eganowReference]
     )
@@ -236,7 +237,8 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
       const existing = existingByRef.rows[0]
       
       // If we already processed this webhook, it's a duplicate.
-      if (existing.status !== 'PENDING') {
+      const lateOrderPayment = existing.status === 'FAILED' && mappedStatus === 'RECEIVED' && existing.order_id
+      if (existing.status !== 'PENDING' && !lateOrderPayment) {
         return { id: existing.id, alreadyProcessed: true }
       }
 
@@ -252,6 +254,8 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
         [existing.id, mappedStatus, eganowTransactionId, JSON.stringify(rawPayload), status]
       )
 
+      if (mappedStatus === 'RECEIVED') await markStorefrontOrderPaid(client, existing.id)
+
       return { id: existing.id, alreadyProcessed: false }
     }
 
@@ -259,7 +263,7 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
     // internal reference (field set initially). This handles cases where
     // the webhook comes with only transactionId or other identifiers.
     const existingByTxnId = await client.query(
-      `SELECT id, status FROM transactions 
+      `SELECT id, status, order_id FROM transactions
        WHERE tenant_id = $1 AND eganow_transaction_id = $2 AND type = 'COLLECTION'`,
       [tenantId, eganowTransactionId]
     )
@@ -267,7 +271,8 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
     if (existingByTxnId.rows.length > 0) {
       const existing = existingByTxnId.rows[0]
       
-      if (existing.status !== 'PENDING') {
+      const lateOrderPayment = existing.status === 'FAILED' && mappedStatus === 'RECEIVED' && existing.order_id
+      if (existing.status !== 'PENDING' && !lateOrderPayment) {
         return { id: existing.id, alreadyProcessed: true }
       }
 
@@ -281,6 +286,8 @@ async function recordCollectionTransaction({ tenantId, merchantId, eganowReferen
          WHERE id = $1`,
         [existing.id, mappedStatus, eganowReference, JSON.stringify(rawPayload), status]
       )
+
+      if (mappedStatus === 'RECEIVED') await markStorefrontOrderPaid(client, existing.id)
 
       return { id: existing.id, alreadyProcessed: false }
     }

@@ -11,6 +11,7 @@ import Merchants from './pages/Merchants'
 import TransactionsList from './pages/Transactions/TransactionsList'
 import TransactionDetail from './pages/Transactions/TransactionDetail'
 import Reports from './pages/Reports'
+import StorefrontOperations from './pages/StorefrontOperations'
 
 export default function App() {
   return (
@@ -34,6 +35,7 @@ export default function App() {
             <Route path="transactions" element={<TransactionsList />} />
             <Route path="transactions/:transactionId" element={<TransactionDetail />} />
             <Route path="reports" element={<Reports />} />
+            <Route path="storefront-operations" element={<StorefrontOperations />} />
           </Route>
         </Routes>
       </AuthProvider>

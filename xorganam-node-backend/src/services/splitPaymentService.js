@@ -8,7 +8,7 @@ import {
   isGatewaySuccess
 } from './eganowClient.js'
 
-function calculateInstitutionAmount(collectionAmount, rule) {
+export function calculateInstitutionAmount(collectionAmount, rule) {
   const amount = Number(collectionAmount)
   const configuredAmount = Number(rule.amount)
   const institutionAmount = rule.type === 'PERCENTAGE'
@@ -100,7 +100,7 @@ export async function refreshSplitParentStatus(collectionId) {
     [collectionId]
   )
   const state = rows[0]
-  const status = Number(state.expected) === 2 && Number(state.settled) === 2
+  const status = Number(state.expected) > 0 && Number(state.expected) === Number(state.settled)
     ? 'PAID_OUT'
     : Number(state.failed) > 0 || Number(state.settled) > 0
       ? 'PARTIALLY_SETTLED'
@@ -118,7 +118,8 @@ export async function refreshSplitParentStatus(collectionId) {
 }
 
 export async function processSplitPayout({ tenantId, merchantId, collectionTxn, merchant, rule }) {
-  if (rule.mode !== 'PER_TRANSACTION') {
+  const vendorOnlyForPeriodic = rule.mode === 'PERIODIC' && rule.vendor_payout_mode === 'PER_TRANSACTION'
+  if (rule.mode !== 'PER_TRANSACTION' && !vendorOnlyForPeriodic) {
     return { skipped: true, reason: 'periodic-rule-requires-accrual-worker' }
   }
 
@@ -133,23 +134,31 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
     institutionId: null
   }
 
-  const legs = [
-    {
-      payoutLeg: 'VENDOR',
-      amount: vendorAmount,
-      destination: vendor,
-      network: merchant.network_provider,
-      narration: `Vendor payout for collection ${collectionTxn.internal_reference}`
-    },
-    {
-      payoutLeg: 'INSTITUTION',
-      amount: institutionAmount,
-      destination: institution,
-      network: null,
-      narration: `Institution payout for collection ${collectionTxn.internal_reference}`
-    }
-  ]
-  if (rule.leg_execution_order === 'INSTITUTION_FIRST') legs.reverse()
+  const legs = vendorOnlyForPeriodic
+    ? [{
+        payoutLeg: 'VENDOR',
+        amount: vendorAmount,
+        destination: vendor,
+        network: merchant.network_provider,
+        narration: `Vendor payout for collection ${collectionTxn.internal_reference}`
+      }]
+    : [
+        {
+          payoutLeg: 'VENDOR',
+          amount: vendorAmount,
+          destination: vendor,
+          network: merchant.network_provider,
+          narration: `Vendor payout for collection ${collectionTxn.internal_reference}`
+        },
+        {
+          payoutLeg: 'INSTITUTION',
+          amount: institutionAmount,
+          destination: institution,
+          network: null,
+          narration: `Institution payout for collection ${collectionTxn.internal_reference}`
+        }
+      ]
+  if (!vendorOnlyForPeriodic && (rule.leg_execution_order === 'INSTITUTION_FIRST' || rule.priority_deduction_selected)) legs.reverse()
 
   const results = {}
   for (const legDefinition of legs) {

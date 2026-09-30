@@ -12,6 +12,9 @@ let connection = null
 let collectForMeQueue = null
 let collectionStatusPollQueue = null
 let periodicSettlementQueue = null
+let creditWebhookQueue = null
+let creditReminderQueue = null
+let creditCashSweepQueue = null
 let connectError = null
 
 function createRedisConnection() {
@@ -45,6 +48,9 @@ export function getRedisConnection() {
 export const COLLECT_FOR_ME_QUEUE = 'collect-for-me'
 export const COLLECTION_STATUS_POLL_QUEUE = 'collection-status-poll'
 export const PERIODIC_SETTLEMENT_QUEUE = 'periodic-settlement'
+export const CREDIT_WEBHOOK_QUEUE = 'credit-webhook-delivery'
+export const CREDIT_REMINDER_QUEUE = 'credit-installment-reminders'
+export const CREDIT_CASH_SWEEP_QUEUE = 'credit-cash-installment-sweeps'
 
 export function getRedisHealth() {
   return {
@@ -149,4 +155,44 @@ export async function enqueuePeriodicSettlementJob(jobData = {}) {
     removeOnComplete: { age: 7 * 24 * 60 * 60 },
     removeOnFail: { age: 30 * 24 * 60 * 60 }
   })
+}
+
+export function getCreditWebhookQueue() {
+  if (!creditWebhookQueue) creditWebhookQueue = new Queue(CREDIT_WEBHOOK_QUEUE, { connection: getRedisConnection() })
+  return creditWebhookQueue
+}
+
+export async function enqueueCreditWebhookDelivery(eventId) {
+  const queue = getCreditWebhookQueue()
+  return queue.add('deliver-credit-webhook', { eventId }, {
+    jobId: `credit-webhook-${String(eventId).replace(/:/g, '-')}`,
+    attempts: 10,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: { age: 7 * 24 * 60 * 60 },
+    removeOnFail: { age: 30 * 24 * 60 * 60 }
+  })
+}
+
+export function getCreditReminderQueue() {
+  if (!creditReminderQueue) creditReminderQueue = new Queue(CREDIT_REMINDER_QUEUE, { connection: getRedisConnection() })
+  return creditReminderQueue
+}
+
+export async function enqueueCreditReminder(job) {
+  const queue = getCreditReminderQueue()
+  const jobId = job.type === 'OVERDUE'
+    ? `credit-overdue-${job.installmentId}`
+    : `credit-reminder-${job.installmentId}-${job.type}-${job.reminderDate}`
+  return queue.add(job.type === 'OVERDUE' ? 'mark-installment-overdue' : 'send-installment-reminder', job, {
+    jobId,
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: { age: 7 * 24 * 60 * 60 },
+    removeOnFail: { age: 30 * 24 * 60 * 60 }
+  })
+}
+
+export function getCreditCashSweepQueue() {
+  if (!creditCashSweepQueue) creditCashSweepQueue = new Queue(CREDIT_CASH_SWEEP_QUEUE, { connection: getRedisConnection() })
+  return creditCashSweepQueue
 }

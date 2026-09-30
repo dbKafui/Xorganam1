@@ -6,6 +6,7 @@ import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewayS
 import { TenantCredentialsError } from '../services/credentialsService.js'
 import { sendMerchantSms } from '../services/notificationService.js'
 import { processSplitPayout } from '../services/splitPaymentService.js'
+import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '10', 10)
 
@@ -217,7 +218,9 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
         t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference, t.payout_msisdn,
         sr.id AS split_rule_id, sr.mode AS split_rule_mode, sr.type AS split_rule_type,
         sr.amount AS split_rule_amount, sr.leg_execution_order,
-        i.id AS split_institution_id, i.settlement_msisdn
+        i.id AS split_institution_id, i.settlement_msisdn,
+        COALESCE(smc.vendor_payout_mode, 'PERIODIC') AS vendor_payout_mode,
+        COALESCE(smc.priority_deduction_selected, FALSE) AS priority_deduction_selected
      FROM merchants m
      JOIN transactions t
        ON t.tenant_id = m.tenant_id AND t.merchant_id = m.id AND t.id = $3
@@ -230,10 +233,17 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
           AND (r.effective_to IS NULL OR r.effective_to > now())
           AND (r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = t.merchant_id
                OR r.scope_level = 'TENANT_DEFAULT' AND r.merchant_id IS NULL)
+          AND EXISTS (SELECT 1 FROM tenant_institution_links l
+                       WHERE l.tenant_id = r.tenant_id AND l.institution_id = r.institution_id
+                         AND l.status = 'ACTIVE' AND l.verification_status = 'APPROVED')
         ORDER BY CASE WHEN r.merchant_id = t.merchant_id THEN 0 ELSE 1 END, r.created_at DESC
         LIMIT 1
      ) sr ON TRUE
      LEFT JOIN institutions i ON i.id = sr.institution_id
+     LEFT JOIN tenant_merchant_settlement_config smc
+       ON smc.tenant_id = t.tenant_id
+      AND smc.merchant_id = t.merchant_id
+      AND smc.institution_id = sr.institution_id
      WHERE m.tenant_id = $1 AND m.id = $2`,
     [tenantId, merchantId, transactionId]
   )
@@ -266,7 +276,9 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
           amount: row.split_rule_amount,
           leg_execution_order: row.leg_execution_order,
           institution_id: row.split_institution_id,
-          settlement_msisdn: row.settlement_msisdn
+          settlement_msisdn: row.settlement_msisdn,
+          vendor_payout_mode: row.vendor_payout_mode,
+          priority_deduction_selected: row.priority_deduction_selected
         }
       : null
   }
@@ -314,15 +326,35 @@ async function findChildTransaction(parentTransactionId, type, payoutLeg = 'NONE
 }
 
 async function markTransactionResult(transactionId, { success, status, paymentGatewayStatus, eganowReference, eganowTransactionId, failureReason }) {
-  await query(
+  const update = async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE transactions
+          SET status = $2,
+              eganow_reference = COALESCE($3, eganow_reference),
+              eganow_transaction_id = COALESCE($4, eganow_transaction_id),
+              failure_reason = $5,
+              payment_gateway_status = COALESCE($7, payment_gateway_status),
+              completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING id, type, parent_transaction_id`,
+      [transactionId, status, eganowReference || null, eganowTransactionId || null, failureReason || null, success, paymentGatewayStatus || null]
+    )
+    const transaction = rows[0]
+    if (status === 'SWEPT_INTERNAL' && transaction?.type === 'INTERNAL_TRANSFER' && transaction.parent_transaction_id) {
+      await tx.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [transaction.parent_transaction_id])
+      await markCreditInstallmentCollected(tx, transaction.parent_transaction_id)
+    } else if (status === 'SWEPT_INTERNAL' && transaction?.type === 'COLLECTION') {
+      await markCreditInstallmentCollected(tx, transaction.id)
+    }
+  }
+  if (status === 'SWEPT_INTERNAL') await withTransaction(update)
+  else await query(
     `UPDATE transactions
-        SET status = $2,
-            eganow_reference = COALESCE($3, eganow_reference),
-            eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-            failure_reason = $5,
+        SET status = $2, eganow_reference = COALESCE($3, eganow_reference),
+            eganow_transaction_id = COALESCE($4, eganow_transaction_id), failure_reason = $5,
             payment_gateway_status = COALESCE($7, payment_gateway_status),
-            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
-            updated_at = now()
+            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END, updated_at = now()
       WHERE id = $1`,
     [transactionId, status, eganowReference || null, eganowTransactionId || null, failureReason || null, success, paymentGatewayStatus || null]
   )

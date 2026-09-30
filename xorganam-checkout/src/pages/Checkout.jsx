@@ -308,6 +308,7 @@ export default function Checkout() {
       <p className="link-row" style={{ marginTop: 6 }}>
         Are you a business? <Link to="/operator/register">Accept payments with XORGANAM</Link>
       </p>
+      <p className="link-row" style={{ marginTop: 8 }}><Link to="/credit-schedule">View a credit schedule</Link></p>
     </div>
   )
 }

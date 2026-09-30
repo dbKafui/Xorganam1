@@ -9,7 +9,7 @@ export const usersRouter = Router()
 
 usersRouter.use(authenticate)
 
-const ASSIGNABLE_ROLES = ['TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_OPERATOR', 'TENANT_VIEWER']
+const ASSIGNABLE_ROLES = ['TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_OPERATOR', 'TENANT_VIEWER', 'TENANT_BRANCH_MANAGER']
 
 function scopeOrRespond(req, res, requestedTenantId) {
   try {
@@ -26,6 +26,7 @@ function scopeOrRespond(req, res, requestedTenantId) {
 usersRouter.get(
   '/',
   asyncHandler(async (req, res) => {
+    if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers cannot view tenant staff.' })
     let rows
     const { merchantId } = req.query
     
@@ -65,6 +66,9 @@ usersRouter.post(
     }
     if (!ASSIGNABLE_ROLES.includes(role)) {
       return res.status(400).json({ message: `role must be one of: ${ASSIGNABLE_ROLES.join(', ')}` })
+    }
+    if (role === 'TENANT_BRANCH_MANAGER' && !merchantId) {
+      return res.status(400).json({ message: 'A branch manager must be assigned to a merchant.' })
     }
     if (String(password).length < 10) {
       return res.status(400).json({ message: 'Password must be at least 10 characters.' })
@@ -117,6 +121,10 @@ usersRouter.put(
     const user = existing.rows[0]
     
     if (scopeOrRespond(req, res, user.tenant_id) === null) return
+    if (role !== undefined && !ASSIGNABLE_ROLES.includes(role)) return res.status(400).json({ message: 'Role is invalid.' })
+    if (role === 'TENANT_BRANCH_MANAGER' && !user.merchant_id) {
+      return res.status(400).json({ message: 'Assign this user to a merchant before giving them the branch manager role.' })
+    }
 
     const updates = []
     const params = [req.params.userId]
@@ -211,6 +219,10 @@ usersRouter.post(
     if (existing.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
 
+    const existingUser = await query('SELECT merchant_id FROM users WHERE id = $1', [req.params.userId])
+    if (role === 'TENANT_BRANCH_MANAGER' && !existingUser.rows[0].merchant_id) {
+      return res.status(400).json({ message: 'Assign this user to a merchant before giving them the branch manager role.' })
+    }
     await query('UPDATE users SET role = $2 WHERE id = $1', [req.params.userId, role])
     res.json({ message: 'Role updated.', userId: req.params.userId, role })
   })
@@ -324,7 +336,7 @@ usersRouter.post(
     const { merchantId } = req.body || {}
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
 
-    const user = await query('SELECT tenant_id FROM users WHERE id = $1', [req.params.userId])
+    const user = await query('SELECT tenant_id, role FROM users WHERE id = $1', [req.params.userId])
     if (user.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
     if (scopeOrRespond(req, res, user.rows[0].tenant_id) === null) return
 
@@ -347,9 +359,10 @@ usersRouter.post(
   '/:userId/unassign-merchant',
   requireRole('TENANT_MANAGER'),
   asyncHandler(async (req, res) => {
-    const user = await query('SELECT tenant_id FROM users WHERE id = $1', [req.params.userId])
+    const user = await query('SELECT tenant_id, role FROM users WHERE id = $1', [req.params.userId])
     if (user.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
     if (scopeOrRespond(req, res, user.rows[0].tenant_id) === null) return
+    if (user.rows[0].role === 'TENANT_BRANCH_MANAGER') return res.status(409).json({ message: 'Change this user role before removing their merchant assignment.' })
 
     const { rows } = await query(
       `UPDATE users SET merchant_id = NULL WHERE id = $1
