@@ -549,3 +549,75 @@ table.ledger a {
 .kv-row span:first-child {
   color: var(--muted);
 }
+
+.credit-customer-content {
+  width: min(920px, 100%);
+}
+
+.credit-customer-content .pay-card {
+  margin: 0 auto 16px;
+}
+
+.credit-customer-plan .pay-btn {
+  margin-top: 14px;
+}
+
+.credit-installments {
+  margin-top: 12px;
+}
+
+.credit-plan-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+}
+
+button.credit-plan-row {
+  cursor: pointer;
+}
+
+.credit-plan-row small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.credit-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 600px) {
+  .credit-customer-content .portal-header {
+    align-items: center;
+  }
+  .credit-customer-plan .kv-row {
+    gap: 12px;
+    align-items: center;
+  }
+}
+
+/* Keep portal screens calm and consistent while preserving the payment-page layout. */
+button, .btn, a { transition: color .16s ease, background-color .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.card { box-shadow: 0 2px 10px rgba(22, 45, 37, .035); }
+.portal-header h1 { letter-spacing: -.025em; }
+.table-scroll { width: 100%; overflow-x: auto; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.section-heading h2, .section-heading p { margin: 0; }
+.section-heading p { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.table-note { display: block; max-width: 260px; margin-top: 4px; color: var(--red); white-space: normal; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}

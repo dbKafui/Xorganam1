@@ -27,6 +27,25 @@ export default function TenantDetail() {
   const [notice, setNotice] = useState('')
   const [rejectReasons, setRejectReasons] = useState({})
 
+  async function viewKycDocument(documentUrl) {
+    // The API now protects KYC downloads, so fetch with the operator's bearer token.
+    const tab = window.open('about:blank', '_blank')
+    try {
+      const token = sessionStorage.getItem('xorganam_token')
+      const response = await fetch(new URL(documentUrl, BASE_URL), {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      })
+      if (!response.ok) throw new Error('Unable to retrieve this document.')
+      const objectUrl = URL.createObjectURL(await response.blob())
+      if (tab) tab.location = objectUrl
+      else window.location.assign(objectUrl)
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
+    } catch (err) {
+      tab?.close()
+      setError(err.message)
+    }
+  }
+
   const load = useCallback(() => {
     tenantsApi.detail(tenantId).then((t) => {
       setTenant(t)
@@ -375,7 +394,7 @@ export default function TenantDetail() {
                     <td className="mono">{new Date(d.createdAt).toLocaleDateString()}</td>
                     <td>
                       {d.documentUrl ? (
-                        <a href={`${BASE_URL.replace('/api/v1','')}${d.documentUrl}`} target="_blank" rel="noopener noreferrer">View</a>
+                        <button className="btn btn-sm" onClick={() => viewKycDocument(d.documentUrl)}>View</button>
                       ) : (
                         <span className="helper-text">No file</span>
                       )}

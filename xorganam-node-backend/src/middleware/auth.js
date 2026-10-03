@@ -79,6 +79,23 @@ export function requireRole(minimumRole) {
   }
 }
 
+export function requireAnyRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
+    if (req.user.isPlatformAdmin || roles.includes(req.user.role)) return next()
+    return res.status(403).json({ message: 'You do not have permission to do this.' })
+  }
+}
+
+export function requireOwnMerchantIfBranchManager(req, res, next) {
+  if (req.user?.role !== 'TENANT_BRANCH_MANAGER') return next()
+  const merchantId = req.params.merchantId || req.query.merchantId || req.body?.merchantId
+  if (!req.user.merchantId || String(merchantId) !== String(req.user.merchantId)) {
+    return res.status(403).json({ message: 'Branch managers can only access their assigned merchant.' })
+  }
+  next()
+}
+
 /**
  * Restricts a route to PLATFORM_ADMIN only.
  */

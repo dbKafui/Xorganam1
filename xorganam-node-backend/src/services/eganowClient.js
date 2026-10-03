@@ -412,9 +412,8 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
 /**
  * Internal transfer: merchant's collection account -> payout account.
  */
-export async function sweepToPayoutAccount(tenantId, { amount, network, narration }) {
+export async function sweepToPayoutAccount(tenantId, { amount, network: _network, narration }) {
   const { client } = await createEganowClientForTenant(tenantId)
-  const paypartnerCode = normalizePaypartnerCode(network)
   const narrationValue = narration || 'InternalTransfer'
 
   return withRetry(
@@ -513,6 +512,25 @@ export async function queryTransactionStatus(tenantId, reference) {
       return normalizeEganowResponse(response.data)
     },
     { tenantId, operation: 'StatusQuery' }
+  )
+}
+
+export async function getPayoutWalletBalance(tenantId, _accountId) {
+  const { client } = await createEganowClientForTenant(tenantId)
+
+  return withRetry(
+    async () => {
+      const response = await client.get('/api/transactions/collection/get-balance', {
+        data: {},
+        headers: { 'Content-Type': 'application/json' }
+      })
+      const balance = Number(response.data?.balance)
+      if (!Number.isFinite(balance) || balance < 0) {
+        throw new EganowApiError('Eganow returned an invalid payout-wallet balance.', tenantId, response.status, response.data)
+      }
+      return balance
+    },
+    { tenantId, operation: 'PayoutWalletBalance' }
   )
 }
 

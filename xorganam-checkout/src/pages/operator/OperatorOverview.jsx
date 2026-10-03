@@ -10,6 +10,7 @@ function money(n) {
 export default function OperatorOverview() {
   const { user } = useOperatorAuth()
   const [tenant, setTenant] = useState(null)
+  const [branch, setBranch] = useState(null)
   const [report, setReport] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -17,10 +18,10 @@ export default function OperatorOverview() {
   useEffect(() => {
     if (!user?.tenantId) return
     setLoading(true)
-    Promise.all([
-      operatorApi.getTenant(user.tenantId).then(setTenant),
-      operatorApi.tenantReport(user.tenantId).then(setReport)
-    ])
+    const requests = user.role === 'TENANT_BRANCH_MANAGER'
+      ? [operatorApi.getMerchant(user.merchantId).then(setBranch)]
+      : [operatorApi.getTenant(user.tenantId).then(setTenant), operatorApi.tenantReport(user.tenantId).then(setReport)]
+    Promise.all(requests)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
   }, [user])
@@ -29,10 +30,10 @@ export default function OperatorOverview() {
     <div>
       <div className="portal-header">
         <div>
-          <h1>{tenant?.companyName || user?.tenantCompanyName}</h1>
-          <p>Overview of your merchants' collections, payouts, and revenue.</p>
+          <h1>{branch?.displayName || tenant?.companyName || user?.tenantCompanyName}</h1>
+          <p>{user?.role === 'TENANT_BRANCH_MANAGER' ? 'Your branch activity and settings.' : "Overview of your merchants' collections, payouts, and revenue."}</p>
         </div>
-        <Link to="/operator/merchants/new" className="btn btn-primary">Add a merchant</Link>
+        {user?.role !== 'TENANT_BRANCH_MANAGER' && <Link to="/operator/merchants/new" className="btn btn-primary">Add a merchant</Link>}
       </div>
 
       {tenant && tenant.status !== 'ACTIVE' && (
@@ -97,6 +98,12 @@ export default function OperatorOverview() {
           </div>
         </>
       )}
+      {branch && <div className="card">
+        <h2>Branch settings</h2>
+        <div className="kv-row"><span>How you get paid</span><strong>{branch.payoutMode === 'AUTO_SWEEP' ? 'We move your money automatically' : 'You control when it moves'}</strong></div>
+        <div className="kv-row"><span>Eganow account setup</span><strong>{branch.accountSetupStatus === 'ACTIVE' ? 'Active' : 'Pending'}</strong></div>
+        <Link to={`/operator/merchants/${branch.id}`} className="btn btn-secondary">View branch details</Link>
+      </div>}
     </div>
   )
 }

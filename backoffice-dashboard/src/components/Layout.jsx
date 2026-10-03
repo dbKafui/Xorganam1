@@ -6,7 +6,9 @@ const NAV_ITEMS = [
   { to: '/tenants', label: 'Tenants & KYC' },
   { to: '/merchants', label: 'Merchants' },
   { to: '/transactions', label: 'Transactions' },
-  { to: '/reports', label: 'Reports' }
+  { to: '/reports', label: 'Reports' },
+  { to: '/storefront-operations', label: 'Storefront operations' },
+  { to: '/institution-applications', label: 'Institution applications' }
 ]
 
 export default function Layout() {

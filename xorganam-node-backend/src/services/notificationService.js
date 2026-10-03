@@ -37,12 +37,27 @@ export async function sendMerchantSms(tenantId, toMsisdn, message) {
   }
 }
 
+export async function sendPlatformSms(toMsisdn, message) {
+  try {
+    const client = axios.create({ baseURL: env.sms.gatewayBaseUrl, timeout: 15_000 })
+    const response = await client.post('send', {
+      senderId: env.sms.defaultSenderId.slice(0, 11),
+      to: toMsisdn,
+      message
+    })
+    return response.status >= 200 && response.status < 300
+  } catch (err) {
+    console.error(`[sms] failed to deliver customer verification message to ***${String(toMsisdn).slice(-4)}:`, err.message)
+    return false
+  }
+}
+
 /**
- * Placeholder email notification, same fire-and-forget contract as SMS.
- * Wire to a real provider (SendGrid/Postmark/etc) using tenant-specific
- * config the same way sendMerchantSms resolves a sender ID.
+ * Email is unavailable until an email provider is configured. Never log
+ * message contents or report a delivery that did not happen.
  */
 export async function sendMerchantEmail(tenantId, toEmail, subject, body) {
-  console.log(`[email:stub] tenant=${tenantId} to=${toEmail} subject="${subject}"`, body)
-  return true
+  void tenantId; void toEmail; void subject; void body
+  console.warn('[email] delivery skipped: no email provider is configured')
+  return false
 }

@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
-import { authenticate, requireRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { authenticate, requireRole, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 
 export const merchantsRouter = Router()
@@ -29,7 +29,7 @@ merchantsRouter.get(
     const { rows } = await query(
       `SELECT m.id, m.tenant_id, t.company_name AS tenant_company_name,
               m.display_name, m.mobile_money_number, m.network_provider, m.payout_mode,
-              m.eganow_collection_account_id, m.eganow_payout_account_id, m.is_active, m.onboarded_at,
+              m.eganow_collection_account_id, m.eganow_payout_account_id, m.account_setup_status, m.is_active, m.onboarded_at,
               ms.allow_manual_control
          FROM merchants m
          JOIN tenants t ON t.id = m.tenant_id
@@ -38,8 +38,10 @@ merchantsRouter.get(
         ORDER BY m.onboarded_at DESC`,
       [tenantId]
     )
-
-    res.json(rows.map(mapMerchant))
+    const scopedRows = req.user.role === 'TENANT_BRANCH_MANAGER'
+      ? rows.filter((row) => String(row.id) === String(req.user.merchantId))
+      : rows
+    res.json(scopedRows.map(mapMerchant))
   })
 )
 
@@ -59,26 +61,27 @@ merchantsRouter.post(
       eganowPayoutAccountId
     } = req.body || {}
 
-    if (!displayName || !mobileMoneyNumber || !networkProvider || !eganowCollectionAccountId || !eganowPayoutAccountId) {
-      return res.status(400).json({ message: 'displayName, mobileMoneyNumber, networkProvider, and both Eganow account IDs are required.' })
+    if (!displayName || !mobileMoneyNumber || !networkProvider) {
+      return res.status(400).json({ message: 'displayName, mobileMoneyNumber, and networkProvider are required.' })
     }
 
     try {
       const { rows } = await query(
         `INSERT INTO merchants
            (tenant_id, display_name, mobile_money_number, network_provider, payout_mode,
-            eganow_collection_account_id, eganow_payout_account_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+            eganow_collection_account_id, eganow_payout_account_id, account_setup_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 CASE WHEN $6 IS NOT NULL AND $7 IS NOT NULL THEN 'ACTIVE' ELSE 'PENDING' END)
          RETURNING id, display_name, mobile_money_number, network_provider, payout_mode,
-                   eganow_collection_account_id, eganow_payout_account_id, is_active, onboarded_at`,
+                   eganow_collection_account_id, eganow_payout_account_id, account_setup_status, is_active, onboarded_at`,
         [
           tenantId,
           displayName,
           mobileMoneyNumber,
           networkProvider,
           payoutMode === 'AUTO_SWEEP' ? 'AUTO_SWEEP' : 'MANUAL',
-          eganowCollectionAccountId,
-          eganowPayoutAccountId
+          eganowCollectionAccountId || null,
+          eganowPayoutAccountId || null
         ]
       )
 
@@ -93,12 +96,40 @@ merchantsRouter.post(
   })
 )
 
+merchantsRouter.patch(
+  '/:merchantId/eganow-accounts',
+  requirePlatformAdmin,
+  asyncHandler(async (req, res) => {
+    const collectionId = String(req.body?.eganowCollectionAccountId || '').trim()
+    const payoutId = String(req.body?.eganowPayoutAccountId || '').trim()
+    if (!collectionId || !payoutId) {
+      return res.status(400).json({ message: 'Both Eganow account IDs are required.' })
+    }
+    try {
+      const { rows } = await query(
+        `UPDATE merchants
+            SET eganow_collection_account_id = $2,
+                eganow_payout_account_id = $3,
+                account_setup_status = 'ACTIVE', updated_at = now()
+          WHERE id = $1
+          RETURNING id, account_setup_status`,
+        [req.params.merchantId, collectionId, payoutId]
+      )
+      if (!rows.length) return res.status(404).json({ message: 'Merchant not found.' })
+      res.json({ ok: true, merchantId: rows[0].id, accountSetupStatus: rows[0].account_setup_status })
+    } catch (error) {
+      if (error.code === '23505') return res.status(409).json({ message: 'One of these Eganow account IDs is already assigned to another merchant.' })
+      throw error
+    }
+  })
+)
+
 merchantsRouter.get(
   '/:merchantId',
   asyncHandler(async (req, res) => {
     const { rows } = await query(
       `SELECT m.id, m.tenant_id, m.display_name, m.mobile_money_number, m.network_provider, m.payout_mode,
-              m.eganow_collection_account_id, m.eganow_payout_account_id, m.is_active, m.onboarded_at,
+              m.eganow_collection_account_id, m.eganow_payout_account_id, m.account_setup_status, m.is_active, m.onboarded_at,
               ms.allow_manual_control, ms.notify_sms, ms.notify_email, ms.contact_email
          FROM merchants m
          LEFT JOIN merchant_settings ms ON ms.tenant_id = m.tenant_id AND ms.merchant_id = m.id
@@ -109,6 +140,9 @@ merchantsRouter.get(
 
     const merchant = rows[0]
     if (scopeOrRespond(req, res, merchant.tenant_id) === null) return
+    if (req.user.role === 'TENANT_BRANCH_MANAGER' && String(merchant.id) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'Branch managers can only access their assigned merchant.' })
+    }
 
     res.json({
       ...mapMerchant(merchant),
@@ -220,6 +254,7 @@ function mapMerchant(row) {
     payoutMode: row.payout_mode,
     eganowCollectionAccountId: row.eganow_collection_account_id,
     eganowPayoutAccountId: row.eganow_payout_account_id,
+    accountSetupStatus: row.account_setup_status || (row.eganow_collection_account_id && row.eganow_payout_account_id ? 'ACTIVE' : 'PENDING'),
     isActive: row.is_active,
     onboardedAt: row.onboarded_at
   }

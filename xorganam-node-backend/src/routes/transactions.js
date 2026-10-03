@@ -1,12 +1,13 @@
 import { Router } from 'express'
 import crypto from 'node:crypto'
-import { query } from '../db/pool.js'
-import { authenticate, requireRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { query, withTransaction } from '../db/pool.js'
+import { authenticate, requireRole, requireAnyRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
 import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { reconcileTransaction } from '../services/reconciliationService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
+import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 
 // No env-level Eganow callback fallback: tenant-stored callback must be used.
 
@@ -101,8 +102,13 @@ transactionsRouter.get(
               t.internal_reference, t.eganow_reference, t.payment_gateway_status, t.failure_reason, t.notification_sent, t.manually_triggered,
               t.collection_msisdn, t.kyc_msisdn, t.kyc_name, t.payout_msisdn, t.created_at, t.completed_at,
               m.display_name AS merchant_display_name
+              ,sr.vendor_leg_status, sr.vendor_failure_reason,
+              sr.institution_leg_status, sr.institution_failure_reason,
+              COALESCE(ms.allow_manual_control, FALSE) AS allow_manual_control
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN split_reconciliation sr ON sr.parent_transaction_id = t.id
+         LEFT JOIN merchant_settings ms ON ms.merchant_id = m.id
         WHERE t.id = $1`,
       [req.params.transactionId]
     )
@@ -125,6 +131,11 @@ transactionsRouter.get(
     res.json({
       ...mapTransaction(txn),
       parentTransactionId: txn.parent_transaction_id,
+      allowManualControl: txn.allow_manual_control,
+      vendorLegStatus: txn.vendor_leg_status || null,
+      vendorFailureReason: txn.vendor_failure_reason || null,
+      institutionLegStatus: txn.institution_leg_status || null,
+      institutionFailureReason: txn.institution_failure_reason || null,
       notificationSent: txn.notification_sent,
       manuallyTriggered: txn.manually_triggered,
       childTransactions: children.rows.map(mapTransaction)
@@ -185,16 +196,18 @@ transactionsRouter.post(
 // ---------------------------------------------------------------------
 transactionsRouter.post(
   '/internal-transfer',
-  requireRole('TENANT_MANAGER'),
+  requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'),
   asyncHandler(async (req, res) => {
     const { sourceTransactionId, amount } = req.body || {}
     if (!sourceTransactionId) return res.status(400).json({ message: 'sourceTransactionId is required.' })
 
     const sourceRows = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
-              m.eganow_collection_account_id, m.eganow_payout_account_id, m.network_provider, m.display_name
+              m.eganow_collection_account_id, m.eganow_payout_account_id, m.account_setup_status, m.network_provider, m.display_name,
+              COALESCE(ms.allow_manual_control, FALSE) AS allow_manual_control
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN merchant_settings ms ON ms.merchant_id = m.id
         WHERE t.id = $1`,
       [sourceTransactionId]
     )
@@ -205,6 +218,12 @@ transactionsRouter.post(
     // Enforce merchant scoping for operations on a specific transaction
     if (req.user?.merchantId && String(source.merchant_id) !== String(req.user.merchantId)) {
       return res.status(403).json({ message: 'You do not have access to this transaction.' })
+    }
+    if (source.account_setup_status && source.account_setup_status !== 'ACTIVE') {
+      return res.status(409).json({ message: 'Eganow account setup is pending for this merchant.' })
+    }
+    if (req.user.role === 'TENANT_BRANCH_MANAGER' && !source.allow_manual_control) {
+      return res.status(403).json({ message: 'Manual controls are not enabled for this merchant.' })
     }
     if (source.status !== 'RECEIVED') {
       return res.status(400).json({ message: 'Source transaction must be RECEIVED from the payment gateway before internal transfer.' })
@@ -255,18 +274,16 @@ transactionsRouter.post(
         return res.json({ id: transferId, internalReference, status: 'PENDING', paymentGatewayStatus: result.status || 'PENDING' })
       }
 
-      await query(
-        `UPDATE transactions
-            SET status = 'SWEPT_INTERNAL',
-                payment_gateway_status = $4,
-                eganow_reference = $2,
-                eganow_transaction_id = $3,
-                completed_at = now(),
-                updated_at = now()
-          WHERE id = $1`,
-        [transferId, result.reference || internalReference, result.transactionId || null, result.status]
-      )
-      await query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [source.id])
+      await withTransaction(async (client) => {
+        await client.query(
+          `UPDATE transactions SET status = 'SWEPT_INTERNAL', payment_gateway_status = $4,
+                  eganow_reference = $2, eganow_transaction_id = $3,
+                  completed_at = now(), updated_at = now() WHERE id = $1`,
+          [transferId, result.reference || internalReference, result.transactionId || null, result.status]
+        )
+        await client.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [source.id])
+        await markCreditInstallmentCollected(client, source.id)
+      })
 
       res.json({ id: transferId, internalReference, status: 'SWEPT_INTERNAL' })
     } catch (err) {
@@ -282,16 +299,18 @@ transactionsRouter.post(
 // ---------------------------------------------------------------------
 transactionsRouter.post(
   '/payout',
-  requireRole('TENANT_MANAGER'),
+  requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'),
   asyncHandler(async (req, res) => {
     const { sourceTransactionId, amount, accountNoOrMsisdn, network } = req.body || {}
     if (!sourceTransactionId) return res.status(400).json({ message: 'sourceTransactionId is required.' })
 
     const sourceRows = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
-              m.display_name, m.mobile_money_number, m.network_provider
+              m.display_name, m.mobile_money_number, m.network_provider, m.account_setup_status,
+              COALESCE(ms.allow_manual_control, FALSE) AS allow_manual_control
          FROM transactions t
          JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN merchant_settings ms ON ms.merchant_id = m.id
         WHERE t.id = $1`,
       [sourceTransactionId]
     )
@@ -301,6 +320,12 @@ transactionsRouter.post(
     if (scopeOrRespond(req, res, source.tenant_id) === null) return
     if (req.user?.merchantId && String(source.merchant_id) !== String(req.user.merchantId)) {
       return res.status(403).json({ message: 'You do not have access to this transaction.' })
+    }
+    if (source.account_setup_status && source.account_setup_status !== 'ACTIVE') {
+      return res.status(409).json({ message: 'Eganow account setup is pending for this merchant.' })
+    }
+    if (req.user.role === 'TENANT_BRANCH_MANAGER' && !source.allow_manual_control) {
+      return res.status(403).json({ message: 'Manual controls are not enabled for this merchant.' })
     }
     if (source.status !== 'SWEPT_INTERNAL') {
       return res.status(400).json({ message: 'Source transaction must be SWEPT_INTERNAL before payout.' })

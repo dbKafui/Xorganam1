@@ -6,6 +6,7 @@ import { PERMISSION_TYPES, PERMISSION_LABELS, getPermissionLabel, getPermissionD
 const ROLES = [
   { value: 'TENANT_ADMIN', label: 'Admin — full control, including team management' },
   { value: 'TENANT_MANAGER', label: 'Manager — merchants, transactions, team' },
+  { value: 'TENANT_BRANCH_MANAGER', label: 'Branch manager — assigned branch only' },
   { value: 'TENANT_OPERATOR', label: 'Operator — initiate collections and payouts' },
   { value: 'TENANT_VIEWER', label: 'Viewer — read-only' }
 ]
@@ -493,7 +494,7 @@ export default function OperatorTeam() {
           <div className="two-col">
             <div className="field">
               <label>Assign to merchant</label>
-              <select value={form.merchantId || ''} onChange={(e) => setForm((f) => ({ ...f, merchantId: e.target.value || '' }))}>
+              <select required={form.role === 'TENANT_BRANCH_MANAGER'} value={form.merchantId || ''} onChange={(e) => setForm((f) => ({ ...f, merchantId: e.target.value || '' }))}>
                 <option value="">Tenant-level (no merchant)</option>
                 {merchants.map((mm) => (
                   <option key={mm.id} value={mm.id}>{mm.displayName}</option>

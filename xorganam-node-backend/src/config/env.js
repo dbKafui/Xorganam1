@@ -11,7 +11,7 @@ function required(name) {
 export const env = {
   port: parseInt(process.env.PORT || '3000', 10),
 
-  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174')
+  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:5175')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
