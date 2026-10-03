@@ -91,8 +91,8 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
   if (!merchant.eganow_enabled) {
     throw new CollectionRejectedError('Payments are not configured for this merchant yet.')
   }
-  if (!amount || amount <= 0) {
-    throw new CollectionRejectedError('Amount must be greater than zero.')
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(Math.round(amount * 100)) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
+    throw new CollectionRejectedError('Amount must be a valid positive amount with at most two decimal places.')
   }
   if (!msisdn) {
     throw new CollectionRejectedError('A mobile number is required.')
@@ -112,6 +112,9 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
 
   const internalReference = `COL-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
   const normalizedMsisdn = normalizeMsisdn(msisdn)
+  if (!/^233[0-9]{9}$/.test(normalizedMsisdn)) {
+    throw new CollectionRejectedError('A valid Ghana mobile number is required.')
+  }
   const normalizedPayoutMsisdn = payoutMsisdn ? normalizeMsisdn(payoutMsisdn) : null
   if (normalizedPayoutMsisdn && !/^233[0-9]{9}$/.test(normalizedPayoutMsisdn)) {
     throw new CollectionRejectedError('A valid payout phone number is required in local or international format.')

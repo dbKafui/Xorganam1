@@ -24,7 +24,17 @@ export const INSTITUTION_PERMISSIONS = Object.freeze({
   'dispute:resolve': ROLE_RANK.SUPERVISOR,
   'reconciliation:view': ROLE_RANK.FIELD_OFFICER,
   'institution_profile:view': ROLE_RANK.FIELD_OFFICER,
-  'institution_profile:write': ROLE_RANK.INSTITUTION_ADMIN
+  'institution_profile:write': ROLE_RANK.INSTITUTION_ADMIN,
+  'customer:view': ROLE_RANK.FIELD_OFFICER,
+  'customer:onboard': ROLE_RANK.FIELD_OFFICER,
+  'customer:verify': ROLE_RANK.SUPERVISOR,
+  'finance:view': ROLE_RANK.FIELD_OFFICER,
+  'product:manage': ROLE_RANK.INSTITUTION_ADMIN,
+  'account:open': ROLE_RANK.FIELD_OFFICER,
+  'account:approve': ROLE_RANK.SUPERVISOR,
+  'transaction:create': ROLE_RANK.FIELD_OFFICER,
+  'transaction:approve': ROLE_RANK.SUPERVISOR,
+  'notification:send': ROLE_RANK.SUPERVISOR
 })
 
 export function hasInstitutionPermission(role, permissionKey) {

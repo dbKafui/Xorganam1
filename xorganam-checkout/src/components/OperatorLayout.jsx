@@ -45,11 +45,14 @@ export default function OperatorLayout() {
           Account & KYC
         </NavLink>}
         <NavLink to="/operator/institutions" className={({ isActive }) => (isActive ? 'active' : '')}>
-          Institutions
+          Institution links
         </NavLink>
         <NavLink to="/operator/credit-plans" className={({ isActive }) => (isActive ? 'active' : '')}>
           Hire-purchase
         </NavLink>
+        {['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user?.role) && <NavLink to="/operator/settlements" className={({ isActive }) => (isActive ? 'active' : '')}>
+          Periodic settlements
+        </NavLink>}
         <NavLink to="/operator/storefront" className={({ isActive }) => (isActive ? 'active' : '')}>
           Storefront & orders
         </NavLink>

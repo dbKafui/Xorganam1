@@ -4,7 +4,7 @@ import { authenticate, requireAnyRole, resolveTenantScope, ForbiddenError } from
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { customerAuth } from './creditCustomers.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
-import { cancelAndRestock, createStorefrontOrder, StorefrontOrderError } from '../services/storefrontOrderService.js'
+import { cancelAndRestock, cancelAndRestockOrder, createStorefrontOrder, StorefrontOrderError } from '../services/storefrontOrderService.js'
 import { sanitizeBrandingConfig, validateStorefrontImageUrl } from '../services/storefrontSanitizer.js'
 
 export const publicStorefrontRouter = Router()
@@ -14,7 +14,6 @@ export const storefrontAdminRouter = Router()
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
 const FREQUENCIES = new Set(['DAILY', 'WEEKLY', 'MONTHLY'])
 
 function scopedTenant(req, res) {
@@ -75,20 +74,6 @@ function validateProductInput(input, partial = false) {
   return product
 }
 
-async function fetchProductMedia(productIds) {
-  if (!productIds.length) return new Map()
-  const { rows } = await query(
-    `SELECT product_id, id, url, alt_text, position FROM product_media
-      WHERE product_id = ANY($1::uuid[]) ORDER BY position`, [productIds]
-  )
-  const result = new Map()
-  for (const row of rows) {
-    if (!result.has(row.product_id)) result.set(row.product_id, [])
-    result.get(row.product_id).push({ id: row.id, url: row.url, altText: row.alt_text, position: row.position })
-  }
-  return result
-}
-
 async function publicProducts(tenantId, condition = '', params = []) {
   const { rows } = await query(
     `SELECT p.id, p.tenant_id, p.name, p.description, p.listing_type, p.price, p.category_id,
@@ -109,7 +94,7 @@ async function publicProducts(tenantId, condition = '', params = []) {
 publicStorefrontRouter.get('/storefronts/:slug', asyncHandler(async (req, res) => {
   const { rows } = await query(
     `SELECT s.id, s.tenant_id, s.slug, s.marketplace_opt_in, s.branding_config,
-            t.name AS vendor_name,
+            t.company_name AS vendor_name,
             (SELECT m.id FROM merchants m WHERE m.tenant_id = s.tenant_id AND m.is_default_fulfillment_branch LIMIT 1) AS default_fulfillment_branch_id
        FROM storefronts s JOIN tenants t ON t.id = s.tenant_id
       WHERE lower(s.slug) = lower($1) AND t.status = 'ACTIVE'`, [req.params.slug]
@@ -156,7 +141,7 @@ publicStorefrontRouter.get('/marketplace/categories/:categoryId/products', async
   const offset = Math.max(0, Number.parseInt(req.query.offset || '0', 10) || 0)
   const { rows } = await query(
     `SELECT p.id, p.tenant_id, p.name, p.description, p.listing_type, p.price, p.category_id,
-            p.featured, p.sort_priority, p.vendor_slug, t.name AS vendor_name,
+            p.featured, p.sort_priority, p.vendor_slug, t.company_name AS vendor_name,
             COALESCE((SELECT json_agg(json_build_object('id', m.id, 'url', m.url, 'altText', m.alt_text) ORDER BY m.position)
                         FROM product_media m WHERE m.product_id = p.id), '[]'::json) AS media
        FROM marketplace_listings p JOIN tenants t ON t.id = p.tenant_id
@@ -183,7 +168,7 @@ publicStorefrontRouter.get('/marketplace/products', asyncHandler(async (req, res
   params.push(offset); const offsetParameter = params.length
   const { rows } = await query(
     `SELECT p.id, p.tenant_id, p.name, p.description, p.listing_type, p.price, p.category_id,
-            p.featured, p.sort_priority, p.vendor_slug, t.name AS vendor_name,
+            p.featured, p.sort_priority, p.vendor_slug, t.company_name AS vendor_name,
             COALESCE((SELECT json_agg(json_build_object('id', m.id, 'url', m.url, 'altText', m.alt_text) ORDER BY m.position)
                         FROM product_media m WHERE m.product_id = p.id), '[]'::json) AS media
        FROM marketplace_listings p JOIN tenants t ON t.id = p.tenant_id
@@ -525,7 +510,7 @@ storefrontCustomerRouter.use(customerAuth)
 storefrontCustomerRouter.get('/orders', asyncHandler(async (req, res) => {
   const { rows } = await query(
     `SELECT o.id, o.tenant_id, o.merchant_id, o.fulfillment_type, o.fulfillment_address, o.status,
-            o.created_at, t.name AS vendor_name, m.display_name AS branch_name,
+            o.created_at, t.company_name AS vendor_name, m.display_name AS branch_name,
             COALESCE((SELECT sum(oi.subtotal) FROM order_items oi WHERE oi.order_id = o.id), 0) AS total_amount,
             COALESCE((SELECT json_agg(json_build_object('productId', p.id, 'name', p.name, 'quantity', oi.quantity, 'subtotal', oi.subtotal))
                         FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = o.id), '[]'::json) AS items
@@ -619,7 +604,7 @@ storefrontAdminRouter.get('/reviews/moderation', requireAnyRole('PLATFORM_ADMIN'
   const status = req.query.status || 'PENDING_MODERATION'
   if (!['PENDING_MODERATION', 'VISIBLE', 'HIDDEN'].includes(status)) return res.status(400).json({ message: 'Invalid review status.' })
   const { rows } = await query(
-    `SELECT r.*, t.name AS vendor_name, p.name AS product_name
+    `SELECT r.*, t.company_name AS vendor_name, p.name AS product_name
        FROM reviews r JOIN tenants t ON t.id = r.tenant_id
        LEFT JOIN products p ON p.id = r.product_id
       WHERE r.status = $1::review_status ORDER BY r.created_at LIMIT 500`, [status]
@@ -641,7 +626,7 @@ storefrontAdminRouter.patch('/reviews/:reviewId/moderation', requireAnyRole('PLA
 storefrontAdminRouter.get('/reconciliation-flags', requireAnyRole('PLATFORM_ADMIN'), asyncHandler(async (_req, res) => {
   const { rows } = await query(
     `SELECT f.*, o.tenant_id, o.merchant_id, o.customer_identifier,
-            t.name AS vendor_name, m.display_name AS branch_name,
+            t.company_name AS vendor_name, m.display_name AS branch_name,
             tx.amount AS payment_amount, tx.internal_reference, tx.eganow_reference
        FROM order_payment_reconciliation_flags f
        JOIN orders o ON o.id = f.order_id

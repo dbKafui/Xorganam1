@@ -12,10 +12,11 @@ import TransactionsList from './pages/Transactions/TransactionsList'
 import TransactionDetail from './pages/Transactions/TransactionDetail'
 import Reports from './pages/Reports'
 import StorefrontOperations from './pages/StorefrontOperations'
+import InstitutionApplications from './pages/InstitutionApplications'
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="transactions/:transactionId" element={<TransactionDetail />} />
             <Route path="reports" element={<Reports />} />
             <Route path="storefront-operations" element={<StorefrontOperations />} />
+            <Route path="institution-applications" element={<InstitutionApplications />} />
           </Route>
         </Routes>
       </AuthProvider>

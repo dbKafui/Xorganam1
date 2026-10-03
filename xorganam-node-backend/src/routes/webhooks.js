@@ -111,10 +111,9 @@ async function handleEganowWebhook(req, res) {
 
   const expectedSignature = hmacSha256Hex(rawBody, webhookSecret)
 
-  console.log(`[webhook:eganow] tenant=${tenantId} rawBodyLength=${rawBody.length} provided=${String(providedSignature).slice(0, 16)}... expected=${expectedSignature.slice(0, 16)}...`)
-
   if (!timingSafeEqualHex(expectedSignature, String(providedSignature))) {
-    console.warn(`[webhook:eganow] signature mismatch for tenant ${tenantId}. Provided: ${String(providedSignature).slice(0, 32)}... Expected: ${expectedSignature.slice(0, 32)}...`)
+    // Do not log signature material, even truncated; identifiers are enough to investigate failures.
+    console.warn(`[webhook:eganow] signature mismatch for tenant ${tenantId}`)
     return res.status(401).json({ message: 'Unable to verify webhook.' })
   }
 

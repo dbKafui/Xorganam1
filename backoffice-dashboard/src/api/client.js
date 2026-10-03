@@ -62,6 +62,13 @@ async function request(path, { method = 'GET', body, isForm = false, params } = 
 }
 
 export const api = {
+  // /health is intentionally outside /api/v1 because it is also used by container probes.
+  health: async () => {
+    const origin = BASE_URL.replace(/\/api\/v1\/?$/, '')
+    const response = await fetch(`${origin}/health`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+    if (!response.ok) throw new ApiError('Backend health check failed.', response.status)
+    return response.json()
+  },
   get: (path, params) => request(path, { method: 'GET', params }),
   post: (path, body) => request(path, { method: 'POST', body }),
   put: (path, body) => request(path, { method: 'PUT', body }),

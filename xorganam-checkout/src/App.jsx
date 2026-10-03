@@ -19,6 +19,7 @@ import OperatorTeam from './pages/operator/OperatorTeam'
 import OperatorAccount from './pages/operator/OperatorAccount'
 import OperatorInstitutions from './pages/operator/OperatorInstitutions'
 import OperatorCreditPlans from './pages/operator/OperatorCreditPlans'
+import OperatorSettlements from './pages/operator/OperatorSettlements'
 import HostedInstallmentPayment from './pages/HostedInstallmentPayment'
 import CreditCustomerPlans from './pages/CreditCustomerPlans'
 import Storefront from './pages/Storefront'
@@ -33,7 +34,7 @@ export default function App() {
     if (params.get('institution')) sessionStorage.setItem('xorganam_referral_institution', params.get('institution'))
   }, [])
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <OperatorAuthProvider>
         <Routes>
           <Route path="/" element={<Checkout />} />
@@ -65,6 +66,7 @@ export default function App() {
             <Route path="account" element={<OperatorAccount />} />
             <Route path="institutions" element={<OperatorInstitutions />} />
             <Route path="credit-plans" element={<OperatorCreditPlans />} />
+            <Route path="settlements" element={<OperatorSettlements />} />
             <Route path="storefront" element={<OperatorStorefront />} />
           </Route>
         </Routes>

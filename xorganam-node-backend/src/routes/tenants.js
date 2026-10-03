@@ -6,10 +6,14 @@ import { authenticate, requireRole, requirePlatformAdmin, resolveTenantScope, Fo
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { kycUpload, toDocumentUrl } from '../services/fileStorage.js'
+import path from 'node:path'
+import { safeTenantUploadDir } from '../services/fileStorage.js'
 
 export const tenantsRouter = Router()
 
 tenantsRouter.use(authenticate)
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 // ---------------------------------------------------------------------
 // Listing / detail
@@ -133,16 +137,21 @@ tenantsRouter.delete(
 // ---------------------------------------------------------------------
 tenantsRouter.post(
   '/:tenantId/kyc-documents',
-  // Accept multiple uploaded files to allow KYB submissions with several documents
-  kycUpload.any(),
-  asyncHandler(async (req, res) => {
-    let tenantId
+  (req, res, next) => {
+    if (!UUID.test(req.params.tenantId)) return res.status(400).json({ message: 'Invalid tenant ID.' })
     try {
-      tenantId = resolveTenantScope(req, req.params.tenantId)
+      req.validatedTenantId = resolveTenantScope(req, req.params.tenantId)
+      next()
     } catch (err) {
       if (err instanceof ForbiddenError) return res.status(403).json({ message: err.message })
-      throw err
+      next(err)
     }
+  },
+  // Accept multiple uploaded files to allow KYB submissions with several documents.
+  // Scope authorization runs before multer writes any bytes to disk.
+  kycUpload.any(),
+  asyncHandler(async (req, res) => {
+    const tenantId = req.validatedTenantId
     const { kycType } = req.body
     const files = req.files || []
     if (!files.length) return res.status(400).json({ message: 'At least one document file is required.' })
@@ -182,6 +191,28 @@ tenantsRouter.post(
     res.status(201).json(insertedRows.map(mapDocument))
   })
 )
+
+// KYC documents contain sensitive identity data, so downloads require an
+// authenticated user authorized for the owning tenant (or a platform admin).
+tenantsRouter.get('/:tenantId/kyc-documents/:filename/file', asyncHandler(async (req, res) => {
+  if (!UUID.test(req.params.tenantId) || !/^[0-9a-f-]{36}\.(pdf|jpg|jpeg|png)$/i.test(req.params.filename)) {
+    return res.status(400).json({ message: 'Invalid document path.' })
+  }
+  let tenantId
+  try { tenantId = resolveTenantScope(req, req.params.tenantId) } catch (err) {
+    if (err instanceof ForbiddenError) return res.status(403).json({ message: err.message })
+    throw err
+  }
+  const { rows } = await query(
+    'SELECT id FROM kyc_documents WHERE tenant_id = $1 AND document_url = $2',
+    [tenantId, `/api/v1/tenants/${tenantId}/kyc-documents/${req.params.filename}/file`]
+  )
+  if (!rows.length) return res.status(404).json({ message: 'Document not found.' })
+  const filePath = path.join(safeTenantUploadDir(tenantId), req.params.filename)
+  res.setHeader('Content-Disposition', 'attachment')
+  res.setHeader('Cache-Control', 'private, no-store')
+  res.sendFile(filePath, (err) => { if (err && !res.headersSent) res.status(err.statusCode === 404 ? 404 : 500).json({ message: 'Unable to retrieve document.' }) })
+}))
 
 tenantsRouter.post(
   '/kyc-documents/:documentId/review',

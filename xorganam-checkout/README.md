@@ -17,6 +17,21 @@ cp .env.example .env
 npm run dev   # http://localhost:5174
 ```
 
+For a production build, set `VITE_API_BASE_URL`, `VITE_STOREFRONT_PUBLIC_URL`,
+and `VITE_OPERATOR_PUBLIC_URL`. The API URL must be HTTPS; the storefront and
+operator URLs must be distinct HTTPS origins (for example,
+`https://store.example.com` and `https://app.example.com`). Production builds
+fail if either value is missing, non-HTTPS, contains a path/query/fragment, or
+uses the same origin. Deploy the same build on both hosts; the app redirects
+storefront routes to the public host and sends all other routes from that host
+to the operator host before React renders. Configure the API's `CORS_ORIGINS`
+to allow both deployed origins.
+
+For production containers, build with `Dockerfile.production`, passing all
+three URLs as build arguments. It serves the SPA through Nginx, whose response
+headers enforce CSP (including `frame-ancestors`) on storefront HTML and asset
+responses. Build one image and serve it on both configured hosts.
+
 ## Payment page
 
 `GET /public/merchants/:id` confirms the merchant can accept payments and shows her name.

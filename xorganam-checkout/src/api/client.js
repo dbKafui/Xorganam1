@@ -126,6 +126,10 @@ export const operatorAuth = {
 // Operator portal - everything a Tenant's staff can do once logged in.
 // =====================================================================
 export const operatorApi = {
+  // Periodic sweeps are queued work; the reconciliation view shows their
+  // persisted ledger rows so operators can distinguish pending and failed legs.
+  runPeriodicSettlements: (tenantId) => request('/periodic-settlements/run-due', { method: 'POST', body: { tenantId }, auth: true }),
+  getPeriodicSettlementReconciliation: (tenantId) => request('/periodic-settlements/reconciliation', { params: { tenantId }, auth: true }),
   // Tenant self / KYC
   getTenant: (tenantId) => request(`/tenants/${tenantId}`, { auth: true }),
   submitKycDocument: (tenantId, formData) =>

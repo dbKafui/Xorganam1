@@ -34,6 +34,9 @@ async function request(path, { method = 'GET', body, auth = false } = {}) {
 
 export const institutionAuth = {
   login: (email, password) => request('/institution-auth/login', { method: 'POST', body: { email, password } }),
+  submitApplication: (body) => request('/institution-auth/registrations', { method: 'POST', body }),
+  checkApplicationStatus: (applicationId, trackingToken) =>
+    request(`/institution-auth/registrations/${encodeURIComponent(applicationId)}/status`, { method: 'POST', body: { trackingToken } }),
   me: () => request('/institution-auth/me', { auth: true }),
   saveSession: ({ token, staff }) => {
     sessionStorage.setItem(TOKEN_KEY, token)

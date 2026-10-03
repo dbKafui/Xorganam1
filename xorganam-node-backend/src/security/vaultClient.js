@@ -1,5 +1,4 @@
 import axios from 'axios'
-import { env } from '../config/env.js'
 
 /**
  * Thin client for HashiCorp Vault's Transit secrets engine. This is the

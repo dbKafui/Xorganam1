@@ -53,6 +53,7 @@ export default function Login() {
             <label className="form-field"><span>Password</span><input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" /></label>
             <button className="button button-primary button-wide" disabled={submitting}>{submitting ? 'Signing in...' : 'Sign in securely'} <span>→</span></button>
           </form>
+          <p className="login-register-link">New institution? <a href="/register">Apply to onboard</a></p>
           <div className="login-security"><span className="secure-icon">●</span> Your institution session is separate from tenant and platform accounts.</div>
         </div>
       </section>

@@ -11,12 +11,14 @@ import Disputes from './pages/Disputes.jsx'
 import AdapterSettings from './pages/AdapterSettings.jsx'
 import TeamStructure from './pages/TeamStructure.jsx'
 import InstitutionProfile from './pages/InstitutionProfile.jsx'
+import InstitutionRegistration from './pages/InstitutionRegistration.jsx'
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<InstitutionRegistration />} />
         <Route path="/" element={<ProtectedRoute><PortalLayout /></ProtectedRoute>}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />

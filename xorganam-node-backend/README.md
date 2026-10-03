@@ -152,6 +152,20 @@ supports hero, rich-text, and product-grid blocks with `categoryId` or explicit 
 separate product-collection entity is defined by this schema. Product description HTML is sanitized
 on write using the maintained `sanitize-html` allow-list.
 
+## Institution onboarding
+
+Institutions apply from the separate Institution Portal at `/register`; the public API stores a
+pending application and returns an application ID plus a tracking code shown once. The applicant
+selects the initial administrator password during registration. The code can be used at the same
+page to check review status; it is stored hashed and is never returned by the API. Platform admins
+review applications in Backoffice under **Institution applications**. Approval creates the
+institution and its first `INSTITUTION_ADMIN` account in one database transaction and activates the
+applicant-selected password. Rejection requires a reason and discards the pending password hash.
+
+Before approval, platform staff must independently verify the institution, its settlement details,
+and the applicant's authority. This flow does not verify email ownership or send email, so reviewers
+must not rely only on the submitted contact information.
+
 ## Webhook listener (`src/routes/webhooks.js`)
 
 Resolves tenant from the URL or the payload's account id, verifies HMAC-SHA256 against that

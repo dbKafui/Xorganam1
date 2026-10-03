@@ -53,11 +53,11 @@ export async function sendPlatformSms(toMsisdn, message) {
 }
 
 /**
- * Placeholder email notification, same fire-and-forget contract as SMS.
- * Wire to a real provider (SendGrid/Postmark/etc) using tenant-specific
- * config the same way sendMerchantSms resolves a sender ID.
+ * Email is unavailable until an email provider is configured. Never log
+ * message contents or report a delivery that did not happen.
  */
 export async function sendMerchantEmail(tenantId, toEmail, subject, body) {
-  console.log(`[email:stub] tenant=${tenantId} to=${toEmail} subject="${subject}"`, body)
-  return true
+  void tenantId; void toEmail; void subject; void body
+  console.warn('[email] delivery skipped: no email provider is configured')
+  return false
 }

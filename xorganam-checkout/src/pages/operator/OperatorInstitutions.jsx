@@ -222,7 +222,7 @@ export default function OperatorInstitutions() {
     <div>
       <div className="portal-header">
         <div>
-          <h1>Institutions & settlement</h1>
+          <h1>Institution links & settlement</h1>
           <p>Review institution policies and choose a settlement schedule for each merchant.</p>
         </div>
       </div>

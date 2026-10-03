@@ -39,9 +39,13 @@ periodicSettlementsRouter.get(
     const tenantId = scopedTenant(req, res, req.query.tenantId)
     if (!tenantId) return
 
+    // Join display names here so the tenant UI can show a useful reconciliation
+    // ledger without issuing one request per institution or merchant.
     const { rows } = await query(
-      `SELECT r.*
+      `SELECT r.*, i.name AS institution_name, m.display_name AS merchant_name
          FROM institution_sweep_reconciliation r
+         LEFT JOIN institutions i ON i.id = r.institution_id
+         LEFT JOIN merchants m ON m.id = r.merchant_id AND m.tenant_id = r.tenant_id
         WHERE r.tenant_id = $1
         ORDER BY r.created_at DESC`,
       [tenantId]
