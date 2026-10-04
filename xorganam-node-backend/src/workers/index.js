@@ -9,5 +9,7 @@ import './creditWebhookWorker.js'
 import './creditReminderWorker.js'
 import './creditCashSweepWorker.js'
 import './orderExpiryWorker.js'
+import './institutionNotificationWorker.js'
+import './institutionLoanRecoveryWorker.js'
 
 console.log('[workers] worker runner loaded')

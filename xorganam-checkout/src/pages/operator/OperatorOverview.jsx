@@ -28,12 +28,13 @@ export default function OperatorOverview() {
 
   return (
     <div>
-      <div className="portal-header">
+      <div className="portal-header overview-welcome">
         <div>
-          <h1>{branch?.displayName || tenant?.companyName || user?.tenantCompanyName}</h1>
-          <p>{user?.role === 'TENANT_BRANCH_MANAGER' ? 'Your branch activity and settings.' : "Overview of your merchants' collections, payouts, and revenue."}</p>
+          <span className="eyebrow-label">YOUR BUSINESS AT A GLANCE</span>
+          <h1>Welcome back, {branch?.displayName || tenant?.companyName || user?.tenantCompanyName || 'Vendor'}</h1>
+          <p>{user?.role === 'TENANT_BRANCH_MANAGER' ? 'Your branch activity and settings.' : 'Manage payments, financial partners and your customer storefront from one place.'}</p>
         </div>
-        {user?.role !== 'TENANT_BRANCH_MANAGER' && <Link to="/operator/merchants/new" className="btn btn-primary">Add a merchant</Link>}
+        {user?.role !== 'TENANT_BRANCH_MANAGER' && <Link to="/operator/merchants/new" className="btn btn-primary">＋ Add a branch</Link>}
       </div>
 
       {tenant && tenant.status !== 'ACTIVE' && (
@@ -50,18 +51,24 @@ export default function OperatorOverview() {
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {loading && <div className="empty-state">Loading…</div>}
 
+      <section className="vendor-actions" aria-label="Vendor tools">
+        <Link to="/operator/institutions" className="vendor-action-card"><span className="vendor-action-icon finance">◇</span><span><small>FINANCIAL PARTNERS</small><strong>Loans & savings</strong><em>Browse packages, apply and manage repayments or savings.</em></span><b>→</b></Link>
+        <Link to="/operator/credit-plans" className="vendor-action-card"><span className="vendor-action-icon credit">▤</span><span><small>SELL ON TERMS</small><strong>Hire-purchase</strong><em>Create installment plans and follow collections.</em></span><b>→</b></Link>
+        <Link to="/operator/storefront" className="vendor-action-card"><span className="vendor-action-icon shop">▣</span><span><small>ONLINE STORE</small><strong>Catalog & storefront</strong><em>Manage products, stock, orders and storefront preview.</em></span><b>→</b></Link>
+      </section>
+
       {report && (
         <>
           <div className="metrics-row">
-            <div className="metric">
+              <div className="metric vendor-metric">
               <div className="label">Total collection</div>
               <div className="value">GHS {money(report.totalCollected)}</div>
             </div>
-            <div className="metric">
+            <div className="metric vendor-metric">
               <div className="label">Total payout</div>
               <div className="value">GHS {money(report.totalPaidOut)}</div>
             </div>
-            <div className="metric">
+            <div className="metric vendor-metric">
               <div className="label">Net revenue</div>
               <div className="value">GHS {money(report.netRevenue)}</div>
             </div>

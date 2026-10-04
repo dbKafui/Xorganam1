@@ -49,7 +49,7 @@ creditWebhooksRouter.put('/:merchantId', requireAnyRole('TENANT_ADMIN', 'TENANT_
   // update cannot silently invalidate the secret currently in use.
   const secretReference = `xorganam/webhooks/${tenantId}/${req.params.merchantId}/${crypto.randomUUID()}`
   try { await writeSecret(secretReference, { secret: webhookSecret }) } catch (error) {
-    console.error('[credit-webhook] Vault write failed:', error.message)
+    console.error('[credit-webhook] Vault write failed', { code: error?.code || 'VAULT_ERROR' })
     return res.status(503).json({ message: 'The webhook signing secret could not be secured. Check Vault configuration and try again.' })
   }
   const { rows } = await query(

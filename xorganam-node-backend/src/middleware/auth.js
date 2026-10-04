@@ -1,5 +1,6 @@
 import { verifyToken } from '../security/jwt.js'
 import { query } from '../db/pool.js'
+import { isMfaRequired } from '../services/mfaPolicy.js'
 
 /**
  * Verifies the Bearer token and attaches req.user = { id, tenantId, role }.
@@ -19,10 +20,13 @@ export async function authenticate(req, res, next) {
   } catch {
     return res.status(401).json({ message: 'Invalid or expired session.' })
   }
-
   try {
+    if (payload.mfa !== true && await isMfaRequired('TENANT', payload.sub)) {
+      return res.status(401).json({ message: 'A verified MFA session is required.' })
+    }
     const { rows } = await query(
-      `SELECT id, tenant_id, merchant_id, role, is_active, first_name, last_name, email FROM users WHERE id = $1`,
+      `SELECT u.id, u.tenant_id, u.merchant_id, u.role, u.is_active, u.first_name, u.last_name, u.email, t.status AS tenant_status
+         FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1`,
       [payload.sub]
     )
 
@@ -31,6 +35,9 @@ export async function authenticate(req, res, next) {
     }
 
     const user = rows[0]
+    if (user.tenant_id && user.tenant_status === 'SUSPENDED') {
+      return res.status(403).json({ message: 'Tenant access is suspended.' })
+    }
     req.user = {
       id: user.id,
       tenantId: user.tenant_id,
@@ -43,7 +50,7 @@ export async function authenticate(req, res, next) {
     }
     next()
   } catch (err) {
-    console.error('[auth] failed to load user for token', err)
+    console.error('[auth] failed to load user for token', { code: err?.code || 'DB_ERROR' })
     res.status(500).json({ message: 'Authentication failed.' })
   }
 }

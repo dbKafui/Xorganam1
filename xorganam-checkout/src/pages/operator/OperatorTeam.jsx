@@ -63,16 +63,13 @@ export default function OperatorTeam() {
   async function loadPermissionsFor(userId) {
     try {
       if (!operatorApi.listUserPermissions) {
-        console.warn('listUserPermissions not available')
+        setError('Permission management is unavailable in this version.')
         setSelectedUserPermissions([])
         return
       }
-      console.log('Loading permissions for user:', userId)
       const perms = await operatorApi.listUserPermissions(userId)
-      console.log('Permissions loaded:', perms)
       setSelectedUserPermissions(perms || [])
     } catch (err) {
-      console.error('Error loading permissions:', err)
       setError(`Failed to load permissions: ${err.message}`)
       setSelectedUserPermissions([])
     }
@@ -366,14 +363,11 @@ export default function OperatorTeam() {
                           <button
                             className="btn btn-link btn-sm"
                             onClick={() => {
-                              console.log('Revoking permission:', p.id, 'for user:', selectedUser.id)
                               operatorApi.revokePermission(selectedUser.id, p.id)
                                 .then(() => {
-                                  console.log('Permission revoked successfully')
                                   loadPermissionsFor(selectedUser.id)
                                 })
                                 .catch((e) => {
-                                  console.error('Error revoking permission:', e)
                                   setError(e.message)
                                 })
                             }}
@@ -421,20 +415,17 @@ export default function OperatorTeam() {
                           setError('Please select a permission type')
                           return
                         }
-                        console.log('Granting permission:', newPermissionType, 'resource:', newPermissionResource, 'to user:', selectedUser.id)
                         operatorApi.grantPermission(selectedUser.id, {
                           permissionType: newPermissionType,
                           resourceId: newPermissionResource || null
                         })
-                          .then((result) => {
-                            console.log('Permission granted successfully:', result)
+                          .then(() => {
                             setNotice(`Permission "${getPermissionLabel(newPermissionType)}" granted`)
                             setNewPermissionType('')
                             setNewPermissionResource('')
                             loadPermissionsFor(selectedUser.id)
                           })
                           .catch((e) => {
-                            console.error('Error granting permission:', e)
                             setError(e.message)
                           })
                       }}

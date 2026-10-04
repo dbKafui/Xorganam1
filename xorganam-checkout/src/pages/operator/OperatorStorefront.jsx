@@ -22,6 +22,7 @@ export default function OperatorStorefront() {
   const [defaultBranch, setDefaultBranch] = useState('')
   const [brandingText, setBrandingText] = useState('{"theme":{"primaryColor":"#1a2b3c","font":"Inter"},"blocks":[]}')
   const [productForm, setProductForm] = useState(blankProduct)
+  const [editingProductId, setEditingProductId] = useState('')
   const [selectedBranch, setSelectedBranch] = useState(user?.merchantId || '')
   const [stockForm, setStockForm] = useState({})
   const [busy, setBusy] = useState(false)
@@ -70,11 +71,25 @@ export default function OperatorStorefront() {
     event.preventDefault(); setBusy(true); setError(''); setNotice('')
     try {
       const media = productForm.imageUrl.trim() ? [{ url: productForm.imageUrl.trim(), altText: productForm.name }] : []
-      await operatorApi.createStorefrontProduct({ tenantId: user.tenantId, name: productForm.name, description: productForm.description,
-        listingType: productForm.listingType, price: Number(productForm.price), categoryId: productForm.categoryId || null, media })
-      setProductForm(blankProduct); setNotice('Product created. Set its stock by branch below.'); await refresh()
+      const payload = { tenantId: user.tenantId, name: productForm.name, description: productForm.description,
+        listingType: productForm.listingType, price: Number(productForm.price), categoryId: productForm.categoryId || null, media }
+      if (editingProductId) {
+        await operatorApi.updateStorefrontProduct(editingProductId, payload)
+        setNotice('Product details updated.')
+      } else {
+        await operatorApi.createStorefrontProduct(payload)
+        setNotice('Product created. Set its stock by branch below.')
+      }
+      setEditingProductId(''); setProductForm(blankProduct); await refresh()
     } catch (requestError) { setError(requestError.message) }
     finally { setBusy(false) }
+  }
+
+  function editProduct(product) {
+    setEditingProductId(product.id)
+    setProductForm({ name: product.name, description: product.description || '', listingType: product.listing_type,
+      price: String(product.price), categoryId: product.category_id || '', imageUrl: product.media?.[0]?.url || '' })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   async function saveStock(product) {
@@ -116,7 +131,7 @@ export default function OperatorStorefront() {
 
   const shareUrl = store && storefrontBase ? `${storefrontBase.replace(/\/$/, '')}/store/${store.slug}` : ''
   return <div className="store-admin">
-    <header className="portal-header"><div><h1>Storefront & marketplace</h1><p>Manage the vendor catalog, branch stock, online orders, storefront branding and credit checkout defaults.</p></div></header>
+    <header className="portal-header storefront-welcome"><div><span className="eyebrow-label">SELL ONLINE</span><h1>Storefront & catalog</h1><p>Publish products, manage inventory and fulfill customer orders from one place.</p></div><a className="btn btn-secondary" href="/marketplace" target="_blank" rel="noreferrer">Browse marketplace ↗</a></header>
     {error && <div className="status-banner error" role="alert">{error}</div>}{notice && <div className="status-banner success" role="status">{notice}</div>}
     <section className="card"><h2>Storefront</h2>
       {isManager ? <form onSubmit={saveStore}><div className="two-col">
@@ -125,7 +140,7 @@ export default function OperatorStorefront() {
       </div><label className="checkbox-row"><input type="checkbox" checked={optIn} onChange={(e) => setOptIn(e.target.checked)} /> List visible products in the cross-vendor marketplace</label>
       <div className="field"><label>Freeform branding document (JSON)</label><textarea rows="10" value={brandingText} onChange={(e) => setBrandingText(e.target.value)} spellCheck="false" /><small>Blocks: hero, product_grid and rich_text. HTML, image URLs, fonts and colors are validated on save.</small></div>
       <button className="btn btn-primary" disabled={busy}>{store ? 'Save storefront settings' : 'Create storefront'}</button>
-      {shareUrl ? <p className="link-row"><a href={shareUrl} target="_blank" rel="noreferrer">Open public storefront</a> · {shareUrl}</p> : <p className="subtle">Set VITE_STOREFRONT_PUBLIC_URL to the separate public-storefront origin before sharing links.</p>}
+      {store && <div className="storefront-destinations"><div><span className="destination-icon">▣</span><span><strong>Your tenant storefront</strong><small>All visible products for your business are displayed here.</small></span><a href={`/store/${store.slug}`} target="_blank" rel="noreferrer">Preview ↗</a></div><div><span className="destination-icon market">⌕</span><span><strong>Vendor marketplace</strong><small>Products appear in the shared marketplace when listing is enabled.</small></span><a href="/marketplace" target="_blank" rel="noreferrer">Browse ↗</a></div>{shareUrl && <p className="storefront-share-link">Public store link: <a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></p>}</div>}
       </form> : <p>Storefront settings are managed by tenant administrators. Branch managers can update branch inventory and fulfill orders below.</p>}
     </section>
 
@@ -143,23 +158,23 @@ export default function OperatorStorefront() {
       </div><button className="btn btn-primary" disabled={busy}>Save credit defaults</button></form>
     </section>}
 
-    {isManager && <section className="card"><h2>Add a product</h2><form onSubmit={createProduct}><div className="two-col">
+    {isManager && <section className="card"><h2>{editingProductId ? 'Edit product' : 'Add a product'}</h2><form onSubmit={createProduct}><div className="two-col">
       <div className="field"><label>Name</label><input required maxLength="160" value={productForm.name} onChange={(e) => setProductForm({ ...productForm, name: e.target.value })} /></div>
       <div className="field"><label>Price (GHS)</label><input required type="number" min="0.01" step="0.01" value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} /></div>
       <div className="field"><label>Listing type</label><select value={productForm.listingType} onChange={(e) => setProductForm({ ...productForm, listingType: e.target.value })}><option value="PHYSICAL">Physical product</option><option value="SERVICE">Service</option></select></div>
       <div className="field"><label>Marketplace category</label><select value={productForm.categoryId} onChange={(e) => setProductForm({ ...productForm, categoryId: e.target.value })}><option value="">Storefront only</option>{categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></div>
-      <div className="field"><label>HTTPS image URL (optional)</label><input type="url" value={productForm.imageUrl} onChange={(e) => setProductForm({ ...productForm, imageUrl: e.target.value })} /></div>
-      <div className="field"><label>Description</label><textarea rows="3" value={productForm.description} onChange={(e) => setProductForm({ ...productForm, description: e.target.value })} /></div>
-    </div><button className="btn btn-primary" disabled={busy}>Add product</button></form></section>}
+      <div className="field"><label>HTTPS image URL (optional)</label><input type="url" value={productForm.imageUrl} onChange={(e) => setProductForm({ ...productForm, imageUrl: e.target.value })} /><small>Updating this field replaces the product's current images with this one. Leave blank to clear images.</small></div>
+      <div className="field"><label>Description and specifications</label><textarea rows="3" maxLength="10000" value={productForm.description} onChange={(e) => setProductForm({ ...productForm, description: e.target.value })} placeholder="Add details customers need to choose this product." /></div>
+    </div><button className="btn btn-primary" disabled={busy}>{editingProductId ? 'Save product changes' : 'Add product'}</button>{editingProductId && <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => { setEditingProductId(''); setProductForm(blankProduct) }}>Cancel edit</button>}</form></section>}
 
-    <section className="card"><h2>Product catalog & branch stock</h2>
+    <section className="card"><div className="section-heading"><div><h2>Product catalog & branch stock</h2><p>Product photos, specifications and prices are shown to customers in your tenant store.</p></div><span className="catalog-count">{products.length} {products.length === 1 ? 'product' : 'products'}</span></div>
       <div className="field"><label>Branch for stock management</label><select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)}>{branches.map((branch) => <option value={branch.id} key={branch.id}>{branch.displayName}</option>)}</select></div>
       {!products.length ? <div className="empty-state">No products yet.</div> : products.map((product) => {
         const current = product.stock_by_branch?.find((item) => item.merchantId === selectedBranch)
         const form = stockForm[product.id] || { quantity: current?.quantityAvailable ?? 0, unlimited: current?.unlimitedStock ?? false }
         return <div className="credit-plan-row" key={product.id}>
           <span><strong>{product.name}</strong><small>{money(product.price)} · {product.listing_type.toLowerCase()} · {product.visible ? 'visible' : 'hidden'}</small></span>
-          <span className="store-stock-actions"><input aria-label={`Quantity for ${product.name}`} type="number" min="0" max="1000000" value={form.quantity ?? 0} disabled={form.unlimited || busy} onChange={(e) => setStockForm({ ...stockForm, [product.id]: { ...form, quantity: e.target.value } })} />
+          <span className="store-stock-actions">{isManager && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => editProduct(product)}>Edit details</button>}<input aria-label={`Quantity for ${product.name}`} type="number" min="0" max="1000000" value={form.quantity ?? 0} disabled={form.unlimited || busy} onChange={(e) => setStockForm({ ...stockForm, [product.id]: { ...form, quantity: e.target.value } })} />
             {product.listing_type === 'SERVICE' && <label><input type="checkbox" checked={Boolean(form.unlimited)} onChange={(e) => setStockForm({ ...stockForm, [product.id]: { ...form, unlimited: e.target.checked } })} /> Unlimited</label>}
             <button className="btn btn-secondary btn-sm" disabled={!selectedBranch || busy} onClick={() => saveStock(product)}>Save stock</button>
             {isManager && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setVisibility(product)}>{product.visible ? 'Hide' : 'Show'}</button>}

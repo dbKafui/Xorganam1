@@ -1,4 +1,5 @@
 import multer from 'multer'
+import { encrypt, decrypt } from '../security/encryption.js'
 import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
@@ -18,27 +19,12 @@ export function safeTenantUploadDir(tenantId) {
   return dir
 }
 
-fs.mkdirSync(UPLOAD_ROOT, { recursive: true })
-
-const storage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    try {
-      // Use the URL's tenant ID, which is available before multipart fields are parsed.
-      const dir = safeTenantUploadDir(req.params.tenantId)
-      fs.mkdirSync(dir, { recursive: true })
-      cb(null, dir)
-    } catch (error) { cb(error) }
-  },
-  filename: (_req, file, cb) => {
-    const extension = path.extname(file.originalname).toLowerCase()
-    const safeName = `${crypto.randomUUID()}${extension}`
-    cb(null, safeName)
-  }
-})
+fs.mkdirSync(UPLOAD_ROOT, { recursive: true, mode: 0o700 })
+fs.chmodSync(UPLOAD_ROOT, 0o700)
 
 export const kycUpload = multer({
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024, files: 10, fields: 30 }, // Bound upload resource use.
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 5, fields: 30 },
   fileFilter: (_req, file, cb) => {
     const extension = path.extname(file.originalname).toLowerCase()
     if (!ALLOWED_EXTENSIONS.has(extension)) return cb(Object.assign(new Error('Only PDF, JPEG, and PNG documents are accepted.'), { statusCode: 400 }))
@@ -51,6 +37,36 @@ export const kycUpload = multer({
  */
 export function toDocumentUrl(tenantId, file) {
   return `/api/v1/tenants/${tenantId}/kyc-documents/${file.filename}/file`
+}
+
+export function hasAllowedDocumentSignature(extension, bytes) {
+  if (!Buffer.isBuffer(bytes)) return false
+  if (extension === '.pdf') return bytes.subarray(0, 5).toString('ascii') === '%PDF-'
+  if (extension === '.png') return bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  if (extension === '.jpg' || extension === '.jpeg') return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  return false
+}
+
+export async function encryptKycFile(bytes, tenantSalt) {
+  const envelope = await encrypt(bytes.toString('base64'), tenantSalt)
+  return Buffer.from(`XOR-KYC1\n${envelope}`, 'utf8')
+}
+
+export async function decryptKycFile(bytes, tenantSalt) {
+  const marker = Buffer.from('XOR-KYC1\n')
+  if (!bytes.subarray(0, marker.length).equals(marker)) return bytes // legacy files remain readable
+  const envelope = bytes.subarray(marker.length).toString('utf8')
+  const decoded = await decrypt(envelope, tenantSalt)
+  if (!decoded || decoded === envelope || envelope === decoded || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(decoded)) {
+    throw new Error('Unable to decrypt stored KYC document.')
+  }
+  return Buffer.from(decoded, 'base64')
+}
+
+export function newKycDocumentFilename(originalName) {
+  const extension = path.extname(originalName).toLowerCase()
+  if (!ALLOWED_EXTENSIONS.has(extension)) throw new Error('Unsupported document extension.')
+  return `${crypto.randomUUID()}${extension}`
 }
 
 export { UPLOAD_ROOT }

@@ -32,7 +32,7 @@ export async function sendMerchantSms(tenantId, toMsisdn, message) {
 
     return response.status >= 200 && response.status < 300
   } catch (err) {
-    console.error(`[sms] failed to notify ${toMsisdn} for tenant ${tenantId}:`, err.message)
+    console.error('[sms] delivery failed', { code: err?.code || 'GATEWAY_ERROR' })
     return false
   }
 }
@@ -47,7 +47,21 @@ export async function sendPlatformSms(toMsisdn, message) {
     })
     return response.status >= 200 && response.status < 300
   } catch (err) {
-    console.error(`[sms] failed to deliver customer verification message to ***${String(toMsisdn).slice(-4)}:`, err.message)
+    console.error('[sms] verification delivery failed', { code: err?.code || 'GATEWAY_ERROR' })
+    return false
+  }
+}
+
+export async function sendInstitutionSms(institutionId, toMsisdn, message) {
+  try {
+    const { rows } = await query('SELECT name FROM institutions WHERE id = $1 AND status = \'ACTIVE\'', [institutionId])
+    if (!rows.length) return false
+    const senderId = rows[0].name.replace(/[^A-Za-z0-9 ]/g, '').trim().slice(0, 11) || env.sms.defaultSenderId.slice(0, 11)
+    const client = axios.create({ baseURL: env.sms.gatewayBaseUrl, timeout: 15_000 })
+    const response = await client.post('send', { senderId, to: toMsisdn, message })
+    return response.status >= 200 && response.status < 300
+  } catch (err) {
+    console.error('[sms] institution delivery failed', { code: err?.code || 'GATEWAY_ERROR' })
     return false
   }
 }

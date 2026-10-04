@@ -8,7 +8,8 @@ const NAV_ITEMS = [
   { to: '/transactions', label: 'Transactions' },
   { to: '/reports', label: 'Reports' },
   { to: '/storefront-operations', label: 'Storefront operations' },
-  { to: '/institution-applications', label: 'Institution applications' }
+  { to: '/institution-applications', label: 'Institution applications' },
+  { to: '/security-settings', label: 'Security settings' }
 ]
 
 export default function Layout() {

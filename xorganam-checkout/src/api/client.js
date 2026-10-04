@@ -102,6 +102,8 @@ export const storefrontCustomerApi = {
 export const operatorAuth = {
   register: (payload) => request('/public/tenants/register', { method: 'POST', body: payload }),
   login: (email, password) => request('/auth/login', { method: 'POST', body: { email, password } }),
+  setupMfa: (challengeToken) => request('/auth/mfa/setup', { method: 'POST', body: { challengeToken } }),
+  verifyMfa: (challengeToken, code) => request('/auth/mfa/verify', { method: 'POST', body: { challengeToken, code } }),
   me: () => request('/auth/me', { auth: true }),
   saveSession: (result) => {
     sessionStorage.setItem(TOKEN_KEY, result.token)
@@ -126,6 +128,13 @@ export const operatorAuth = {
 // Operator portal - everything a Tenant's staff can do once logged in.
 // =====================================================================
 export const operatorApi = {
+  listInstitutionFinanceProducts: (tenantId) => request('/tenant-portal/institution-finance/products', { params: { tenantId }, auth: true }),
+  listInstitutionFinanceCustomers: (tenantId) => request('/tenant-portal/institution-finance/customers', { params: { tenantId }, auth: true }),
+  listInstitutionFinanceAccounts: (tenantId) => request('/tenant-portal/institution-finance/accounts', { params: { tenantId }, auth: true }),
+  requestInstitutionFinanceAccount: (payload) => request('/tenant-portal/institution-finance/accounts', { method: 'POST', body: payload, auth: true }),
+  listInstitutionFinanceFees: (tenantId) => request('/tenant-portal/institution-finance/fees', { params: { tenantId }, auth: true }),
+  listInstitutionFinanceTransactions: (tenantId) => request('/tenant-portal/institution-finance/transactions', { params: { tenantId }, auth: true }),
+  createInstitutionFinanceTransaction: (payload) => request('/tenant-portal/institution-finance/transactions', { method: 'POST', body: payload, auth: true }),
   // Periodic sweeps are queued work; the reconciliation view shows their
   // persisted ledger rows so operators can distinguish pending and failed legs.
   runPeriodicSettlements: (tenantId) => request('/periodic-settlements/run-due', { method: 'POST', body: { tenantId }, auth: true }),

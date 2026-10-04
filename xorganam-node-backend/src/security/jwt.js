@@ -15,8 +15,14 @@ export function signToken(user) {
 
   if (user.institutionId) payload.institutionId = user.institutionId
   if (user.institutionStaffId) payload.institutionStaffId = user.institutionStaffId
+  if (user.mfa === true) payload.mfa = true
+  if (user.mfaFlow) payload.mfaFlow = user.mfaFlow
+  if (user.principalType) payload.principalType = user.principalType
 
-  return jwt.sign(payload, env.jwt.secret, { expiresIn: EXPIRY, issuer: 'xorganam', audience: 'xorganam-clients' })
+  return jwt.sign(payload, env.jwt.secret, {
+    expiresIn: user.mfaFlow ? '10m' : EXPIRY,
+    issuer: 'xorganam', audience: 'xorganam-clients'
+  })
 }
 
 /**

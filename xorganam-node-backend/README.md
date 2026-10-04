@@ -38,7 +38,7 @@ Merchant never authenticates at all — she only ever receives SMS.
 ## Endpoint map
 
 ```
-POST   /api/v1/public/tenants/register        Operator self-registration + auto-login
+POST   /api/v1/public/tenants/register        Operator self-registration; MFA enrollment is required at sign-in
 GET    /api/v1/public/merchants/:id            Checkout: can this merchant take payments?
 POST   /api/v1/public/collect                  Checkout: customer-initiated collection
 GET    /api/v1/public/collect/:ref/status       Checkout: poll payment outcome
@@ -166,11 +166,34 @@ Before approval, platform staff must independently verify the institution, its s
 and the applicant's authority. This flow does not verify email ownership or send email, so reviewers
 must not rely only on the submitted contact information.
 
+## Required authenticator MFA
+
+Tenant/platform accounts and institution staff must enroll an authenticator app at first sign-in.
+Subsequent sign-ins require a six-digit TOTP code. MFA secrets are encrypted through the configured
+Vault Transit key. Apply `20261206_add_required_authenticator_mfa.sql` before deploying this version;
+existing sessions without an MFA claim are rejected and users must sign in again. Email verification
+and password recovery are not implemented because this repository has no email delivery provider.
+Lost authenticator devices therefore require an audited operator recovery procedure before production.
+
+## Deployment and release checks
+
+`docker-compose.yml` is the local development stack, not a production TLS configuration. Production
+must terminate TLS at a managed ingress, supply database/JWT/Vault secrets from an approved secret
+manager, retain encrypted KYC storage with protected backups, and apply network egress rules for
+Eganow, Vault, SMS, and other required providers. The application does not configure those external
+controls or an antivirus scanner. Confirm the migration ledger in the target database and complete
+provider transaction/recovery exercises before enabling real payments. Dependency audit results
+are specific to the checked lockfile and must be repeated for each release.
+
 ## Webhook listener (`src/routes/webhooks.js`)
 
-Resolves tenant from the URL or the payload's account id, verifies HMAC-SHA256 against that
-tenant's own decrypted secret (raw body captured before JSON parsing), logs the collection
-idempotently on `(tenant_id, eganow_reference)`, then forks: `AUTO_SWEEP` merchants get a BullMQ
+Parses Eganow's documented `TransactionId`, `TransactionStatus`, and `EganowReferenceNo` fields,
+correlates the callback's transaction id to an existing internal reference, then queries Eganow's
+authenticated status endpoint before changing ledger state. The callback status is not payment
+proof, and unknown or ambiguous references are not used to create ledger rows. Confirm this field
+mapping against the contracted Eganow account before enabling callbacks.
+
+After authenticated reconciliation, `AUTO_SWEEP` merchants get a BullMQ
 job queued; `MANUAL` merchants get an SMS (and email, if configured) instead.
 
 ## Worker (`src/workers/collectForMeWorker.js`)

@@ -7,6 +7,7 @@ import { TenantCredentialsError } from '../services/credentialsService.js'
 import { sendMerchantSms } from '../services/notificationService.js'
 import { processSplitPayout } from '../services/splitPaymentService.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
+import { reconcileTransaction } from '../services/reconciliationService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '10', 10)
 
@@ -22,25 +23,26 @@ async function processCollectForMeJob(job) {
   if (!tenantId || !merchantId || !transactionId) {
     // A malformed job is a bug in the enqueuer, not a transient failure -
     // fail permanently rather than retrying something that can never succeed.
-    throw new Error(`Malformed job payload: ${JSON.stringify(job.data)}`)
+    throw new Error('Malformed collect-for-me job payload.')
   }
 
   const context = await loadJobContext(tenantId, merchantId, transactionId)
 
   if (!context) {
-    console.warn(`[collect-for-me] job ${job.id} references missing tenant/merchant/transaction - dropping.`)
+    console.warn('[collect-for-me] job references missing records; dropping')
     return { skipped: true }
   }
 
   const { merchant, collectionTxn } = context
 
   if (collectionTxn.status === 'PAID_OUT') {
-    console.log(`[collect-for-me] transaction ${transactionId} already paid out - skipping (idempotent).`)
+    // Avoid transaction IDs in routine worker logs; job state remains available in the queue.
+    console.log('[collect-for-me] already paid out; skipping idempotently')
     return { skipped: true, reason: 'not-in-received-state' }
   }
 
   if (!['RECEIVED', 'SWEPT_INTERNAL'].includes(collectionTxn.status)) {
-    console.log(`[collect-for-me] transaction ${transactionId} at status ${collectionTxn.status} - skipping until collection is received.`)
+    console.log('[collect-for-me] not ready for payout; skipping until collection is received')
     return { skipped: true, reason: 'not-ready' }
   }
 
@@ -180,11 +182,20 @@ async function processCollectForMeJob(job) {
     })
     await markTransactionResult(collectionTxn.id, { success: true, status: 'PAID_OUT' })
   } catch (err) {
-    await markTransactionResult(payoutTxn.id, { success: false, status: 'FAILED', failureReason: err.message })
-    // Note: collectionTxn stays at SWEPT_INTERNAL, not FAILED - the money
-    // really did leave the collection account. That needs a human to
-    // reconcile/retry the payout leg specifically, not a fresh sweep.
-    throw taggedError(err, tenantId, 'Payout')
+    // A lost response is ambiguous: Eganow may have paid the customer. Confirm
+    // through the authenticated status endpoint before making this terminal.
+    try {
+      const reconciled = await reconcileTransaction(payoutTxn.id, tenantId)
+      if (reconciled && ['PAID_OUT', 'FAILED'].includes(reconciled.status)) {
+        if (reconciled.status === 'PAID_OUT') await markTransactionResult(collectionTxn.id, { success: true, status: 'PAID_OUT' })
+        return { reconciled: true, status: reconciled.status, payoutTransactionId: payoutTxn.id }
+      }
+    } catch (reconcileError) {
+      console.error('[collect-for-me] payout outcome remains unconfirmed', { code: reconcileError?.code || 'RECONCILIATION_ERROR' })
+    }
+    await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: payoutTxn.id })
+    console.warn('[collect-for-me] payout left pending for reconciliation')
+    return { pending: true, stage: 'payout-reconciliation', payoutTransactionId: payoutTxn.id }
   }
 
   // ---- Step 3: notify the merchant ------------------------------------
@@ -366,14 +377,11 @@ export const collectForMeWorker = new Worker(
     try {
       return await processCollectForMeJob(job)
     } catch (err) {
-      // Log with full tenant context, then re-throw so BullMQ records the
-      // job as failed and applies its configured retry/backoff. Never
+      // Avoid customer, tenant, transaction, and provider details in shared logs.
+      // Re-throw so BullMQ records the job failure and applies retry/backoff. Never
       // swallow here - swallowing would silently strand a merchant's
       // money mid-pipeline with no retry and no record of failure.
-      console.error(
-        `[collect-for-me] job ${job.id} failed (tenant=${job.data?.tenantId}, merchant=${job.data?.merchantId}, attempt=${job.attemptsMade}):`,
-        err.message
-      )
+      console.error('[collect-for-me] job failed', { attempt: job.attemptsMade, code: err?.code || 'WORKER_ERROR' })
       throw err
     }
   },
@@ -385,10 +393,7 @@ export const collectForMeWorker = new Worker(
 
 collectForMeWorker.on('failed', (job, err) => {
   if (job.attemptsMade >= job.opts.attempts) {
-    console.error(
-      `[collect-for-me] job ${job.id} permanently failed after ${job.attemptsMade} attempts (tenant=${job.data?.tenantId}). Needs manual reconciliation.`,
-      err.message
-    )
+    console.error('[collect-for-me] job exhausted retries; manual reconciliation may be required', { attempts: job.attemptsMade, code: err?.code || 'WORKER_ERROR' })
     // In production: alert ops / write to a dead-letter table keyed by
     // tenant_id so one tenant's persistent failures are triageable
     // without scanning every other tenant's jobs.
@@ -400,7 +405,7 @@ collectForMeWorker.on('failed', (job, err) => {
 // down every tenant's in-flight jobs at once rather than just the one
 // that errored.
 collectForMeWorker.on('error', (err) => {
-  console.error('[collect-for-me] worker-level error (connection/infra, not job-specific):', err)
+  console.error('[collect-for-me] worker infrastructure error', { code: err?.code || 'WORKER_ERROR' })
 })
 
 console.log(`[collect-for-me] worker started, concurrency=${WORKER_CONCURRENCY}`)
@@ -411,11 +416,11 @@ console.log(`[collect-for-me] worker started, concurrency=${WORKER_CONCURRENCY}`
 // triggered it. BullMQ's own job try/catch above should catch everything
 // job-related; these two are for anything outside that boundary.
 process.on('unhandledRejection', (reason) => {
-  console.error('[collect-for-me] unhandledRejection', reason)
+  console.error('[collect-for-me] unhandled rejection', { code: reason?.code || 'UNEXPECTED' })
 })
 
 process.on('uncaughtException', (err) => {
-  console.error('[collect-for-me] uncaughtException', err)
+  console.error('[collect-for-me] uncaught exception', { code: err?.code || 'UNEXPECTED' })
 })
 
 process.on('SIGTERM', async () => {

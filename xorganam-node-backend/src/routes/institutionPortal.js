@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword } from '../security/password.js'
 import { signToken } from '../security/jwt.js'
 import { institutionDisputeScope, institutionLinkScope } from '../services/institutionScope.js'
 import { institutionMembershipAdapterInternals } from '../services/institutionMembershipAdapterService.js'
+import { isMfaRequired } from '../services/mfaPolicy.js'
 
 export const institutionAuthRouter = Router()
 export const institutionPortalRouter = Router()
@@ -65,7 +66,7 @@ institutionAuthRouter.post(
 
     const { rows } = await query(
       `SELECT s.id, s.institution_id, i.name AS institution_name, s.branch_id,
-              s.first_name, s.last_name, s.email, s.role, s.password_hash, s.is_active, s.created_at
+              s.first_name, s.last_name, s.email, s.role, s.password_hash, s.is_active, s.created_at, s.mfa_enabled
          FROM institution_staff s
          JOIN institutions i ON i.id = s.institution_id AND i.status = 'ACTIVE'
         WHERE lower(s.email) = lower($1)`,
@@ -81,14 +82,26 @@ institutionAuthRouter.post(
       return res.status(401).json({ message: 'Invalid email or password.' })
     }
 
-    const token = signToken({
+    if (!(await isMfaRequired('INSTITUTION', staff.id))) {
+      const token = signToken({
+        id: staff.id,
+        institutionId: staff.institution_id,
+        institutionStaffId: staff.id,
+        role: staff.role
+      })
+      return res.json({ mfaRequired: false, token, staff: mapStaff(staff) })
+    }
+
+    const challengeToken = signToken({
       id: staff.id,
       institutionId: staff.institution_id,
       institutionStaffId: staff.id,
-      role: staff.role
+      role: staff.role,
+      mfaFlow: staff.mfa_enabled ? 'CHALLENGE' : 'ENROLL',
+      principalType: 'INSTITUTION'
     })
     await query('UPDATE institution_staff SET last_login_at = now(), updated_at = now() WHERE id = $1', [staff.id])
-    res.json({ token, staff: mapStaff(staff) })
+    res.json({ mfaRequired: true, mfaEnrollmentRequired: !staff.mfa_enabled, challengeToken, staff: mapStaff(staff) })
   })
 )
 

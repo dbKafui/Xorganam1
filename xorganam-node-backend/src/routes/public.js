@@ -2,7 +2,6 @@ import { Router } from 'express'
 import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
 import { hashPassword } from '../security/password.js'
-import { signToken } from '../security/jwt.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
 
@@ -55,10 +54,9 @@ publicRouter.post(
       return { tenant, user: userResult.rows[0] }
     })
 
-    const token = signToken({ id: result.user.id, tenantId: result.tenant.id, role: 'TENANT_ADMIN' })
-
     res.status(201).json({
-      token,
+      signInRequired: true,
+      message: 'Registration complete. Sign in to set up required multi-factor authentication.',
       user: {
         id: result.user.id,
         tenantId: result.tenant.id,

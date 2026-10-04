@@ -34,6 +34,8 @@ async function request(path, { method = 'GET', body, auth = false } = {}) {
 
 export const institutionAuth = {
   login: (email, password) => request('/institution-auth/login', { method: 'POST', body: { email, password } }),
+  setupMfa: (challengeToken) => request('/auth/mfa/setup', { method: 'POST', body: { challengeToken } }),
+  verifyMfa: (challengeToken, code) => request('/auth/mfa/verify', { method: 'POST', body: { challengeToken, code } }),
   submitApplication: (body) => request('/institution-auth/registrations', { method: 'POST', body }),
   checkApplicationStatus: (applicationId, trackingToken) =>
     request(`/institution-auth/registrations/${encodeURIComponent(applicationId)}/status`, { method: 'POST', body: { trackingToken } }),
@@ -54,6 +56,33 @@ export const institutionAuth = {
 }
 
 export const institutionApi = {
+  getEganowProvisioning: () => request('/institution-portal/finance/eganow', { auth: true }),
+  getApprovalPolicy: () => request('/institution-portal/finance/approval-policy', { auth: true }),
+  saveApprovalPolicy: (supervisorApprovalLimitCents) => request('/institution-portal/finance/approval-policy', { method: 'PUT', body: { supervisorApprovalLimitCents }, auth: true }),
+  saveEganowProvisioning: (payload) => request('/institution-portal/finance/eganow', { method: 'PUT', body: payload, auth: true }),
+  testEganowProvisioning: () => request('/institution-portal/finance/eganow/test', { method: 'POST', body: {}, auth: true }),
+  listFinanceCustomers: () => request('/institution-portal/finance/customers', { auth: true }),
+  listFinanceLinkedTenants: () => request('/institution-portal/finance/linked-tenants', { auth: true }),
+  createFinanceCustomer: (payload) => request('/institution-portal/finance/customers', { method: 'POST', body: payload, auth: true }),
+  decideCustomerKyc: (customerId, payload) => request(`/institution-portal/finance/customers/${encodeURIComponent(customerId)}/kyc`, { method: 'PATCH', body: payload, auth: true }),
+  updateCustomerNotificationConsent: (customerId, notificationConsent) => request(`/institution-portal/finance/customers/${encodeURIComponent(customerId)}/notification-consent`, { method: 'PATCH', body: { notificationConsent }, auth: true }),
+  listFinanceProducts: () => request('/institution-portal/finance/products', { auth: true }),
+  createFinanceProduct: (payload) => request('/institution-portal/finance/products', { method: 'POST', body: payload, auth: true }),
+  updateFinanceProductPolicy: (productId, payload) => request(`/institution-portal/finance/products/${encodeURIComponent(productId)}/policy`, { method: 'PATCH', body: payload, auth: true }),
+  updateFinanceProduct: (productId, status) => request(`/institution-portal/finance/products/${encodeURIComponent(productId)}`, { method: 'PATCH', body: { status }, auth: true }),
+  listFinanceAccounts: () => request('/institution-portal/finance/accounts', { auth: true }),
+  createFinanceAccount: (payload) => request('/institution-portal/finance/accounts', { method: 'POST', body: payload, auth: true }),
+  decideFinanceAccount: (accountId, decision) => request(`/institution-portal/finance/accounts/${encodeURIComponent(accountId)}/decision`, { method: 'PATCH', body: { decision }, auth: true }),
+  listFinanceTransactions: () => request('/institution-portal/finance/transactions', { auth: true }),
+  createFinanceTransaction: (payload) => request('/institution-portal/finance/transactions', { method: 'POST', body: payload, auth: true }),
+  decideFinanceTransaction: (transactionId, payload) => request(`/institution-portal/finance/transactions/${encodeURIComponent(transactionId)}/decision`, { method: 'PATCH', body: payload, auth: true }),
+  reconcileFinanceTransaction: (transactionId) => request(`/institution-portal/finance/transactions/${encodeURIComponent(transactionId)}/reconcile`, { method: 'POST', body: {}, auth: true }),
+  listFinanceFees: () => request('/institution-portal/finance/fees', { auth: true }),
+  saveFinanceFees: (rules) => request('/institution-portal/finance/fees', { method: 'PUT', body: { rules }, auth: true }),
+  listNotificationSettings: () => request('/institution-portal/notifications/settings', { auth: true }),
+  saveNotificationSettings: (settings) => request('/institution-portal/notifications/settings', { method: 'PUT', body: { settings }, auth: true }),
+  sendInstitutionNotification: (payload) => request('/institution-portal/notifications/send', { method: 'POST', body: payload, auth: true }),
+  listNotificationLog: () => request('/institution-portal/notifications/log', { auth: true }),
   dashboard: () => request('/institution-portal/dashboard', { auth: true }),
   listLinks: () => request('/institution-portal/links', { auth: true }),
   verifyLink: (linkId, payload) =>

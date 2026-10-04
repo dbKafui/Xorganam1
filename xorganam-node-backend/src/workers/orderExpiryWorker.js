@@ -10,10 +10,10 @@ const queue = new Queue(QUEUE_NAME, { connection })
 
 queue.add('release-expired-orders', {}, {
   repeat: { every: 60_000 }, jobId: 'storefront-order-expiry-scan'
-}).catch((error) => console.error('[order-expiry] schedule failed:', error.message))
+}).catch((error) => console.error('[order-expiry] schedule failed', { code: error?.code || 'WORKER_ERROR' }))
 queue.add('release-expired-orders', {}, {
   jobId: `storefront-order-expiry-initial-${Date.now()}`
-}).catch((error) => console.error('[order-expiry] initial scan failed:', error.message))
+}).catch((error) => console.error('[order-expiry] initial scan failed', { code: error?.code || 'WORKER_ERROR' }))
 
 async function processExpiredOrder() {
   return withTransaction(async (tx) => {
@@ -106,5 +106,5 @@ export const orderExpiryWorker = new Worker(QUEUE_NAME, async (job) => {
   return releaseExpiredOrders()
 }, { connection, concurrency: 1 })
 
-orderExpiryWorker.on('failed', (job, error) => console.error(`[order-expiry] job ${job?.id || 'unknown'} failed:`, error.message))
-orderExpiryWorker.on('error', (error) => console.error('[order-expiry] worker error:', error.message))
+orderExpiryWorker.on('failed', (_job, error) => console.error('[order-expiry] job failed', { code: error?.code || 'WORKER_ERROR' }))
+orderExpiryWorker.on('error', (error) => console.error('[order-expiry] worker error', { code: error?.code || 'WORKER_ERROR' }))

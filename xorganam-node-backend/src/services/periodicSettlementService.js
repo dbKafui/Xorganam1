@@ -7,6 +7,7 @@ import {
   isGatewaySuccess,
   queryTransactionStatus
 } from './eganowClient.js'
+import { applyInstitutionSplitRepayments } from './creditCashSweepService.js'
 
 const RETRY_WINDOW_MS = 10 * 60 * 1000
 
@@ -355,19 +356,27 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
       : institutionStatus === 'FAILED' || vendorStatus === 'FAILED'
         ? 'PARTIALLY_SETTLED'
         : 'PENDING'
-    await query(
-      `UPDATE institution_sweep_ledger SET status = $2,
-              institution_leg_status = $3, vendor_leg_status = $4, updated_at = now()
-        WHERE sweep_transaction_id = $1`,
-      [parent.id, status, institutionStatus, vendorStatus]
-    )
-    if (status === 'SETTLED') {
+    if (institutionStatus === 'PAID_OUT') {
+      await withTransaction(async (tx) => {
+        await tx.query(
+          `UPDATE institution_sweep_ledger SET status = $2,
+                  institution_leg_status = $3, vendor_leg_status = $4, updated_at = now()
+            WHERE sweep_transaction_id = $1`, [parent.id, status, institutionStatus, vendorStatus]
+        )
+        await applyInstitutionSplitRepayments(tx, parent.id)
+        if (status === 'SETTLED') await tx.query(
+            `UPDATE periodic_accrual_ledger
+                SET status = 'SWEPT', swept_transaction_id = $1, swept_at = now()
+              WHERE tenant_id = $2 AND merchant_id = $3 AND institution_id = $4
+                AND period_key = $5 AND source_transaction_id IS NOT NULL AND status = 'PENDING'`,
+            [parent.id, periodConfig.tenant_id, periodConfig.merchant_id, periodConfig.institution_id, periodConfig.period.key]
+          )
+      })
+    } else {
       await query(
-        `UPDATE periodic_accrual_ledger
-            SET status = 'SWEPT', swept_transaction_id = $1, swept_at = now()
-          WHERE tenant_id = $2 AND merchant_id = $3 AND institution_id = $4
-            AND period_key = $5 AND source_transaction_id IS NOT NULL AND status = 'PENDING'`,
-        [parent.id, periodConfig.tenant_id, periodConfig.merchant_id, periodConfig.institution_id, periodConfig.period.key]
+        `UPDATE institution_sweep_ledger SET status = $2,
+                institution_leg_status = $3, vendor_leg_status = $4, updated_at = now()
+          WHERE sweep_transaction_id = $1`, [parent.id, status, institutionStatus, vendorStatus]
       )
     }
     results.push({ sweepId: parent.id, status })

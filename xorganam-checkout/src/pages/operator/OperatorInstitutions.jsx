@@ -18,6 +18,13 @@ export default function OperatorInstitutions() {
   const [options, setOptions] = useState([])
   const [institutions, setInstitutions] = useState([])
   const [links, setLinks] = useState([])
+  const [financeProducts, setFinanceProducts] = useState([])
+  const [financeCustomers, setFinanceCustomers] = useState([])
+  const [financeAccounts, setFinanceAccounts] = useState([])
+  const [financeFees, setFinanceFees] = useState([])
+  const [financeTransactions, setFinanceTransactions] = useState([])
+  const [financeRequest, setFinanceRequest] = useState({ customerId: '', productId: '', amount: '', termMonths: '', termDays: '' })
+  const [financePayment, setFinancePayment] = useState({ accountId: '', transactionType: 'LOAN_REPAYMENT', amount: '', externalReference: '', phoneNumber: '' })
   const [linkInstitutionId, setLinkInstitutionId] = useState('')
   const [memberId, setMemberId] = useState('')
   const [scopeAcknowledged, setScopeAcknowledged] = useState(false)
@@ -56,6 +63,13 @@ export default function OperatorInstitutions() {
     setOptions(Array.isArray(institutionRows) ? institutionRows : [])
     setInstitutions(Array.isArray(partneredInstitutions) ? partneredInstitutions : [])
     setLinks(Array.isArray(tenantLinks) ? tenantLinks : [])
+    const financeRows = await Promise.all([
+      operatorApi.listInstitutionFinanceProducts(user.tenantId), operatorApi.listInstitutionFinanceCustomers(user.tenantId),
+      operatorApi.listInstitutionFinanceAccounts(user.tenantId), operatorApi.listInstitutionFinanceFees(user.tenantId),
+      operatorApi.listInstitutionFinanceTransactions(user.tenantId)
+    ].map((request) => request.catch(() => [])))
+    setFinanceProducts(financeRows[0]); setFinanceCustomers(financeRows[1]); setFinanceAccounts(financeRows[2]);
+    setFinanceFees(financeRows[3]); setFinanceTransactions(financeRows[4])
     if (user.role === 'TENANT_BRANCH_MANAGER' && merchantRows?.[0]?.id) setMerchantId(merchantRows[0].id)
     if (tenantLinks?.[0]?.institution_id) setInstitutionId((current) => current || tenantLinks[0].institution_id)
     const referralInstitution = sessionStorage.getItem('xorganam_referral_institution')
@@ -218,6 +232,31 @@ export default function OperatorInstitutions() {
     } catch (requestError) { setError(requestError.message) } finally { setSaving(false) }
   }
 
+  async function requestFinancialAccount(event) {
+    event.preventDefault(); setError(''); setNotice(''); setSaving(true)
+    try {
+      await operatorApi.requestInstitutionFinanceAccount({ tenantId: user.tenantId, customerId: financeRequest.customerId,
+        productId: financeRequest.productId, requestedAmountCents: Math.round(Number(financeRequest.amount) * 100),
+        termMonths: financeRequest.termMonths ? Number(financeRequest.termMonths) : undefined,
+        termDays: financeRequest.termDays ? Number(financeRequest.termDays) : undefined })
+      setFinanceRequest({ customerId: '', productId: '', amount: '', termMonths: '', termDays: '' })
+      setNotice('Institution account application submitted for review.')
+      await load()
+    } catch (requestError) { setError(requestError.message) } finally { setSaving(false) }
+  }
+
+  async function recordFinancialPayment(event) {
+    event.preventDefault(); setError(''); setNotice(''); setSaving(true)
+    try {
+      await operatorApi.createInstitutionFinanceTransaction({ tenantId: user.tenantId, accountId: financePayment.accountId,
+        transactionType: financePayment.transactionType, amountCents: Math.round(Number(financePayment.amount) * 100), externalReference: financePayment.externalReference,
+        phoneNumber: financePayment.phoneNumber, note: 'Started by tenant operator through the institution Eganow account.' })
+      setFinancePayment({ accountId: '', transactionType: 'LOAN_REPAYMENT', amount: '', externalReference: '', phoneNumber: '' })
+      setNotice(financePayment.transactionType === 'WITHDRAWAL' ? 'Savings withdrawal request sent to the institution for approval.' : 'Eganow collection started. Approve the prompt on the customer mobile.')
+      await load()
+    } catch (requestError) { setError(requestError.message) } finally { setSaving(false) }
+  }
+
   return (
     <div>
       <div className="portal-header">
@@ -277,6 +316,38 @@ export default function OperatorInstitutions() {
               </div>
             )}
           </div>
+
+          <section className="card">
+            <h2>Institution loan and savings packages</h2>
+            <p className="subtle">Active packages are available after the institution approves your link and associates a verified member customer with this tenant.</p>
+            {!financeProducts.length ? <div className="empty-state">No active financial packages are available on your approved institution links.</div> : financeProducts.map((product) => <div className="kv-row" key={product.id}>
+              <span><strong>{product.institution_name} · {product.name}</strong><small>{product.product_type} · GHS {(Number(product.min_amount_cents) / 100).toFixed(2)}–{(Number(product.max_amount_cents) / 100).toFixed(2)} · {(Number(product.annual_rate_basis_points) / 100).toFixed(2)}% annual</small></span>
+              <span>{product.product_type === 'LOAN' ? `${product.tenor_options_months?.length ? `${product.tenor_options_months.join(', ')} months` : `${product.min_term_days}–${product.max_term_days} days`} · ${product.loan_interest_model || ''} · late fee ${(Number(product.late_fee_basis_points || 0) / 100).toFixed(2)}%` : `Min balance GHS ${(Number(product.min_balance_cents) / 100).toFixed(2)} · ${product.contribution_frequency || 'PER_TRANSACTION'}`}</span>
+            </div>)}
+            {financeProducts.length > 0 && ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user.role) && <form onSubmit={requestFinancialAccount}>
+              <h3>Apply for a member account</h3>
+              <div className="two-col">
+                <div className="field"><label>Verified member</label><select required value={financeRequest.customerId} onChange={(e) => setFinanceRequest({ ...financeRequest, customerId: e.target.value })}><option value="">Select member</option>{financeCustomers.map((customer) => <option key={customer.id} value={customer.id}>{customer.institution_name} · {customer.first_name} {customer.last_name} · {customer.customer_number}</option>)}</select></div>
+                <div className="field"><label>Package</label><select required value={financeRequest.productId} onChange={(e) => setFinanceRequest({ ...financeRequest, productId: e.target.value, termMonths: '', termDays: '' })}><option value="">Select package</option>{financeProducts.map((product) => <option key={product.id} value={product.id}>{product.institution_name} · {product.name} ({product.product_type})</option>)}</select></div>
+                <div className="field"><label>Amount (GHS)</label><input required type="number" min="0.01" step="0.01" value={financeRequest.amount} onChange={(e) => setFinanceRequest({ ...financeRequest, amount: e.target.value })} /></div>
+                {financeProducts.find((item) => item.id === financeRequest.productId)?.product_type === 'LOAN' && (financeProducts.find((item) => item.id === financeRequest.productId)?.tenor_options_months?.length ? <div className="field"><label>Loan tenor (months)</label><select required value={financeRequest.termMonths} onChange={(e) => setFinanceRequest({ ...financeRequest, termMonths: e.target.value })}><option value="">Select tenor</option>{financeProducts.find((item) => item.id === financeRequest.productId).tenor_options_months.map((months) => <option key={months} value={months}>{months} months</option>)}</select></div> : <div className="field"><label>Term (days)</label><input required type="number" min="1" value={financeRequest.termDays} onChange={(e) => setFinanceRequest({ ...financeRequest, termDays: e.target.value })} /></div>)}
+              </div><button className="btn btn-primary" disabled={saving}>{saving ? 'Submitting…' : 'Submit application'}</button>
+            </form>}
+            <h3>Member accounts</h3>
+            {!financeAccounts.length ? <p className="subtle">No linked member accounts yet.</p> : financeAccounts.map((account) => { const next = account.installments?.find((item) => item.status !== 'PAID'); const split = account.split_allocations?.[0]; return <div className="kv-row" key={account.id}><span><strong>{account.account_number} · {account.product_name}</strong><small>{account.institution_name} · {account.product_type} · GHS {(Number(account.product_type === 'LOAN' ? account.outstanding_cents : account.balance_cents) / 100).toFixed(2)} balance</small>{next && <small>Next payment {next.dueDate} · GHS {((Number(next.amountDueCents) - Number(next.amountPaidCents)) / 100).toFixed(2)}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · GHS {(Number(split.amountCents) / 100).toFixed(2)}</small>}</span><span className={`status-pill ${String(account.status).toLowerCase()}`}>{account.status.replaceAll('_', ' ').toLowerCase()}</span></div>})}
+            {financeAccounts.some((item) => ['APPROVED', 'ACTIVE'].includes(item.status)) && ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user.role) && <form onSubmit={recordFinancialPayment}>
+              <h3>Collect a contribution or repay a loan</h3><p className="subtle">Collections run through the linked institution’s own Eganow credentials. Savings withdrawals require institution approval before payout.</p>
+              <div className="two-col">
+              <div className="field"><label>Account</label><select required value={financePayment.accountId} onChange={(e) => setFinancePayment({ ...financePayment, accountId: e.target.value })}><option value="">Select account</option>{financeAccounts.filter((item) => ['APPROVED', 'ACTIVE'].includes(item.status) || (item.status === 'OVERDUE' && item.product_type === 'LOAN')).map((item) => <option key={item.id} value={item.id}>{item.institution_name} · {item.account_number} · {item.product_type}{item.status === 'OVERDUE' ? ' · overdue' : ''}</option>)}</select></div>
+                <div className="field"><label>Operation</label><select value={financePayment.transactionType} onChange={(e) => setFinancePayment({ ...financePayment, transactionType: e.target.value })}><option value="LOAN_REPAYMENT">Loan repayment</option><option value="DEPOSIT">Savings contribution</option><option value="WITHDRAWAL">Savings withdrawal</option></select></div>
+                <div className="field"><label>Amount (GHS)</label><input required type="number" min="0.01" step="0.01" value={financePayment.amount} onChange={(e) => setFinancePayment({ ...financePayment, amount: e.target.value })} /></div>
+                <div className="field"><label>Customer mobile (233XXXXXXXXX)</label><input required pattern="233[0-9]{9}" value={financePayment.phoneNumber} onChange={(e) => setFinancePayment({ ...financePayment, phoneNumber: e.target.value })} /></div>
+                <div className="field"><label>Transaction reference (optional)</label><input minLength="3" maxLength="160" value={financePayment.externalReference} onChange={(e) => setFinancePayment({ ...financePayment, externalReference: e.target.value })} placeholder="Generated if left blank" /></div>
+              </div><button className="btn btn-primary" disabled={saving}>{saving ? 'Submitting…' : financePayment.transactionType === 'WITHDRAWAL' ? 'Request savings withdrawal' : 'Start Eganow collection'}</button>
+            </form>}
+            {financeFees.length > 0 && <><h3>Institution fees</h3>{financeFees.map((fee) => <div className="kv-row" key={`${fee.institution_id}-${fee.operation}`}><span>{fee.institution_name} · {fee.operation.replaceAll('_', ' ').toLowerCase()}</span><strong>{fee.fee_type === 'NONE' ? 'No fee' : fee.fee_type === 'PERCENTAGE' ? `${fee.fee_value}%` : `GHS ${Number(fee.fee_value).toFixed(2)}`}</strong></div>)}</>}
+            {financeTransactions.length > 0 && <><h3>Submitted ledger entries</h3>{financeTransactions.map((entry) => <div className="kv-row" key={entry.id}><span>{entry.institution_name} · {entry.external_reference}<small>{entry.product_name} · {entry.transaction_type} · GHS {(Number(entry.amount_cents) / 100).toFixed(2)}</small></span><span className={`status-pill ${String(entry.status).toLowerCase()}`}>{entry.status.toLowerCase().replaceAll('_', ' ')}</span></div>)}</>}
+          </section>
 
           <form className="card" onSubmit={submit}>
             <h2>Set merchant settlement preferences</h2>

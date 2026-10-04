@@ -7,7 +7,9 @@ import { initiateCollection, CollectionRejectedError } from '../services/collect
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { kycUpload, toDocumentUrl } from '../services/fileStorage.js'
 import path from 'node:path'
-import { safeTenantUploadDir } from '../services/fileStorage.js'
+import fs from 'node:fs/promises'
+import { safeTenantUploadDir, hasAllowedDocumentSignature, encryptKycFile, decryptKycFile, newKycDocumentFilename } from '../services/fileStorage.js'
+import { isValidGhanaCardNumber, sanitizeInput } from '../middleware/sanitizeInput.js'
 
 export const tenantsRouter = Router()
 
@@ -148,32 +150,62 @@ tenantsRouter.post(
     }
   },
   // Accept multiple uploaded files to allow KYB submissions with several documents.
-  // Scope authorization runs before multer writes any bytes to disk.
+  // Scope authorization runs before multipart files are accepted into memory.
   kycUpload.any(),
+  // Multer parses text fields after the application JSON middleware has run.
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const tenantId = req.validatedTenantId
     const { kycType } = req.body
     const files = req.files || []
     if (!files.length) return res.status(400).json({ message: 'At least one document file is required.' })
-    if (!kycType) return res.status(400).json({ message: 'kycType is required.' })
+    if (!['INDIVIDUAL', 'BUSINESS'].includes(kycType)) return res.status(400).json({ message: 'Choose a valid KYC document category.' })
 
-    // Accept documentType and documentNumber as either single values or arrays
+    // Validate multipart identity metadata before writing encrypted files or rows.
     const documentTypes = Array.isArray(req.body.documentType)
-      ? req.body.documentType
-      : req.body.documentType
-      ? [req.body.documentType]
-      : []
+      ? req.body.documentType : req.body.documentType ? [req.body.documentType] : []
     const documentNumbers = Array.isArray(req.body.documentNumber)
-      ? req.body.documentNumber
-      : req.body.documentNumber
-      ? [req.body.documentNumber]
-      : []
+      ? req.body.documentNumber : req.body.documentNumber ? [req.body.documentNumber] : []
+    const documentMetadata = files.map((_, index) => ({
+      type: String(documentTypes[index] || documentTypes[0] || '').trim(),
+      number: String(documentNumbers[index] || documentNumbers[0] || '').trim()
+    }))
+    if (documentMetadata.some(({ type, number }) => !type || type.length > 100 || !number || number.length > 100)) {
+      return res.status(400).json({ message: 'Each uploaded document needs a type and number of at most 100 characters.' })
+    }
+    if (documentMetadata.some(({ type, number }) => /GHA|GHANA.*CARD/i.test(type) && !isValidGhanaCardNumber(number))) {
+      return res.status(400).json({ message: 'Enter a Ghana Card number in GHA-XXXXXXXXX-X format.' })
+    }
+    for (const file of files) {
+      const ext = path.extname(file.originalname).toLowerCase()
+      if (!hasAllowedDocumentSignature(ext, file.buffer)) {
+        return res.status(400).json({ message: 'A document does not match its declared PDF, JPEG, or PNG file type.' })
+      }
+    }
+    const { rows: tenantRows } = await query('SELECT api_key_salt FROM tenants WHERE id = $1', [tenantId])
+    if (!tenantRows.length || !tenantRows[0].api_key_salt) {
+      return res.status(503).json({ message: 'Secure document storage is unavailable.' })
+    }
+    try {
+      const uploadDir = safeTenantUploadDir(tenantId)
+      await fs.mkdir(uploadDir, { recursive: true, mode: 0o700 })
+      await fs.chmod(uploadDir, 0o700)
+      for (const file of files) {
+        file.filename = newKycDocumentFilename(file.originalname)
+        file.path = path.join(uploadDir, file.filename)
+        const encrypted = await encryptKycFile(file.buffer, tenantRows[0].api_key_salt)
+        await fs.writeFile(file.path, encrypted, { mode: 0o600, flag: 'wx' })
+      }
+    } catch (error) {
+      await Promise.all(files.filter((item) => item.path).map((item) => fs.unlink(item.path).catch(() => {})))
+      console.error('[kyc] document encryption failed', { code: error?.code || 'ENCRYPTION_ERROR' })
+      return res.status(503).json({ message: 'Secure document storage is unavailable.' })
+    }
 
     const insertedRows = []
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      const documentType = documentTypes[i] || documentTypes[0] || null
-      const documentNumber = documentNumbers[i] || documentNumbers[0] || null
+      const { type: documentType, number: documentNumber } = documentMetadata[i]
 
       const documentUrl = toDocumentUrl(tenantId, file)
 
@@ -204,14 +236,24 @@ tenantsRouter.get('/:tenantId/kyc-documents/:filename/file', asyncHandler(async 
     throw err
   }
   const { rows } = await query(
-    'SELECT id FROM kyc_documents WHERE tenant_id = $1 AND document_url = $2',
+    `SELECT d.id, t.api_key_salt FROM kyc_documents d JOIN tenants t ON t.id = d.tenant_id
+      WHERE d.tenant_id = $1 AND d.document_url = $2`,
     [tenantId, `/api/v1/tenants/${tenantId}/kyc-documents/${req.params.filename}/file`]
   )
   if (!rows.length) return res.status(404).json({ message: 'Document not found.' })
   const filePath = path.join(safeTenantUploadDir(tenantId), req.params.filename)
   res.setHeader('Content-Disposition', 'attachment')
   res.setHeader('Cache-Control', 'private, no-store')
-  res.sendFile(filePath, (err) => { if (err && !res.headersSent) res.status(err.statusCode === 404 ? 404 : 500).json({ message: 'Unable to retrieve document.' }) })
+  res.setHeader('Content-Type', 'application/octet-stream')
+  try {
+    const stored = await fs.readFile(filePath)
+    const bytes = await decryptKycFile(stored, rows[0].api_key_salt)
+    if (!hasAllowedDocumentSignature(path.extname(filePath).toLowerCase(), bytes)) return res.status(415).json({ message: 'Stored document content is invalid.' })
+    res.send(bytes)
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ message: 'Document not found.' })
+    throw err
+  }
 }))
 
 tenantsRouter.post(

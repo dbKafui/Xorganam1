@@ -3,14 +3,16 @@ import { useInstitutionAuth } from '../context/InstitutionAuthContext.jsx'
 
 const NAV = [
   { to: '/dashboard', label: 'Overview', icon: '01' },
-  { to: '/verification', label: 'Verification queue', icon: '02' },
-  { to: '/assignments', label: 'Assignments', icon: '03' },
-  { to: '/team-structure', label: 'Team structure', icon: '04' },
-  { to: '/staff', label: 'Staff', icon: '05' },
-  { to: '/reconciliation', label: 'Reconciliation', icon: '06' },
-  { to: '/disputes', label: 'Disputes', icon: '07' },
-  { to: '/profile', label: 'Institution profile', icon: '08' },
-  { to: '/settings', label: 'API adapter', icon: '09' }
+  { to: '/finance', label: 'Loans & savings', icon: '02' },
+  { to: '/notifications', label: 'Notifications', icon: '03' },
+  { to: '/verification', label: 'Verification queue', icon: '04' },
+  { to: '/assignments', label: 'Assignments', icon: '05' },
+  { to: '/team-structure', label: 'Team structure', icon: '06' },
+  { to: '/staff', label: 'Staff', icon: '07' },
+  { to: '/reconciliation', label: 'Reconciliation', icon: '08' },
+  { to: '/disputes', label: 'Disputes', icon: '09' },
+  { to: '/profile', label: 'Institution profile', icon: '10' },
+  { to: '/settings', label: 'API adapter', icon: '11' }
 ]
 
 export default function PortalLayout() {

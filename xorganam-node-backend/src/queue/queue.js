@@ -15,6 +15,7 @@ let periodicSettlementQueue = null
 let creditWebhookQueue = null
 let creditReminderQueue = null
 let creditCashSweepQueue = null
+let institutionLoanRecoveryQueue = null
 let connectError = null
 
 function createRedisConnection() {
@@ -30,7 +31,7 @@ function createRedisConnection() {
 
   connection.on('error', (err) => {
     connectError = err
-    console.error('[queue] Redis error:', err.message)
+    console.error('[queue] Redis connection failed', { code: err?.code || 'CONNECTION_ERROR' })
   })
 
   connection.on('connect', () => {
@@ -51,6 +52,7 @@ export const PERIODIC_SETTLEMENT_QUEUE = 'periodic-settlement'
 export const CREDIT_WEBHOOK_QUEUE = 'credit-webhook-delivery'
 export const CREDIT_REMINDER_QUEUE = 'credit-installment-reminders'
 export const CREDIT_CASH_SWEEP_QUEUE = 'credit-cash-installment-sweeps'
+export const INSTITUTION_LOAN_RECOVERY_QUEUE = 'institution-loan-recovery'
 
 export function getRedisHealth() {
   return {
@@ -72,8 +74,8 @@ function getCollectForMeQueue() {
   try {
     const conn = getRedisConnection()
     collectForMeQueue = new Queue(COLLECT_FOR_ME_QUEUE, { connection: conn })
-  } catch (err) {
-    console.warn('[queue] Failed to initialize queue:', err.message)
+  } catch {
+    console.warn('[queue] collection queue unavailable')
   }
 
   return collectForMeQueue
@@ -87,8 +89,8 @@ function getCollectionStatusPollQueue() {
   try {
     const conn = getRedisConnection()
     collectionStatusPollQueue = new Queue(COLLECTION_STATUS_POLL_QUEUE, { connection: conn })
-  } catch (err) {
-    console.warn('[queue] Failed to initialize status poll queue:', err.message)
+  } catch {
+    console.warn('[queue] status polling queue unavailable')
   }
 
   return collectionStatusPollQueue
@@ -102,7 +104,7 @@ export { getCollectForMeQueue, getCollectionStatusPollQueue }
 export async function enqueueCollectForMeJob(jobData) {
   const queue = getCollectForMeQueue()
   if (!queue) {
-    console.warn('[queue] collectForMeQueue not available (Redis offline), job will not be queued:', jobData)
+    console.warn('[queue] collection queue unavailable; work was not queued')
     return null
   }
 
@@ -117,15 +119,15 @@ export async function enqueueCollectForMeJob(jobData) {
       removeOnComplete: { age: 60 * 60 * 24 * 7 }, // keep 7 days for audit
       removeOnFail: { age: 60 * 60 * 24 * 30 } // keep failures 30 days
     })
-  } catch (err) {
-    console.warn('[queue] collectForMeQueue not available (Redis offline), job will not be queued:', jobData, err.message)
+  } catch {
+    console.warn('[queue] collection queue failed to enqueue work')
     return null
   }
 }
 export async function enqueueCollectionStatusPollJob(jobData) {
   const queue = getCollectionStatusPollQueue()
   if (!queue) {
-    console.warn('[queue] status poll queue not available (Redis offline), job will not be queued:', jobData)
+    console.warn('[queue] status polling queue unavailable; work was not queued')
     return null
   }
 
@@ -138,8 +140,8 @@ export async function enqueueCollectionStatusPollJob(jobData) {
       removeOnComplete: { age: 60 * 60 * 24 * 7 },
       removeOnFail: { age: 60 * 60 * 24 * 30 }
     })
-  } catch (err) {
-    console.warn('[queue] status poll queue add failed:', jobData, err.message)
+  } catch {
+    console.warn('[queue] status polling queue failed to enqueue work')
     return null
   }
 }
@@ -195,4 +197,9 @@ export async function enqueueCreditReminder(job) {
 export function getCreditCashSweepQueue() {
   if (!creditCashSweepQueue) creditCashSweepQueue = new Queue(CREDIT_CASH_SWEEP_QUEUE, { connection: getRedisConnection() })
   return creditCashSweepQueue
+}
+
+export function getInstitutionLoanRecoveryQueue() {
+  if (!institutionLoanRecoveryQueue) institutionLoanRecoveryQueue = new Queue(INSTITUTION_LOAN_RECOVERY_QUEUE, { connection: getRedisConnection() })
+  return institutionLoanRecoveryQueue
 }

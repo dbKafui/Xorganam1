@@ -47,11 +47,24 @@ export function AuthProvider({ children }) {
       )
     }
 
+    if (!result.mfaRequired && result.token) {
+      sessionStorage.setItem('xorganam_token', result.token)
+      sessionStorage.setItem('xorganam_user', JSON.stringify(result.user))
+      setUser(result.user)
+    }
+
+    return result
+  }, [])
+
+  const completeMfa = useCallback(async (challengeToken, code) => {
+    const result = await authApi.verifyMfa(challengeToken, code)
     sessionStorage.setItem('xorganam_token', result.token)
     sessionStorage.setItem('xorganam_user', JSON.stringify(result.user))
     setUser(result.user)
     return result.user
   }, [])
+
+  const setupMfa = useCallback((challengeToken) => authApi.setupMfa(challengeToken), [])
 
   const logout = useCallback(() => {
     sessionStorage.removeItem('xorganam_token')
@@ -63,7 +76,7 @@ export function AuthProvider({ children }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, ready, login, logout }}>
+    <AuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, logout }}>
       {children}
     </AuthContext.Provider>
   )

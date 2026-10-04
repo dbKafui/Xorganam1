@@ -1,16 +1,10 @@
 import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
-import { createEganowClientForTenant, EganowApiError, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
+import { createEganowClientForTenant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
 import { getTenantEganowContext, TenantCredentialsError } from './credentialsService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 
 export class CollectionRejectedError extends Error {}
-
-function maskMsisdn(msisdn) {
-  if (!msisdn) return msisdn
-  const digits = String(msisdn).replace(/\D/g, '')
-  return digits.length <= 4 ? digits : `***${digits.slice(-4)}`
-}
 
 function normalizeMsisdn(rawMsisdn) {
   if (!rawMsisdn) return rawMsisdn
@@ -221,30 +215,6 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     const inferredPaypartnerCode = inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
 
     if (inferredPaypartnerCode) {
-      if (network) {
-        const explicitPaypartnerCode = normalizePaypartnerCode(network)
-        if (explicitPaypartnerCode && explicitPaypartnerCode !== inferredPaypartnerCode) {
-          console.log('[collection] explicit network differs from MSISDN paypartner; using inferred paypartner', {
-            tenantId: merchant.tenant_id,
-            merchantId: merchant.id,
-            explicitNetwork: network,
-            explicitPaypartnerCode,
-            inferredPaypartnerCode,
-            msisdn: maskMsisdn(normalizedMsisdn)
-          })
-        }
-      }
-      const merchantPaypartnerCode = normalizePaypartnerCode(merchant.network_provider)
-      if (merchantPaypartnerCode && merchantPaypartnerCode !== inferredPaypartnerCode) {
-        console.log('[collection] merchant network provider differs from MSISDN paypartner; using inferred paypartner', {
-          tenantId: merchant.tenant_id,
-          merchantId: merchant.id,
-          merchantNetworkProvider: merchant.network_provider,
-          merchantPaypartnerCode,
-          inferredPaypartnerCode,
-          msisdn: maskMsisdn(normalizedMsisdn)
-        })
-      }
       paypartnerCode = inferredPaypartnerCode
     } else if (network) {
       paypartnerCode = normalizePaypartnerCode(network)
@@ -264,7 +234,6 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     }
 
     if (String(callbackUrl).includes('localhost') || String(callbackUrl).includes('127.0.0.1') || String(callbackUrl).includes('::1')) {
-      console.warn('[collection] callback URL is local and may not be reachable by Eganow:', { tenantId: merchant.tenant_id, callbackUrl })
     }
 
     if (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn)) {
@@ -297,27 +266,11 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       countryCode
     }
 
-    console.log('[collection] kyc.request', {
-      tenantId: merchant.tenant_id,
-      merchantId: merchant.id,
-      paypartnerCode,
-      mobileNumber: maskMsisdn(normalizedMsisdn),
-      kycEndpoint: `${client.defaults.baseURL}/api/vas/kyc`,
-      requestBody: {
-        paypartnerCode,
-        mobileNumber: maskMsisdn(normalizedMsisdn),
-        accountNoOrCardNoOrMSISDN: maskMsisdn(normalizedMsisdn),
-        languageId: 'en',
-        countryCode
-      }
-    })
-
     let kycResponse
     try {
       kycResponse = await client.post('/api/vas/kyc', kycBody)
-      console.log('[collection] kyc.response.data', kycResponse.data)
-    } catch (kycErr) {
-      console.error('[collection] kyc call failed', { tenantId: merchant.tenant_id, merchantId: merchant.id, err: kycErr.message })
+    } catch {
+      const failureReason = 'Customer verification failed. Verify the payment details or contact support.'
       await query(
         `UPDATE transactions
             SET status = 'FAILED',
@@ -326,10 +279,10 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
                 updated_at = now(),
                 completed_at = now()
           WHERE id = $1`,
-        [transactionId, `KYC lookup failed: ${kycErr.message}`]
+        [transactionId, failureReason]
       )
 
-      return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: 'KYC_FAILED', failureReason: `KYC lookup failed: ${kycErr.message}`, tenantId: merchant.tenant_id }
+      return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: 'KYC_FAILED', failureReason, tenantId: merchant.tenant_id }
     }
 
     // Inspect KYC response for definitive status. If the provider returns
@@ -347,9 +300,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       (kycResponse?.data?.isSuccess === false)
     
     if (kycExplicitFailure) {
-      const raw = typeof kycResponse.data === 'string' ? kycResponse.data : JSON.stringify(kycResponse.data)
       const reason = `KYC failed: ${kycStatus || 'DECLINED'}`
-      console.warn('[collection] kyc failed - aborting collection', { tenantId: merchant.tenant_id, merchantId: merchant.id, reason, raw })
 
       await query(
         `UPDATE transactions
@@ -364,10 +315,8 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
 
       return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: kycStatusStr || 'KYC_FAILED', failureReason: reason, tenantId: merchant.tenant_id }
     } else if (kycStatus && kycStatusStr !== 'successful' && kycStatusStr !== 'success') {
-      console.warn('[collection] kyc returned non-success status but not explicit failure; proceeding with collection', { tenantId: merchant.tenant_id, merchantId: merchant.id, kycStatus })
       // continue to attempt collection
     } else if (!kycStatus && typeof kycResponse.data === 'string') {
-      console.warn('[collection] kyc returned unstructured response; proceeding with collection', { tenantId: merchant.tenant_id, merchantId: merchant.id, raw: kycResponse.data })
       // continue to attempt collection
     }
 
@@ -378,8 +327,8 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       if (accountName) {
         await query(`UPDATE transactions SET kyc_name = $2 WHERE id = $1`, [transactionId, accountName])
       }
-    } catch (updErr) {
-      console.error('[collection] failed to persist kyc_name', { tenantId: merchant.tenant_id, merchantId: merchant.id, err: updErr.message })
+    } catch {
+      // Name enquiry is supplemental; do not print customer data or provider errors.
     }
 
     const body = {
@@ -399,35 +348,9 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       body.narration = narration
     }
 
-    console.log('[collection] request', {
-      tenantId: merchant.tenant_id,
-      merchantId: merchant.id,
-      paypartnerCode,
-      amount,
-      msisdn: maskMsisdn(normalizedMsisdn),
-      callbackUrl,
-      eganowEndpoint: `${client.defaults.baseURL}/api/transactions/collection`,
-      requestBody: {
-        paypartnerCode,
-        amount,
-        accountNoOrCardNoOrMSISDN: maskMsisdn(normalizedMsisdn),
-        transactionId: internalReference,
-        callback: callbackUrl
-      }
-    })
-
     const response = await client.post('/api/transactions/collection', body)
 
     const normalized = normalizeEganowResponse(response.data)
-
-    console.log('[collection] response.data', response.data)
-    console.log('[collection] response', {
-      tenantId: merchant.tenant_id,
-      merchantId: merchant.id,
-      eganowStatus: normalized.status,
-      reference: normalized.reference || internalReference,
-      transactionId: normalized.transactionId || null
-    })
 
     const eganowReference = normalized.reference || internalReference
     const eganowTransactionId = normalized.transactionId || null
@@ -435,13 +358,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     const gatewayStatus = normalized.status || 'UNKNOWN_RESPONSE'
 
     if (!normalized.status && !normalized.reference && !normalized.transactionId) {
-      console.warn('[collection] unrecognized Eganow collection response; keeping transaction pending for status polling', {
-        tenantId: merchant.tenant_id,
-        merchantId: merchant.id,
-        transactionId,
-        internalReference,
-        response: response.data
-      })
+      // Keep this transaction pending and let status polling reconcile it.
     }
 
     await query(
@@ -461,12 +378,13 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       internalReference,
       status: 'PENDING',
       paymentGatewayStatus: gatewayStatus,
-      message: normalized.message || response.data?.message || 'Transaction initiated.',
+      message: 'Transaction initiated.',
       tenantId: merchant.tenant_id
     }
   } catch (err) {
-    const message = err instanceof EganowApiError ? err.message : `Collection request failed: ${err.message}`
-    console.error(`[collection] Eganow collection failed for tenant ${merchant.tenant_id}, merchant ${merchant.id}:`, err)
+    const message = err instanceof CollectionRejectedError || err instanceof TenantCredentialsError
+      ? err.message
+      : 'Payment service is temporarily unavailable. Check transaction status or contact support.'
 
     await query(
       `UPDATE transactions

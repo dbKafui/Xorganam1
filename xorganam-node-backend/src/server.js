@@ -22,9 +22,14 @@ import { creditCustomerPublicRouter, creditCustomerRouter } from './routes/credi
 import { creditWebhooksRouter } from './routes/creditWebhooks.js'
 import { publicStorefrontRouter, storefrontRouter, storefrontCustomerRouter, storefrontAdminRouter } from './routes/storefront.js'
 import { institutionAuthRouter, institutionPortalRouter } from './routes/institutionPortal.js'
+import { institutionFinanceRouter, tenantInstitutionFinanceRouter } from './routes/institutionFinance.js'
+import { institutionNotificationsRouter } from './routes/institutionNotifications.js'
 import { institutionOnboardingPublicRouter, institutionOnboardingAdminRouter } from './routes/institutionOnboarding.js'
 import { ForbiddenError } from './middleware/auth.js'
 import { getRedisConnection } from './queue/queue.js'
+import { mfaRouter } from './routes/mfa.js'
+import { platformSecurityRouter } from './routes/platformSecurity.js'
+import { sanitizeInput } from './middleware/sanitizeInput.js'
 import './workers/eganowTokenRefreshWorker.js'
 
 const app = express()
@@ -34,7 +39,8 @@ if (env.corsOrigins.includes('*')) {
 }
 
 app.use((req, res, next) => {
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https: http://localhost:3000 ws:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+  // API responses do not need a browser document policy or third-party origins.
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
@@ -61,6 +67,7 @@ app.use(
     }
   })
 )
+app.use(sanitizeInput)
 
 app.get('/health', async (_req, res) => {
   try {
@@ -69,7 +76,7 @@ app.get('/health', async (_req, res) => {
     await redis.ping()
     res.json({ status: 'ok' })
   } catch (err) {
-    console.error('[health] dependency check failed', err)
+    console.error('[health] dependency check failed', { code: err?.code || 'DEPENDENCY_UNAVAILABLE' })
     res.status(503).json({ status: 'unhealthy' })
   }
 })
@@ -108,18 +115,28 @@ const institutionLoginLimiter = rateLimit({
   message: { message: 'Too many login attempts. Please try again later.' }
 })
 
+const mfaVerificationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many MFA attempts. Please try again later.' }
+})
+
+const tenantLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many login attempts. Please try again later.' }
+})
+
 const institutionRegistrationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many institution registration attempts. Please try again later.' }
-})
-
-// Log all incoming HTTP requests for debugging frontend → backend flow
-app.use((req, res, next) => {
-  console.log(`[http] ${req.method} ${req.path}`)
-  next()
 })
 
 app.use('/api/v1/webhooks', webhooksRouter)
@@ -129,12 +146,18 @@ app.use('/api/v1/public/credit-installments', publicLimiter, creditPaymentsRoute
 app.use('/api/v1/public', publicLimiter, publicStorefrontRouter)
 app.use('/api/v1/public', publicLimiter, publicRouter)
 
+app.use('/api/v1/auth/login', tenantLoginLimiter)
+app.use('/api/v1/auth/mfa', mfaVerificationLimiter, mfaRouter)
 app.use('/api/v1/auth', authRouter)
+app.use('/api/v1/platform/security-settings', platformSecurityRouter)
 app.use('/api/v1/institution-auth/login', institutionLoginLimiter)
 app.use('/api/v1/institution-auth/registrations', institutionRegistrationLimiter, institutionOnboardingPublicRouter)
 app.use('/api/v1/institution-auth', institutionAuthRouter)
 app.use('/api/v1/institution-onboarding', institutionOnboardingAdminRouter)
 app.use('/api/v1/institution-portal', institutionPortalRouter)
+app.use('/api/v1/institution-portal/finance', institutionFinanceRouter)
+app.use('/api/v1/institution-portal/notifications', institutionNotificationsRouter)
+app.use('/api/v1/tenant-portal/institution-finance', tenantInstitutionFinanceRouter)
 app.use('/api/v1/tenants', tenantsRouter)
 app.use('/api/v1/merchants', merchantsRouter)
 app.use('/api/v1/transactions', transactionsRouter)
@@ -168,7 +191,9 @@ app.use((err, _req, res, _next) => {
   if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ message: 'Uploaded document exceeds the 20 MB limit.' })
   if (err?.code === 'LIMIT_FILE_COUNT' || err?.code === 'LIMIT_FIELD_COUNT') return res.status(400).json({ message: 'Too many upload fields or files.' })
   if (err?.statusCode === 400) return res.status(400).json({ message: err.message })
-  console.error('[unhandled route error]', err)
+  // Error messages may contain SQL, provider response bodies, callback URLs,
+  // identifiers, or request data. Log only a stable error classification.
+  console.error('[http] request failed', { name: err?.name || 'Error', code: err?.code || 'UNEXPECTED' })
   res.status(500).json({ message: 'Internal server error.' })
 })
 
@@ -177,11 +202,11 @@ app.listen(env.port, () => {
 })
 
 process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason)
+  console.error('[process] unhandled rejection', { name: reason?.name || typeof reason, code: reason?.code || 'UNEXPECTED' })
 })
 
 process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err)
+  console.error('[process] uncaught exception', { name: err?.name || 'Error', code: err?.code || 'UNEXPECTED' })
 })
 
 process.on('SIGTERM', async () => {

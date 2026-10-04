@@ -1,5 +1,6 @@
 import { verifyToken } from '../security/jwt.js'
 import { query } from '../db/pool.js'
+import { isMfaRequired } from '../services/mfaPolicy.js'
 
 export const INSTITUTION_ROLE_RANK = Object.freeze({
   FIELD_OFFICER: 1,
@@ -18,6 +19,9 @@ export async function institutionAuthenticate(req, res, next) {
     payload = verifyToken(header.slice('Bearer '.length))
   } catch {
     return res.status(401).json({ message: 'Invalid or expired session.' })
+  }
+  if (payload.mfa !== true && await isMfaRequired('INSTITUTION', payload.sub)) {
+    return res.status(401).json({ message: 'A verified MFA session is required.' })
   }
 
   if (!payload.institutionId || !payload.institutionStaffId) {
@@ -51,7 +55,7 @@ export async function institutionAuthenticate(req, res, next) {
     req.institution = { id: staff.institution_id }
     next()
   } catch (error) {
-    console.error('[institutionAuth] failed to load staff for token', error)
+    console.error('[institutionAuth] failed to load staff for token', { code: error?.code || 'DB_ERROR' })
     res.status(500).json({ message: 'Authentication failed.' })
   }
 }

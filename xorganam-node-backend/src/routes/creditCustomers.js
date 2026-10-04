@@ -58,7 +58,7 @@ creditCustomerPublicRouter.post('/request-code', asyncHandler(async (req, res) =
   )
   if (!inserted.rows.length) return res.status(202).json(genericResponse)
   const sent = await sendPlatformSms(phone, `Your XORGANAM credit schedule verification code is ${code}. It expires in 10 minutes.`)
-  if (!sent) console.warn(`[credit-customer-auth] verification SMS delivery failed for ${phone.slice(-4)}`)
+  if (!sent) console.warn('[credit-customer-auth] verification SMS delivery failed')
   res.status(202).json(genericResponse)
 }))
 

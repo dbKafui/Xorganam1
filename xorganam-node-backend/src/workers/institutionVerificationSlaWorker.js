@@ -72,10 +72,10 @@ export function startInstitutionVerificationSlaWorker() {
     try {
       const result = await escalateOverdueInstitutionVerifications()
       if (result.escalated) {
-        console.info('[institution-verification-sla] escalated overdue links', result)
+        console.info('[institution-verification-sla] escalated overdue links', { count: result.escalated })
       }
     } catch (error) {
-      console.error('[institution-verification-sla] escalation run failed', error)
+      console.error('[institution-verification-sla] escalation run failed', { code: error?.code || 'WORKER_ERROR' })
     } finally {
       running = false
     }

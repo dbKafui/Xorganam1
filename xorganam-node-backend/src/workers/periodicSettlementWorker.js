@@ -9,7 +9,8 @@ export const periodicSettlementWorker = new Worker(
       return await runDuePeriodicSettlements(job.data || {})
     } catch (error) {
       if (error instanceof SweepPendingError) throw error
-      console.error(`[periodic-settlement] job ${job.id} failed:`, error)
+      // Provider and database errors can include transaction context; keep shared logs non-sensitive.
+      console.error('[periodic-settlement] job failed', { code: error?.code || 'WORKER_ERROR' })
       throw error
     }
   },
@@ -17,5 +18,5 @@ export const periodicSettlementWorker = new Worker(
 )
 
 periodicSettlementWorker.on('error', (error) => {
-  console.error('[periodic-settlement] worker error:', error)
+  console.error('[periodic-settlement] worker error', { code: error?.code || 'WORKER_ERROR' })
 })

@@ -12,6 +12,8 @@ import AdapterSettings from './pages/AdapterSettings.jsx'
 import TeamStructure from './pages/TeamStructure.jsx'
 import InstitutionProfile from './pages/InstitutionProfile.jsx'
 import InstitutionRegistration from './pages/InstitutionRegistration.jsx'
+import FinancialOperations from './pages/FinancialOperations.jsx'
+import Notifications from './pages/Notifications.jsx'
 
 export default function App() {
   return (
@@ -22,6 +24,8 @@ export default function App() {
         <Route path="/" element={<ProtectedRoute><PortalLayout /></ProtectedRoute>}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
+          <Route path="finance" element={<FinancialOperations />} />
+          <Route path="notifications" element={<Notifications />} />
           <Route path="verification" element={<Verification />} />
           <Route path="assignments" element={<Assignments />} />
           <Route path="team-structure" element={<TeamStructure />} />

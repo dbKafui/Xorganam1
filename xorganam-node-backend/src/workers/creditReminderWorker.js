@@ -110,10 +110,10 @@ async function sendReminder({ installmentId, type, reminderDate }) {
 
 producerQueue.add('scan-credit-installments', {}, {
   repeat: { every: 24 * 60 * 60 * 1000 }, jobId: 'credit-installment-daily-scan'
-}).catch((error) => console.error('[credit-reminders] producer scheduling failed:', error.message))
+}).catch((error) => console.error('[credit-reminders] producer scheduling failed', { code: error?.code || 'WORKER_ERROR' }))
 producerQueue.add('scan-credit-installments', {}, {
   jobId: `credit-installment-initial-scan-${Date.now()}`
-}).catch((error) => console.error('[credit-reminders] initial scan scheduling failed:', error.message))
+}).catch((error) => console.error('[credit-reminders] initial scan scheduling failed', { code: error?.code || 'WORKER_ERROR' }))
 
 export const creditReminderWorker = new Worker(CREDIT_REMINDER_QUEUE, async (job) => {
   if (job.name === 'scan-credit-installments') return scanCreditInstallments()
@@ -122,5 +122,5 @@ export const creditReminderWorker = new Worker(CREDIT_REMINDER_QUEUE, async (job
   throw new Error(`Unknown credit reminder job: ${job.name}`)
 }, { connection, concurrency: 5 })
 
-creditReminderWorker.on('failed', (job, error) => console.error(`[credit-reminders] job ${job?.id || 'unknown'} failed:`, error.message))
-creditReminderWorker.on('error', (error) => console.error('[credit-reminders] worker error:', error.message))
+creditReminderWorker.on('failed', (_job, error) => console.error('[credit-reminders] job failed', { code: error?.code || 'WORKER_ERROR' }))
+creditReminderWorker.on('error', (error) => console.error('[credit-reminders] worker error', { code: error?.code || 'WORKER_ERROR' }))

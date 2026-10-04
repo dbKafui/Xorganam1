@@ -36,16 +36,24 @@ export function OperatorAuthProvider({ children }) {
     if (result.user.isPlatformAdmin) {
       throw new Error('This is a platform admin account. Please use the Backoffice dashboard instead.')
     }
+    if (!result.mfaRequired && result.token) {
+      operatorAuth.saveSession(result)
+      setUser(result.user)
+    }
+    return result
+  }, [])
+
+  const completeMfa = useCallback(async (challengeToken, code) => {
+    const result = await operatorAuth.verifyMfa(challengeToken, code)
     operatorAuth.saveSession(result)
     setUser(result.user)
     return result.user
   }, [])
 
+  const setupMfa = useCallback((challengeToken) => operatorAuth.setupMfa(challengeToken), [])
+
   const register = useCallback(async (payload) => {
-    const result = await operatorAuth.register(payload)
-    operatorAuth.saveSession(result)
-    setUser(result.user)
-    return result.user
+    return operatorAuth.register(payload)
   }, [])
 
   const logout = useCallback(() => {
@@ -59,7 +67,7 @@ export function OperatorAuthProvider({ children }) {
   )
 
   return (
-    <OperatorAuthContext.Provider value={{ user, ready, login, register, logout, hasMinRole }}>
+    <OperatorAuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, register, logout, hasMinRole }}>
       {children}
     </OperatorAuthContext.Provider>
   )

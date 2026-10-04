@@ -34,7 +34,7 @@ export const INSTITUTION_PERMISSIONS = Object.freeze({
   'account:approve': ROLE_RANK.SUPERVISOR,
   'transaction:create': ROLE_RANK.FIELD_OFFICER,
   'transaction:approve': ROLE_RANK.SUPERVISOR,
-  'notification:send': ROLE_RANK.SUPERVISOR
+  'notification:send': ROLE_RANK.FIELD_OFFICER
 })
 
 export function hasInstitutionPermission(role, permissionKey) {

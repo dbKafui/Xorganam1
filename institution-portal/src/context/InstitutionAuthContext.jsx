@@ -27,17 +27,28 @@ export function InstitutionAuthProvider({ children }) {
 
   const login = useCallback(async (email, password) => {
     const result = await institutionAuth.login(email, password)
+    if (!result.mfaRequired && result.token) {
+      institutionAuth.saveSession(result)
+      setStaff(result.staff)
+    }
+    return result
+  }, [])
+
+  const completeMfa = useCallback(async (challengeToken, code) => {
+    const result = await institutionAuth.verifyMfa(challengeToken, code)
     institutionAuth.saveSession(result)
     setStaff(result.staff)
     return result.staff
   }, [])
+
+  const setupMfa = useCallback((challengeToken) => institutionAuth.setupMfa(challengeToken), [])
 
   const logout = useCallback(() => {
     institutionAuth.clearSession()
     setStaff(null)
   }, [])
 
-  const value = { staff, ready, login, logout }
+  const value = { staff, ready, login, setupMfa, completeMfa, logout }
   return <InstitutionAuthContext.Provider value={value}>{children}</InstitutionAuthContext.Provider>
 }
 

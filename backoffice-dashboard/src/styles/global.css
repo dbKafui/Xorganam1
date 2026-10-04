@@ -469,6 +469,14 @@ button, .btn, .sidebar-link, a { transition: color .16s ease, background-color .
 .health-indicator.online .health-dot { background: var(--wire-green); box-shadow: 0 0 0 3px var(--wire-green-soft); }
 .health-indicator.offline { color: var(--red); background: var(--red-soft); }
 .health-indicator.offline .health-dot { background: var(--red); }
+.security-settings-panel { max-width: 760px; padding: 24px; }
+.security-settings-panel h2 { margin: 0 0 8px; }
+.security-settings-panel p { color: var(--muted); }
+.security-policy-option { display: flex; align-items: flex-start; gap: 12px; margin: 24px 0 14px; }
+.security-policy-option input { margin-top: 4px; }
+.security-policy-option small { display: block; color: var(--muted); margin-top: 3px; }
+.security-policy-warning { padding: 12px; border-radius: var(--radius); color: #754b10 !important; background: var(--amber-soft); }
+.security-demo-list { display: grid; gap: 4px; margin-top: 22px; }
 @media (max-width: 720px) {
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { position: static; min-height: auto; padding: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -18,7 +18,7 @@ async function dispatchPendingWebhookEvents() {
 dispatcherQueue.add('dispatch-pending-webhooks', {}, {
   repeat: { every: 30_000 },
   jobId: 'credit-webhook-outbox-dispatcher'
-}).catch((error) => console.error('[credit-webhook] dispatcher scheduling failed:', error.message))
+}).catch((error) => console.error('[credit-webhook] dispatcher scheduling failed', { code: error?.code || 'WORKER_ERROR' }))
 
 export const creditWebhookWorker = new Worker(CREDIT_WEBHOOK_QUEUE, async (job) => {
   if (job.name === 'dispatch-pending-webhooks') return dispatchPendingWebhookEvents()
@@ -48,6 +48,6 @@ export const creditWebhookWorker = new Worker(CREDIT_WEBHOOK_QUEUE, async (job) 
 }, { connection, concurrency: 5 })
 
 creditWebhookWorker.on('failed', (job, error) => {
-  console.error(`[credit-webhook] job ${job?.id || 'unknown'} failed:`, error.message)
+  console.error('[credit-webhook] delivery job failed', { code: error?.code || 'WORKER_ERROR' })
 })
-creditWebhookWorker.on('error', (error) => console.error('[credit-webhook] worker error:', error.message))
+creditWebhookWorker.on('error', (error) => console.error('[credit-webhook] worker error', { code: error?.code || 'WORKER_ERROR' }))

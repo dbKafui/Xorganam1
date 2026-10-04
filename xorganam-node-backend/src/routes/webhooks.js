@@ -1,23 +1,13 @@
 import { Router } from 'express'
-import crypto from 'node:crypto'
-import { query, withTransaction } from '../db/pool.js'
-import { getTenantWebhookSecret, TenantCredentialsError } from '../services/credentialsService.js'
-import { hmacSha256Hex, timingSafeEqualHex } from '../security/encryption.js'
-import { enqueueCollectForMeJob } from '../queue/queue.js'
-import { sendMerchantSms, sendMerchantEmail } from '../services/notificationService.js'
-import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
+import { query } from '../db/pool.js'
+import { reconcileInstitutionTransaction, institutionTransactionByReference } from '../services/institutionFinancialLedger.js'
+import { queryInstitutionEganowStatus } from '../services/institutionEganowService.js'
+import { reconcileTransaction } from '../services/reconciliationService.js'
 
 export const webhooksRouter = Router()
 
-const SIGNATURE_HEADER = 'x-eganow-signature'
-
-/**
- * Registered twice in server.js:
- *   POST /api/v1/webhooks/eganow/:tenant_id   (tenant known from the URL)
- *   POST /api/v1/webhooks/eganow              (tenant resolved from payload)
- * Both converge on this one handler so signature verification and
- * transaction logging can never drift between the two entry points.
- */
+// Eganow's callback is treated only as a hint; handleEganowWebhook performs
+// authenticated status reconciliation before any transaction state changes.
 webhooksRouter.post('/eganow/:tenant_id?', async (req, res) => {
   try {
     await handleEganowWebhook(req, res)
@@ -25,299 +15,85 @@ webhooksRouter.post('/eganow/:tenant_id?', async (req, res) => {
     // Absolute last resort - anything that slipped past the inner
     // try/catches still gets a response instead of hanging the request
     // (and, for Eganow, timing out and triggering an unwanted retry storm).
-    console.error('[webhook:eganow] unhandled error in webhook handler', err)
+    console.error('[webhook:eganow] unhandled callback failure', { code: err?.code || 'WEBHOOK_ERROR' })
     if (!res.headersSent) {
       res.status(500).json({ message: 'Internal server error.' })
     }
   }
 })
 
-async function handleEganowWebhook(req, res) {
-  // req.rawBody is populated by the raw-body capturing middleware in
-  // server.js, registered ahead of express.json() for this route -
-  // signature verification MUST run against the exact bytes Eganow
-  // signed, not a re-serialized copy of the parsed JSON.
+webhooksRouter.post('/eganow-institution/:institution_id', async (req, res) => {
+  try { await handleInstitutionEganowWebhook(req, res) }
+  catch (error) {
+    console.error('[webhook:eganow:institution] processing failed', { code: error?.code || 'WEBHOOK_ERROR' })
+    if (!res.headersSent) res.status(500).json({ message: 'Unable to process institution payment callback.' })
+  }
+})
+
+async function handleInstitutionEganowWebhook(req, res) {
   const rawBody = req.rawBody
   const payload = req.body
-
-  if (!rawBody || !payload || typeof payload !== 'object') {
-    return res.status(400).json({ message: 'Malformed payload.' })
-  }
-
-  const eganowAccountId = payload.accountId || payload.collectionAccountId || payload.destinationAccountId
-  const eganowReference = payload.reference
-  const eganowTransactionId = payload.transactionId
-  const status = payload.status
-  const amount = payload.amount
-
-  if (!eganowReference || !status || !eganowAccountId) {
-    return res.status(400).json({ message: 'Payload missing required fields.' })
-  }
-
-  // ---- Step 1: resolve tenant + merchant -------------------------------
-  let tenantId = req.params.tenant_id || null
-  let merchant
-
-  try {
-    if (tenantId) {
-      merchant = await findMerchantByAccountId(tenantId, eganowAccountId)
-    } else {
-      // No tenant in the URL - the only safe way to find one is by
-      // looking up the Eganow account id against merchants, which also
-      // gives us tenant_id and merchant_id in a single query.
-      merchant = await findMerchantByAccountIdAnyTenant(eganowAccountId)
-      tenantId = merchant?.tenant_id ?? null
-    }
-  } catch (err) {
-    console.error('[webhook:eganow] tenant/merchant lookup failed', err)
-    return res.status(401).json({ message: 'Unable to verify webhook.' })
-  }
-
-  if (!tenantId || !merchant) {
-    // Deliberately generic - do not reveal whether the tenant exists,
-    // whether the account id is unrecognized, or anything else.
-    return res.status(401).json({ message: 'Unable to verify webhook.' })
-  }
-
-  // ---- Step 2: verify signature using THAT tenant's own secret --------
-  const providedSignature = req.headers[SIGNATURE_HEADER]
-
-  if (!providedSignature) {
-    console.warn(`[webhook:eganow] missing signature header for tenant ${tenantId}`)
-    return res.status(401).json({ message: 'Unable to verify webhook.' })
-  }
-
-  let webhookSecret
-  try {
-    webhookSecret = await getTenantWebhookSecret(tenantId)
-  } catch (err) {
-    if (err instanceof TenantCredentialsError) {
-      // Tenant not found / not active - same generic 401, no distinction
-      // exposed to the caller between "bad signature" and "unknown tenant".
-      return res.status(401).json({ message: 'Unable to verify webhook.' })
-    }
-    console.error('[webhook:eganow] credential lookup error', err)
-    return res.status(401).json({ message: 'Unable to verify webhook.' })
-  }
-
-  if (!webhookSecret) {
-    // Tenant exists but hasn't had a webhook secret configured yet (e.g.
-    // still mid-onboarding, before a platform admin activated Eganow) -
-    // there is no valid signature to compare against, so this can never
-    // succeed. Fail the same generic way rather than crashing on a null key.
-    console.warn(`[webhook:eganow] tenant ${tenantId} has no webhook secret configured.`)
-    return res.status(401).json({ message: 'Unable to verify webhook.' })
-  }
-
-  const expectedSignature = hmacSha256Hex(rawBody, webhookSecret)
-
-  if (!timingSafeEqualHex(expectedSignature, String(providedSignature))) {
-    // Do not log signature material, even truncated; identifiers are enough to investigate failures.
-    console.warn(`[webhook:eganow] signature mismatch for tenant ${tenantId}`)
-    return res.status(401).json({ message: 'Unable to verify webhook.' })
-  }
-
-  // ---- Step 3: log the transaction, scoped to tenant + merchant -------
-  let transaction
-  try {
-    transaction = await recordCollectionTransaction({
-      tenantId,
-      merchantId: merchant.id,
-      eganowReference,
-      eganowTransactionId,
-      status,
-      amount,
-      currency: payload.currency || 'GHS',
-      rawPayload: payload
-    })
-  } catch (err) {
-    console.error(`[webhook:eganow] failed to log transaction for tenant ${tenantId}`, err)
-    // Still acknowledge with 200 only once persisted - a 500 here tells
-    // Eganow to retry delivery, which is what we want if our own write
-    // failed transiently.
-    return res.status(500).json({ message: 'Failed to record transaction.' })
-  }
-
-  // Acknowledge immediately - everything past this point is best-effort
-  // dispatch, not something Eganow should retry the webhook over.
-  res.status(200).json({ message: 'Webhook processed.', transactionId: transaction.id })
-
-  if (transaction.alreadyProcessed) {
-    return // duplicate delivery of a webhook we've already routed
-  }
-
-  const successStatuses = ['success', 'successful', 'completed']
-  const isSuccess = successStatuses.includes(String(status).toLowerCase())
-
-  if (!isSuccess) {
-    return // only successful collections continue into the payout pipeline
-  }
-
-  // ---- Step 4: check merchant configuration, fork the pipeline --------
-  try {
-    if (merchant.payout_mode === 'AUTO_SWEEP') {
-      await enqueueCollectForMeJob({
-        tenantId,
-        merchantId: merchant.id,
-        transactionId: transaction.id
-      })
-      console.log(`[webhook:eganow] queued AUTO_SWEEP job for tenant=${tenantId} merchant=${merchant.id} txn=${transaction.id}`)
-    } else {
-      const message = `Payment of ${amount} received. Ref: ${eganowReference}. Log in to move it to your MoMo account.`
-      await sendMerchantSms(tenantId, merchant.mobile_money_number, message)
-      if (merchant.notify_email && merchant.contact_email) {
-        await sendMerchantEmail(tenantId, merchant.contact_email, 'Payment received', message)
-      }
-    }
-  } catch (err) {
-    // Post-acknowledgement failures (queue down, SMS gateway down) must
-    // never surface as a failed webhook response - we've already told
-    // Eganow we're done. Log loudly for ops instead.
-    console.error(`[webhook:eganow] post-processing failed for transaction ${transaction.id}`, err)
-  }
-}
-
-async function findMerchantByAccountId(tenantId, eganowAccountId) {
-  const { rows } = await query(
-    `SELECT m.id, m.tenant_id, m.payout_mode, m.mobile_money_number, m.network_provider,
-            ms.notify_email, ms.notify_sms, ms.contact_email
-       FROM merchants m
-       LEFT JOIN merchant_settings ms ON ms.tenant_id = m.tenant_id AND ms.merchant_id = m.id
-      WHERE m.tenant_id = $1
-        AND (m.eganow_collection_account_id = $2 OR m.eganow_payout_account_id = $2)
-        AND m.is_active = TRUE`,
-    [tenantId, eganowAccountId]
+  const institutionId = req.params.institution_id
+  const value = (...keys) => keys.map((key) => payload?.[key]).find((item) => item !== undefined && item !== null && item !== '')
+  const accountId = value('accountId', 'AccountId', 'collectionAccountId', 'CollectionAccountId', 'destinationAccountId', 'DestinationAccountId')
+  const reference = value('transactionId', 'TransactionId')
+  const status = value('status', 'Status', 'transactionStatus', 'TransactionStatus')
+  if (!rawBody || !payload || typeof payload !== 'object' || !reference || !status) return res.status(400).json({ message: 'Malformed Eganow callback.' })
+  const { rows: institutions } = await query(
+    `SELECT i.id, i.eganow_collection_account_id, i.eganow_payout_account_id
+       FROM institutions i JOIN institution_eganow_credentials c ON c.institution_id = i.id
+      WHERE i.id = $1 AND c.is_enabled AND ($2::text IS NULL OR i.eganow_collection_account_id = $2 OR i.eganow_payout_account_id = $2)`,
+    [institutionId, accountId]
   )
-  return rows[0] || null
-}
-
-async function findMerchantByAccountIdAnyTenant(eganowAccountId) {
-  const { rows } = await query(
-    `SELECT m.id, m.tenant_id, m.payout_mode, m.mobile_money_number, m.network_provider,
-            ms.notify_email, ms.notify_sms, ms.contact_email
-       FROM merchants m
-       LEFT JOIN merchant_settings ms ON ms.tenant_id = m.tenant_id AND ms.merchant_id = m.id
-      WHERE (m.eganow_collection_account_id = $1 OR m.eganow_payout_account_id = $1)
-        AND m.is_active = TRUE`,
-    [eganowAccountId]
-  )
-  return rows[0] || null
-}
-
-function mapStatus(eganowStatus) {
-  switch (String(eganowStatus).toLowerCase()) {
-    case 'success':
-    case 'successful':
-    case 'completed':
-      return 'RECEIVED'
-    case 'failed':
-    case 'failure':
-    case 'declined':
-      return 'FAILED'
-    default:
-      return 'PENDING'
+  if (!institutions.length) return res.status(401).json({ message: 'Unable to verify institution callback.' })
+  const transaction = await institutionTransactionByReference(institutionId, reference)
+  if (!transaction) return res.status(404).json({ message: 'Institution transaction not found.' })
+  if (transaction.status !== 'PENDING_GATEWAY') return res.status(200).json({ message: 'Institution payment was already reconciled.', transactionId: transaction.id, status: transaction.status })
+  const expectedCents = ['LOAN_DISBURSEMENT', 'WITHDRAWAL'].includes(transaction.transaction_type)
+    ? Number(transaction.payout_amount_cents)
+    : Number(transaction.amount_cents) + Number(transaction.fee_cents)
+  const callbackAmount = value('amount', 'Amount')
+  if (callbackAmount !== undefined && Math.round(Number(callbackAmount) * 100) !== expectedCents) {
+    return res.status(409).json({ message: 'Callback amount does not match the institution transaction.' })
   }
+  // Eganow's documented callback has no signature header. Treat it only as a
+  // reconciliation hint and confirm the status through the institution's
+  // authenticated Eganow API before changing the financial ledger.
+  let result
+  try {
+    const gateway = await queryInstitutionEganowStatus(institutionId, reference)
+    result = await reconcileInstitutionTransaction(institutionId, transaction.id, gateway)
+  } catch (error) {
+    console.error('[webhook:institution-eganow] authenticated reconciliation failed', { code: error?.code || 'RECONCILIATION_ERROR' })
+    return res.status(503).json({ message: 'Unable to confirm payment status with Eganow; retry this callback later.' })
+  }
+  res.status(200).json({ message: 'Institution payment callback recorded.', transactionId: transaction.id, status: result.transaction?.status || 'PENDING_GATEWAY' })
 }
 
-async function recordCollectionTransaction({ tenantId, merchantId, eganowReference, eganowTransactionId, status, amount, currency, rawPayload }) {
-  return withTransaction(async (client) => {
-    const mappedStatus = mapStatus(status)
-
-    // First, try to find and update an EXISTING collection transaction that was
-    // initiated by the frontend/backend and is waiting for a webhook confirmation.
-    // This matches on eganow_reference (set by the collection endpoint) and type.
-    const existingByRef = await client.query(
-      `SELECT id, status, order_id FROM transactions
-       WHERE tenant_id = $1 AND eganow_reference = $2 AND type = 'COLLECTION'`,
-      [tenantId, eganowReference]
-    )
-
-    if (existingByRef.rows.length > 0) {
-      const existing = existingByRef.rows[0]
-      
-      // If we already processed this webhook, it's a duplicate.
-      const lateOrderPayment = existing.status === 'FAILED' && mappedStatus === 'RECEIVED' && existing.order_id
-      if (existing.status !== 'PENDING' && !lateOrderPayment) {
-        return { id: existing.id, alreadyProcessed: true }
-      }
-
-      // Update the existing transaction with webhook confirmation
-      await client.query(
-        `UPDATE transactions
-         SET status = $2, eganow_transaction_id = COALESCE($3, eganow_transaction_id),
-             payment_gateway_status = $5,
-             raw_webhook_payload = $4,
-             completed_at = CASE WHEN $2 IN ('RECEIVED', 'FAILED') THEN now() ELSE completed_at END,
-             updated_at = now()
-         WHERE id = $1`,
-        [existing.id, mappedStatus, eganowTransactionId, JSON.stringify(rawPayload), status]
-      )
-
-      if (mappedStatus === 'RECEIVED') await markStorefrontOrderPaid(client, existing.id)
-
-      return { id: existing.id, alreadyProcessed: false }
-    }
-
-    // If no existing collection transaction by reference, check if there's one by
-    // internal reference (field set initially). This handles cases where
-    // the webhook comes with only transactionId or other identifiers.
-    const existingByTxnId = await client.query(
-      `SELECT id, status, order_id FROM transactions
-       WHERE tenant_id = $1 AND eganow_transaction_id = $2 AND type = 'COLLECTION'`,
-      [tenantId, eganowTransactionId]
-    )
-
-    if (existingByTxnId.rows.length > 0) {
-      const existing = existingByTxnId.rows[0]
-      
-      const lateOrderPayment = existing.status === 'FAILED' && mappedStatus === 'RECEIVED' && existing.order_id
-      if (existing.status !== 'PENDING' && !lateOrderPayment) {
-        return { id: existing.id, alreadyProcessed: true }
-      }
-
-      await client.query(
-        `UPDATE transactions
-         SET status = $2, eganow_reference = COALESCE($3, eganow_reference),
-             payment_gateway_status = $5,
-             raw_webhook_payload = $4,
-             completed_at = CASE WHEN $2 IN ('RECEIVED', 'FAILED') THEN now() ELSE completed_at END,
-             updated_at = now()
-         WHERE id = $1`,
-        [existing.id, mappedStatus, eganowReference, JSON.stringify(rawPayload), status]
-      )
-
-      if (mappedStatus === 'RECEIVED') await markStorefrontOrderPaid(client, existing.id)
-
-      return { id: existing.id, alreadyProcessed: false }
-    }
-
-    // Fallback: if no existing transaction found by reference or transactionId,
-    // create a new one (webhook came without enough info to correlate, or
-    // collection was initiated externally / directly via Eganow API).
-    const internalReference = `COL-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-
-    const inserted = await client.query(
-      `INSERT INTO transactions
-         (tenant_id, merchant_id, type, status, amount, currency,
-          internal_reference, eganow_reference, eganow_transaction_id,
-          payment_gateway_status, raw_webhook_payload, completed_at)
-       VALUES ($1, $2, 'COLLECTION', $3, $4, $5, $6, $7, $8, $9, $10,
-               CASE WHEN $3 IN ('RECEIVED', 'FAILED') THEN now() ELSE NULL END)
-       RETURNING id`,
-      [
-        tenantId,
-        merchantId,
-        mappedStatus,
-        amount,
-        currency,
-        internalReference,
-        eganowReference,
-        eganowTransactionId,
-        status,
-        JSON.stringify(rawPayload)
-      ]
-    )
-
-    return { id: inserted.rows[0].id, alreadyProcessed: false }
-  })
+async function handleEganowWebhook(req, res) {
+  const payload = req.body
+  const transactionId = payload?.TransactionId
+  const transactionStatus = payload?.TransactionStatus
+  const reference = payload?.EganowReferenceNo
+  if (!payload || typeof payload !== 'object' || !transactionId || !transactionStatus || !reference) {
+    return res.status(400).json({ message: 'Malformed Eganow callback.' })
+  }
+  const tenantId = req.params.tenant_id || null
+  if (tenantId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tenantId)) {
+    return res.status(400).json({ message: 'Invalid tenant identifier.' })
+  }
+  const { rows } = await query(
+    `SELECT id, tenant_id FROM transactions WHERE internal_reference = $1 AND ($2::uuid IS NULL OR tenant_id = $2) LIMIT 2`,
+    [String(transactionId), tenantId]
+  )
+  if (rows.length !== 1) return res.status(rows.length ? 409 : 404).json({ message: 'Transaction reference is not uniquely recognized.' })
+  try {
+    // The documented callback is an untrusted notification. Reconciliation
+    // queries Eganow's authenticated status endpoint before changing ledger state.
+    const result = await reconcileTransaction(rows[0].id, rows[0].tenant_id)
+    return res.status(200).json({ message: 'Callback checked against Eganow.', transactionId: result?.id || rows[0].id, status: result?.status || 'PENDING' })
+  } catch (error) {
+    console.error('[webhook:eganow] authenticated reconciliation failed', { code: error?.code || 'RECONCILIATION_ERROR' })
+    return res.status(503).json({ message: 'Unable to confirm transaction status with Eganow; retry the callback later.' })
+  }
 }

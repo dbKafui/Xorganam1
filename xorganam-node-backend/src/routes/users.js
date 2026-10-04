@@ -297,7 +297,7 @@ usersRouter.post(
         grantedByUserId: p.granted_by_user_id
       })
     } catch (err) {
-      console.error('Error granting permission:', err)
+      console.error('Error granting permission', { code: err?.code || 'PERMISSION_ERROR' })
       res.status(400).json({ message: 'Failed to grant permission.', detail: err.message })
     }
   })
