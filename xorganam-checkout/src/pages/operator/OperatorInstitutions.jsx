@@ -20,10 +20,12 @@ export default function OperatorInstitutions() {
   const [links, setLinks] = useState([])
   const [financeProducts, setFinanceProducts] = useState([])
   const [financeCustomers, setFinanceCustomers] = useState([])
+  const [financeVendorLinks, setFinanceVendorLinks] = useState([])
   const [financeAccounts, setFinanceAccounts] = useState([])
+  const [payoutRuleForms, setPayoutRuleForms] = useState({})
   const [financeFees, setFinanceFees] = useState([])
   const [financeTransactions, setFinanceTransactions] = useState([])
-  const [financeRequest, setFinanceRequest] = useState({ customerId: '', productId: '', amount: '', termMonths: '', termDays: '' })
+  const [financeRequest, setFinanceRequest] = useState({ customerId: '', vendorLinkId: '', productId: '', amount: '', termMonths: '', termDays: '' })
   const [financePayment, setFinancePayment] = useState({ accountId: '', transactionType: 'LOAN_REPAYMENT', amount: '', externalReference: '', phoneNumber: '' })
   const [linkInstitutionId, setLinkInstitutionId] = useState('')
   const [memberId, setMemberId] = useState('')
@@ -66,10 +68,23 @@ export default function OperatorInstitutions() {
     const financeRows = await Promise.all([
       operatorApi.listInstitutionFinanceProducts(user.tenantId), operatorApi.listInstitutionFinanceCustomers(user.tenantId),
       operatorApi.listInstitutionFinanceAccounts(user.tenantId), operatorApi.listInstitutionFinanceFees(user.tenantId),
-      operatorApi.listInstitutionFinanceTransactions(user.tenantId)
+      operatorApi.listInstitutionFinanceTransactions(user.tenantId), operatorApi.listInstitutionFinanceVendorLinks(user.tenantId)
     ].map((request) => request.catch(() => [])))
     setFinanceProducts(financeRows[0]); setFinanceCustomers(financeRows[1]); setFinanceAccounts(financeRows[2]);
-    setFinanceFees(financeRows[3]); setFinanceTransactions(financeRows[4])
+    setPayoutRuleForms(Object.fromEntries(financeRows[2].map((account) => {
+      const rule = account.payout_rule || {}
+      return [account.id, {
+        active: rule.active ?? false,
+        triggerMode: rule.triggerMode || 'BOTH',
+        frequency: rule.frequency || 'PER_PAYOUT',
+        minimumPayout: String(Number(rule.minimumPayoutCents || 0) / 100),
+        calculationType: rule.calculationType || 'PERCENTAGE',
+        calculationValue: rule.calculationValue == null ? '2' : String(
+          rule.calculationType === 'FIXED' ? Number(rule.calculationValue) / 100 : Number(rule.calculationValue) / 100
+        )
+      }]
+    })))
+    setFinanceFees(financeRows[3]); setFinanceTransactions(financeRows[4]); setFinanceVendorLinks(financeRows[5])
     if (user.role === 'TENANT_BRANCH_MANAGER' && merchantRows?.[0]?.id) setMerchantId(merchantRows[0].id)
     if (tenantLinks?.[0]?.institution_id) setInstitutionId((current) => current || tenantLinks[0].institution_id)
     const referralInstitution = sessionStorage.getItem('xorganam_referral_institution')
@@ -89,6 +104,11 @@ export default function OperatorInstitutions() {
     ? selectedOption.vendorPayoutModes
     : ['PER_TRANSACTION']
   const selectedMerchant = merchants.find((merchant) => merchant.id === merchantId)
+  const selectedFinanceCustomer = financeCustomers.find((customer) => customer.id === financeRequest.customerId)
+  const eligibleFinanceVendorLinks = financeVendorLinks.filter((link) =>
+    link.institution_id === selectedFinanceCustomer?.institution_id &&
+    (user.role !== 'TENANT_BRANCH_MANAGER' || link.merchant_id === user.merchantId)
+  )
   const selectedLink = links.find((link) => link.institution_id === institutionId)
   const availableLinkInstitutions = institutions.filter((institution) =>
     !links.some((link) => link.institution_id === institution.id && link.status !== 'INACTIVE' && link.verification_status !== 'REJECTED')
@@ -236,11 +256,37 @@ export default function OperatorInstitutions() {
     event.preventDefault(); setError(''); setNotice(''); setSaving(true)
     try {
       await operatorApi.requestInstitutionFinanceAccount({ tenantId: user.tenantId, customerId: financeRequest.customerId,
-        productId: financeRequest.productId, requestedAmountCents: Math.round(Number(financeRequest.amount) * 100),
+        vendorLinkId: financeRequest.vendorLinkId, productId: financeRequest.productId, requestedAmountCents: Math.round(Number(financeRequest.amount) * 100),
         termMonths: financeRequest.termMonths ? Number(financeRequest.termMonths) : undefined,
         termDays: financeRequest.termDays ? Number(financeRequest.termDays) : undefined })
-      setFinanceRequest({ customerId: '', productId: '', amount: '', termMonths: '', termDays: '' })
+      setFinanceRequest({ customerId: '', vendorLinkId: '', productId: '', amount: '', termMonths: '', termDays: '' })
       setNotice('Institution account application submitted for review.')
+      await load()
+    } catch (requestError) { setError(requestError.message) } finally { setSaving(false) }
+  }
+
+  function updatePayoutRuleForm(accountId, field, value) {
+    setPayoutRuleForms((current) => ({
+      ...current,
+      [accountId]: { ...(current[accountId] || {}), [field]: value }
+    }))
+  }
+
+  async function savePayoutRule(event, account) {
+    event.preventDefault(); setError(''); setNotice(''); setSaving(true)
+    const form = payoutRuleForms[account.id] || {}
+    try {
+      await operatorApi.saveInstitutionFinancePayoutRule(account.id, {
+        tenantId: user.tenantId,
+        merchantId: account.merchant_id,
+        triggerMode: form.triggerMode,
+        frequency: form.frequency,
+        minimumPayoutCents: Math.round(Number(form.minimumPayout || 0) * 100),
+        calculationType: form.calculationType,
+        calculationValue: Math.round(Number(form.calculationValue) * 100),
+        active: Boolean(form.active)
+      })
+      setNotice('Payout contribution rule saved. It applies only when this vendor payout is triggered.')
       await load()
     } catch (requestError) { setError(requestError.message) } finally { setSaving(false) }
   }
@@ -327,14 +373,35 @@ export default function OperatorInstitutions() {
             {financeProducts.length > 0 && ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user.role) && <form onSubmit={requestFinancialAccount}>
               <h3>Apply for a member account</h3>
               <div className="two-col">
-                <div className="field"><label>Verified member</label><select required value={financeRequest.customerId} onChange={(e) => setFinanceRequest({ ...financeRequest, customerId: e.target.value })}><option value="">Select member</option>{financeCustomers.map((customer) => <option key={customer.id} value={customer.id}>{customer.institution_name} · {customer.first_name} {customer.last_name} · {customer.customer_number}</option>)}</select></div>
-                <div className="field"><label>Package</label><select required value={financeRequest.productId} onChange={(e) => setFinanceRequest({ ...financeRequest, productId: e.target.value, termMonths: '', termDays: '' })}><option value="">Select package</option>{financeProducts.map((product) => <option key={product.id} value={product.id}>{product.institution_name} · {product.name} ({product.product_type})</option>)}</select></div>
+                <div className="field"><label>Verified member</label><select required value={financeRequest.customerId} onChange={(e) => setFinanceRequest({ ...financeRequest, customerId: e.target.value, vendorLinkId: '', productId: '' })}><option value="">Select member</option>{financeCustomers.map((customer) => <option key={customer.id} value={customer.id}>{customer.institution_name} · {customer.first_name} {customer.last_name} · {customer.customer_number}</option>)}</select></div>
+                <div className="field"><label>Vendor’s direct institution link</label><select required value={financeRequest.vendorLinkId} onChange={(e) => setFinanceRequest({ ...financeRequest, vendorLinkId: e.target.value })}><option value="">Select linked vendor</option>{eligibleFinanceVendorLinks.map((link) => <option key={link.id} value={link.id}>{link.vendor_name} · {link.institution_name}</option>)}</select></div>
+                <div className="field"><label>Package</label><select required value={financeRequest.productId} onChange={(e) => setFinanceRequest({ ...financeRequest, productId: e.target.value, termMonths: '', termDays: '' })}><option value="">Select package</option>{financeProducts.filter((product) => product.institution_id === selectedFinanceCustomer?.institution_id).map((product) => <option key={product.id} value={product.id}>{product.institution_name} · {product.name} ({product.product_type})</option>)}</select></div>
                 <div className="field"><label>Amount (GHS)</label><input required type="number" min="0.01" step="0.01" value={financeRequest.amount} onChange={(e) => setFinanceRequest({ ...financeRequest, amount: e.target.value })} /></div>
                 {financeProducts.find((item) => item.id === financeRequest.productId)?.product_type === 'LOAN' && (financeProducts.find((item) => item.id === financeRequest.productId)?.tenor_options_months?.length ? <div className="field"><label>Loan tenor (months)</label><select required value={financeRequest.termMonths} onChange={(e) => setFinanceRequest({ ...financeRequest, termMonths: e.target.value })}><option value="">Select tenor</option>{financeProducts.find((item) => item.id === financeRequest.productId).tenor_options_months.map((months) => <option key={months} value={months}>{months} months</option>)}</select></div> : <div className="field"><label>Term (days)</label><input required type="number" min="1" value={financeRequest.termDays} onChange={(e) => setFinanceRequest({ ...financeRequest, termDays: e.target.value })} /></div>)}
               </div><button className="btn btn-primary" disabled={saving}>{saving ? 'Submitting…' : 'Submit application'}</button>
             </form>}
             <h3>Member accounts</h3>
-            {!financeAccounts.length ? <p className="subtle">No linked member accounts yet.</p> : financeAccounts.map((account) => { const next = account.installments?.find((item) => item.status !== 'PAID'); const split = account.split_allocations?.[0]; return <div className="kv-row" key={account.id}><span><strong>{account.account_number} · {account.product_name}</strong><small>{account.institution_name} · {account.product_type} · GHS {(Number(account.product_type === 'LOAN' ? account.outstanding_cents : account.balance_cents) / 100).toFixed(2)} balance</small>{next && <small>Next payment {next.dueDate} · GHS {((Number(next.amountDueCents) - Number(next.amountPaidCents)) / 100).toFixed(2)}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · GHS {(Number(split.amountCents) / 100).toFixed(2)}</small>}</span><span className={`status-pill ${String(account.status).toLowerCase()}`}>{account.status.replaceAll('_', ' ').toLowerCase()}</span></div>})}
+            {!financeAccounts.length ? <p className="subtle">No linked member accounts yet.</p> : financeAccounts.map((account) => {
+              const next = account.installments?.find((installment) => installment.status !== 'PAID')
+              const split = account.split_allocations?.[0]
+              const rule = payoutRuleForms[account.id] || {}
+              return <div key={account.id}>
+                <div className="kv-row"><span><strong>{account.account_number} · {account.product_name}</strong><small>{account.institution_name} · {account.product_type} · GHS {(Number(account.product_type === 'LOAN' ? account.outstanding_cents : account.balance_cents) / 100).toFixed(2)} balance</small>{next && <small>Next payment {next.dueDate} · GHS {((Number(next.amountDueCents) - Number(next.amountPaidCents)) / 100).toFixed(2)}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · GHS {(Number(split.amountCents) / 100).toFixed(2)}</small>}</span><span className={`status-pill ${String(account.status).toLowerCase()}`}>{account.status.replaceAll('_', ' ').toLowerCase()}</span></div>
+                {['SAVINGS', 'INVESTMENT'].includes(account.product_type) && account.merchant_id && ['TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'].includes(user.role) && ['APPROVED', 'ACTIVE'].includes(account.status) && <form className="subform" onSubmit={(event) => savePayoutRule(event, account)}>
+                  <h4>Payout contribution</h4>
+                  <p className="subtle">Enable an optional contribution for this vendor. The rule runs only when a manual or automatic payout is triggered.</p>
+                  <label className="check-row"><input type="checkbox" checked={Boolean(rule.active)} onChange={(event) => updatePayoutRuleForm(account.id, 'active', event.target.checked)} /> Enable savings/investment contribution</label>
+                  <div className="two-col">
+                    <div className="field"><label>Trigger</label><select value={rule.triggerMode || 'BOTH'} onChange={(event) => updatePayoutRuleForm(account.id, 'triggerMode', event.target.value)}><option value="BOTH">Manual and automatic</option><option value="MANUAL">Manual payout</option><option value="AUTO">Automatic payout</option></select></div>
+                    <div className="field"><label>Frequency</label><select value={rule.frequency || 'PER_PAYOUT'} onChange={(event) => updatePayoutRuleForm(account.id, 'frequency', event.target.value)}><option value="PER_PAYOUT">Every eligible payout</option><option value="DAILY">Once per day</option><option value="WEEKLY">Once per week</option><option value="MONTHLY">Once per month</option></select></div>
+                    <div className="field"><label>Minimum payout (GHS)</label><input type="number" min="0" step="0.01" value={rule.minimumPayout ?? '0'} onChange={(event) => updatePayoutRuleForm(account.id, 'minimumPayout', event.target.value)} /></div>
+                    <div className="field"><label>Contribution type</label><select value={rule.calculationType || 'PERCENTAGE'} onChange={(event) => updatePayoutRuleForm(account.id, 'calculationType', event.target.value)}><option value="PERCENTAGE">Percentage</option><option value="FIXED">Fixed amount</option></select></div>
+                    <div className="field"><label>{rule.calculationType === 'FIXED' ? 'Amount (GHS)' : 'Rate (%)'}</label><input required type="number" min="0.01" step="0.01" max={rule.calculationType === 'FIXED' ? undefined : '100'} value={rule.calculationValue || ''} onChange={(event) => updatePayoutRuleForm(account.id, 'calculationValue', event.target.value)} /></div>
+                  </div>
+                  <button className="btn btn-secondary" disabled={saving}>{saving ? 'Saving…' : 'Save payout rule'}</button>
+                </form>}
+              </div>
+            })}
             {financeAccounts.some((item) => ['APPROVED', 'ACTIVE'].includes(item.status)) && ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user.role) && <form onSubmit={recordFinancialPayment}>
               <h3>Collect a contribution or repay a loan</h3><p className="subtle">Collections run through the linked institution’s own Eganow credentials. Savings withdrawals require institution approval before payout.</p>
               <div className="two-col">

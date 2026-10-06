@@ -13,7 +13,7 @@ async function postSuccess(transactionId, gatewayResult) {
     if (!rows.length) return { alreadyProcessed: true }
     const item = rows[0]
     const amount = Number(item.amount_cents)
-    const available = item.product_type === 'SAVINGS' ? Number(item.balance_cents) : Number(item.outstanding_cents)
+    const available = ['SAVINGS', 'INVESTMENT'].includes(item.product_type) ? Number(item.balance_cents) : Number(item.outstanding_cents)
     if (item.transaction_type === 'DEPOSIT') {
       await tx.query(`UPDATE institution_financial_accounts SET balance_cents = balance_cents + $2, status = 'ACTIVE', updated_at = now() WHERE id = $1`, [item.account_id, amount])
     } else if (item.transaction_type === 'WITHDRAWAL') {

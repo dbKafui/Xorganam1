@@ -63,7 +63,7 @@ async function processExpiredOrder() {
     // Keep the order row locked through the authoritative Eganow check and
     // compare-and-swap cancellation, so a concurrent webhook cannot both
     // place the order and release its stock.
-    const result = await queryTransactionStatus(order.tenant_id, collection.internal_reference)
+    const result = await queryTransactionStatus(order.tenant_id, collection.internal_reference, { merchantId: order.merchant_id })
     if (isGatewaySuccess(result.status)) {
       await tx.query(
         `UPDATE transactions SET status = 'RECEIVED', payment_gateway_status = $2,

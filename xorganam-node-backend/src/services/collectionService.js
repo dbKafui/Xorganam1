@@ -1,9 +1,9 @@
-import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
-import { createEganowClientForTenant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
-import { getTenantEganowContext, TenantCredentialsError } from './credentialsService.js'
+import { createEganowClientForMerchant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
+import { TenantCredentialsError } from './credentialsService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { computeFee } from './feeService.js'
+import { createVendorReference } from './referenceIds.js'
 
 export class CollectionRejectedError extends Error {}
 
@@ -70,10 +70,10 @@ export async function findMerchantForCollection(merchantId) {
     `SELECT m.id, m.tenant_id, m.display_name, m.is_active, m.account_setup_status, m.eganow_collection_account_id,
             m.eganow_payout_account_id, m.network_provider,
             t.status AS tenant_status,
-            c.is_enabled AS eganow_enabled
+            e.is_enabled AS eganow_enabled
        FROM merchants m
        JOIN tenants t ON t.id = m.tenant_id
-       JOIN tenant_eganow_credentials c ON c.tenant_id = t.id
+       JOIN merchant_eganow_credentials e ON e.merchant_id = m.id
       WHERE m.id = $1`,
     [merchantId]
   )
@@ -115,19 +115,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
   if (normalizedCollectionMethod === 'CARD' && !validCardNumber(cardNumber)) throw new CollectionRejectedError('Enter a valid payment card number.')
   if (normalizedCollectionMethod === 'CARD' && (!String(cardholderName || '').trim() || !Number.isInteger(Number(expiryDateMonth)) || Number(expiryDateMonth) < 1 || Number(expiryDateMonth) > 12 || !/^\d{2}$/.test(String(expiryDateYear || '')) || !/^\d{3,4}$/.test(String(cvv || '')))) throw new CollectionRejectedError('Enter the cardholder name, expiry date, and valid CVV.')
 
-  // Load tenant-scoped config before inserting the transaction. The Eganow
-  // client will use the tenant DB base URL first, then its developer fallback.
-  let tenantCtx
-  try {
-    tenantCtx = await getTenantEganowContext(merchant.tenant_id)
-  } catch (err) {
-    if (err instanceof TenantCredentialsError) {
-      throw new CollectionRejectedError(`Eganow configuration error: ${err.message}`)
-    }
-    throw err
-  }
-
-  const internalReference = `COL-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+  const internalReference = createVendorReference(merchant.display_name, 'COL')
   const normalizedMsisdn = msisdn ? normalizeMsisdn(msisdn) : null
   if ((normalizedCollectionMethod === 'MOMO' || normalizedMsisdn) && !/^233[0-9]{9}$/.test(normalizedMsisdn || '')) {
     throw new CollectionRejectedError('A valid Ghana mobile number is required.')
@@ -255,9 +243,9 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       throw new CollectionRejectedError('Payment network is not configured for this merchant. Contact support.')
     }
 
-    // Callback URL priority: explicit callback > tenant config
-    // Do not fall back to any environment-level value — tenant must provide the callback.
-    let callbackUrl = callback || (tenantCtx.callbackUrl || null)
+    const { client, callbackUrl: vendorCallbackUrl } = await createEganowClientForMerchant(merchant.tenant_id, merchant.id)
+    // Vendor credentials own the Eganow callback configuration.
+    let callbackUrl = callback || vendorCallbackUrl || null
     if (!callbackUrl) {
       throw new TenantCredentialsError('Tenant Eganow callback URL is not configured.', merchant.tenant_id)
     }
@@ -268,8 +256,6 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     if (normalizedCollectionMethod === 'MOMO' && (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn))) {
       throw new CollectionRejectedError('A valid phone number is required in local or international format (e.g., 0244123456 or 233244123456).')
     }
-
-    const { client } = await createEganowClientForTenant(merchant.tenant_id)
 
     // Perform a KYC / name-enquiry lookup before attempting collection.
     // Some Eganow deployments require verification of MSISDN/account

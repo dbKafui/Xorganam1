@@ -1,5 +1,4 @@
 import { Router } from 'express'
-import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
 import { authenticate, requireRole, requirePermission, userHasPermission, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
@@ -8,8 +7,9 @@ import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewayS
 import { reconcileTransaction } from '../services/reconciliationService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
-import { processSplitPayout } from '../services/splitPaymentService.js'
+import { loadVendorPackagePayoutRule, processSplitPayout } from '../services/splitPaymentService.js'
 import { computeFee } from '../services/feeService.js'
+import { createVendorReference } from '../services/referenceIds.js'
 
 // No env-level Eganow callback fallback: tenant-stored callback must be used.
 
@@ -300,7 +300,7 @@ transactionsRouter.post(
     )
     if (existingChild.rows.length > 0) return res.status(409).json({ message: 'An internal transfer already exists for this transaction.' })
 
-    const internalReference = `IT-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+    const internalReference = createVendorReference(source.display_name, 'IT')
     const transferAmount = Number(amount) || source.amount
 
     const inserted = await query(
@@ -315,6 +315,7 @@ transactionsRouter.post(
 
     try {
       const result = await sweepToPayoutAccount(source.tenant_id, {
+        merchantId: source.merchant_id,
         amount: transferAmount,
         network: source.network_provider,
         narration: source.display_name || `Internal transfer for ${internalReference}`
@@ -412,12 +413,19 @@ transactionsRouter.post(
            AND smc.merchant_id = $2 AND smc.institution_id = r.institution_id
         WHERE r.tenant_id = $1 AND r.active AND r.effective_from <= now()
           AND (r.effective_to IS NULL OR r.effective_to > now())
-          AND ((r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = $2)
+        AND ((r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = $2)
             OR (r.scope_level = 'TENANT_DEFAULT' AND r.merchant_id IS NULL))
+          AND EXISTS (SELECT 1 FROM tenant_merchant_settlement_config opted
+                       WHERE opted.tenant_id = r.tenant_id AND opted.merchant_id = $2
+                         AND opted.institution_id = r.institution_id)
         ORDER BY CASE WHEN r.merchant_id = $2 THEN 0 ELSE 1 END, r.created_at DESC LIMIT 1`,
       [source.tenant_id, source.merchant_id]
     )
-    if (splitRows.rows[0]) {
+    const packageRule = splitRows.rows[0] ? null : await loadVendorPackagePayoutRule({
+      tenantId: source.tenant_id, merchantId: source.merchant_id, triggerMode: 'MANUAL'
+    })
+    const payoutRule = splitRows.rows[0] || packageRule
+    if (payoutRule) {
       if (String(destinationType).toUpperCase() !== 'MOMO') return res.status(409).json({ message: 'Bank payouts are not enabled for split settlement.' })
       try {
         const splitResult = await processSplitPayout({
@@ -425,7 +433,8 @@ transactionsRouter.post(
           merchantId: source.merchant_id,
           collectionTxn: source,
           merchant: { id: source.merchant_id, display_name: source.display_name, mobile_money_number: source.mobile_money_number, network_provider: source.network_provider },
-          rule: splitRows.rows[0],
+          rule: payoutRule,
+          triggerMode: 'MANUAL',
           finalAttempt: false
         })
         if (splitResult.pending) return res.status(202).json({ id: source.id, status: 'SWEPT_INTERNAL', paymentGatewayStatus: 'PENDING' })
@@ -462,7 +471,7 @@ transactionsRouter.post(
       return res.status(409).json({ message: 'A manual payout already exists for this collection. Reconcile or resolve it before attempting another payout.', id: payout.id, status: payout.status })
     }
 
-    const internalReference = `PO-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+    const internalReference = createVendorReference(source.display_name, 'PO')
     const normalizedDestinationType = String(destinationType).toUpperCase()
     const destination = accountNoOrMsisdn || (normalizedDestinationType === 'MOMO' ? source.mobile_money_number : null)
     if (!['MOMO', 'BANK'].includes(normalizedDestinationType)) return res.status(400).json({ message: 'Choose Mobile Money or Bank payout.' })
@@ -505,6 +514,7 @@ transactionsRouter.post(
 
     try {
       const result = await disburseToMobileMoney(source.tenant_id, {
+        merchantId: source.merchant_id,
         reference: internalReference,
         amount: payoutAmount,
         currency: source.currency,

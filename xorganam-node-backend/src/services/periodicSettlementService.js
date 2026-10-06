@@ -1,4 +1,3 @@
-import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
 import {
   disburseToMobileMoney,
@@ -8,6 +7,7 @@ import {
   queryTransactionStatus
 } from './eganowClient.js'
 import { applyInstitutionSplitRepayments } from './creditCashSweepService.js'
+import { createVendorReference } from './referenceIds.js'
 
 const RETRY_WINDOW_MS = 10 * 60 * 1000
 
@@ -98,10 +98,6 @@ function amountForRule(amount, rule) {
   return Math.round(value * 100) / 100
 }
 
-function reference(prefix) {
-  return `${prefix}-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-}
-
 async function loadDueConfigurations(now) {
   const { rows } = await query(
     `SELECT c.*, i.name AS institution_name, i.settlement_msisdn,
@@ -140,7 +136,9 @@ async function accrueConfiguration(config) {
         AND (r.merchant_id = t.merchant_id OR r.merchant_id IS NULL)
       WHERE t.tenant_id = $1 AND t.merchant_id = $2
         AND t.type = 'COLLECTION'
-        AND t.status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED')
+        -- A collection is eligible only after collection funds have reached
+        -- the Eganow payout wallet. RECEIVED is collection-stage only.
+        AND t.status IN ('SWEPT_INTERNAL', 'PARTIALLY_SETTLED')
         AND t.created_at >= $4::date AND t.created_at < $5::date
       ORDER BY t.id, CASE WHEN r.merchant_id = t.merchant_id THEN 0 ELSE 1 END, r.created_at DESC`,
     [config.tenant_id, config.merchant_id, config.institution_id, config.period.start, config.period.end]
@@ -187,7 +185,7 @@ async function createSweep(config) {
        VALUES ($1, $2, $3, 'SWEEP_PAYOUT', 'PENDING', $4, 'GHS', $5, $6)
        ON CONFLICT ON CONSTRAINT uq_transactions_periodic_sweep DO NOTHING
        RETURNING id`,
-      [config.tenant_id, config.merchant_id, config.institution_id, institutionAmount + vendorAmount, config.period.key, reference('PS')]
+      [config.tenant_id, config.merchant_id, config.institution_id, institutionAmount + vendorAmount, config.period.key, createVendorReference(config.display_name, 'PS')]
     )
     if (!parent.rows[0]) {
       const existing = await client.query(
@@ -245,7 +243,7 @@ async function createLeg(parent, config, payoutLeg, amount, destination) {
        ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
        RETURNING id, status, amount, internal_reference, payout_msisdn, payout_leg`,
       [config.tenant_id, config.merchant_id, payoutLeg === 'INSTITUTION' ? config.institution_id : null,
-        parent.id, payoutLeg, amount, reference(`SWEEP-${payoutLeg}`), destination, config.period.key]
+        parent.id, payoutLeg, amount, createVendorReference(config.display_name, `SWEEP-${payoutLeg}`), destination, config.period.key]
     )
     leg = rows[0] || await findLeg(parent.id, payoutLeg)
   }
@@ -266,7 +264,7 @@ async function settleLeg(leg, config, network) {
   if (leg.status === 'FAILED') return 'FAILED'
 
   if (leg.eganow_reference || (leg.payment_gateway_status && leg.payment_gateway_status !== 'READY')) {
-    const statusResult = await queryTransactionStatus(config.tenant_id, leg.internal_reference)
+    const statusResult = await queryTransactionStatus(config.tenant_id, leg.internal_reference, { merchantId: config.merchant_id })
     if (isGatewaySuccess(statusResult.status) || isGatewayFailure(statusResult.status)) {
       const status = isGatewaySuccess(statusResult.status) ? 'PAID_OUT' : 'FAILED'
       await query(
@@ -287,6 +285,7 @@ async function settleLeg(leg, config, network) {
   }
 
   const result = await disburseToMobileMoney(config.tenant_id, {
+    merchantId: config.merchant_id,
     reference: leg.internal_reference,
     amount: leg.amount,
     currency: 'GHS',
@@ -336,7 +335,7 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
     const outstandingAmount = pendingLegs.reduce((total, leg) => total + Number(leg.amount), 0)
     let balance
     try {
-      balance = await getPayoutWalletBalance(periodConfig.tenant_id, periodConfig.eganow_payout_account_id)
+      balance = await getPayoutWalletBalance(periodConfig.tenant_id, periodConfig.eganow_payout_account_id, periodConfig.merchant_id)
     } catch (error) {
       await query(
         `UPDATE institution_sweep_ledger

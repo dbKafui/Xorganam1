@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { getTenantEganowContext, getInstitutionEganowContext, TenantCredentialsError, InstitutionCredentialsError } from './credentialsService.js'
+import { getTenantEganowContext, getMerchantEganowContext, getInstitutionEganowContext, TenantCredentialsError, InstitutionCredentialsError } from './credentialsService.js'
 
 const DEFAULT_EGANOW_BASE_URL = 'https://developer.deveganowapi.com'
 
@@ -202,6 +202,24 @@ export async function createEganowClientForTenant(tenantId) {
   return { client, tenantId, companyName: ctx.companyName, callbackUrl: ctx.callbackUrl || null }
 }
 
+export async function createEganowClientForMerchant(tenantId, merchantId) {
+  const ctx = await getMerchantEganowContext(tenantId, merchantId)
+  const normalizedBaseUrl = normalizeBaseUrl(ctx.baseUrl || DEFAULT_EGANOW_BASE_URL)
+  if (isInvalidEganowBaseUrl(normalizedBaseUrl)) {
+    throw new TenantCredentialsError('Vendor Eganow base URL is not permitted.', tenantId)
+  }
+  const tokenContext = `merchant:${merchantId}`
+  const token = await requestDeveloperJwtToken(ctx, tokenContext, normalizedBaseUrl, { cacheKey: tokenContext })
+  const client = axios.create({
+    baseURL: normalizedBaseUrl,
+    timeout: 30_000,
+    maxRedirects: 0,
+    proxy: false,
+    headers: { Authorization: `Bearer ${token}`, 'x-Auth': ctx.xAuth, 'Content-Type': 'application/json' }
+  })
+  return { client, tenantId, merchantId, callbackUrl: ctx.callbackUrl, payoutAccountId: ctx.payoutAccountId }
+}
+
 export async function createEganowClientForInstitution(institutionId) {
   const ctx = await getInstitutionEganowContext(institutionId)
   const normalizedBaseUrl = normalizeBaseUrl(ctx.baseUrl || DEFAULT_EGANOW_BASE_URL)
@@ -353,8 +371,10 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
 /**
  * Internal transfer: merchant's collection account -> payout account.
  */
-export async function sweepToPayoutAccount(tenantId, { amount, network: _network, narration }) {
-  const { client } = await createEganowClientForTenant(tenantId)
+export async function sweepToPayoutAccount(tenantId, { amount, network: _network, narration, merchantId = null }) {
+  const { client } = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : await createEganowClientForTenant(tenantId)
   const narrationValue = narration || 'InternalTransfer'
 
   return withRetry(
@@ -377,8 +397,10 @@ export async function sweepToPayoutAccount(tenantId, { amount, network: _network
 /**
  * External disbursal: merchant's payout account -> her MoMo number.
  */
-export async function disburseToMobileMoney(tenantId, { reference, amount, currency, accountNoOrCardNoOrMsisdn, network, narration, callback, destinationType = 'MOMO', accountName = 'Recipient' }) {
-  const { client, callbackUrl: tenantCallbackUrl } = await createEganowClientForTenant(tenantId)
+export async function disburseToMobileMoney(tenantId, { reference, amount, currency, accountNoOrCardNoOrMsisdn, network, narration, callback, destinationType = 'MOMO', accountName = 'Recipient', merchantId = null }) {
+  const { client, callbackUrl: tenantCallbackUrl } = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : await createEganowClientForTenant(tenantId)
 
   return withRetry(
     async () => {
@@ -426,8 +448,10 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
   )
 }
 
-export async function queryTransactionStatus(tenantId, reference) {
-  const { client } = await createEganowClientForTenant(tenantId)
+export async function queryTransactionStatus(tenantId, reference, { merchantId = null } = {}) {
+  const { client } = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : await createEganowClientForTenant(tenantId)
 
   return withRetry(
     async () => {
@@ -441,8 +465,15 @@ export async function queryTransactionStatus(tenantId, reference) {
   )
 }
 
-export async function getPayoutWalletBalance(tenantId, _accountId) {
-  const { client } = await createEganowClientForTenant(tenantId)
+export async function getPayoutWalletBalance(tenantId, _accountId, merchantId = null) {
+  const merchantContext = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : null
+  if (merchantContext && _accountId && String(merchantContext.payoutAccountId) !== String(_accountId)) {
+    throw new TenantCredentialsError('The payout account does not belong to this vendor.', tenantId)
+  }
+  const clientContext = merchantContext || await createEganowClientForTenant(tenantId)
+  const { client } = clientContext
 
   return withRetry(
     async () => {

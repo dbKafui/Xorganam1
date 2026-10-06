@@ -209,7 +209,7 @@ export default function Merchants() {
               {merchants.map((merchant) => (
                 <tr key={merchant.id}>
                   <td>{merchant.tenantCompanyName}</td>
-                  <td>{merchant.displayName}</td>
+                  <td>{merchant.displayName}<small className="mono" style={{ display: 'block' }}>{merchant.vendorReference}</small></td>
                   <td className="mono">{merchant.mobileMoneyNumber}</td>
                   <td>{merchant.payoutMode === 'AUTO_SWEEP' ? 'Collect for me' : 'Collection only'}</td>
                   <td>{merchant.accountSetupStatus || 'PENDING'}</td>

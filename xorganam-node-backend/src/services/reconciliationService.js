@@ -30,7 +30,7 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
 
   let upstreamStatus
   try {
-    const result = await queryTransactionStatus(txn.tenant_id, txn.internal_reference)
+    const result = await queryTransactionStatus(txn.tenant_id, txn.internal_reference, { merchantId: txn.merchant_id })
     upstreamStatus = result.status
   } catch (err) {
     if (err instanceof EganowApiError) {

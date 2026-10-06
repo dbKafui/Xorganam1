@@ -69,6 +69,7 @@ export default function OperatorMerchantDetail() {
       <div className="portal-header">
         <div>
           <h1>{merchant.displayName}</h1>
+          <p className="mono">Vendor reference: {merchant.vendorReference}</p>
           <p>{merchant.payoutMode === 'AUTO_SWEEP' ? 'We move your money automatically' : 'You control when it moves'}</p>
         </div>
         <Link to="/operator/merchants" className="btn btn-secondary">Back to merchants</Link>

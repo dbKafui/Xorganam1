@@ -5,8 +5,9 @@ import PageHeader from '../components/PageHeader.jsx'
 import { ErrorMessage, LoadingState, SuccessMessage } from '../components/Feedback.jsx'
 
 const blankCustomer = { customerNumber: '', firstName: '', lastName: '', phoneNumber: '', email: '', kycReference: '', notificationConsent: false }
-const blankProduct = { productType: 'LOAN', name: '', description: '', minAmount: '', maxAmount: '', annualRate: '0', interestModel: 'FLAT', repaymentFrequency: 'MONTHLY', minTerm: '30', maxTerm: '365', tenorOptionsMonths: '3,6,12', lateFee: '0', graceDays: '0', recoveryMaxAttempts: '0', recoveryIntervalMinutes: '1440', minContributionHistory: '0', minBalance: '0', withdrawalsPerMonth: '', savingsLockInMonths: '0', earlyWithdrawalPenalty: '0', contributionFrequency: 'PER_TRANSACTION' }
-const blankAccount = { customerId: '', productId: '', amount: '', termMonths: '', termDays: '' }
+const blankProduct = { institutionPackageId: '', productType: 'LOAN', name: '', description: '', minAmount: '', maxAmount: '', annualRate: '0', interestModel: 'FLAT', repaymentFrequency: 'MONTHLY', minTerm: '30', maxTerm: '365', tenorOptionsMonths: '3,6,12', lateFee: '0', graceDays: '0', minContributionHistory: '0', minBalance: '0', withdrawalsPerMonth: '', savingsLockInMonths: '0', earlyWithdrawalPenalty: '0', contributionFrequency: 'PER_TRANSACTION' }
+const blankAccount = { customerId: '', productId: '', vendorLinkId: '', amount: '', termMonths: '', termDays: '' }
+const blankVendorLink = { merchantId: '', memberId: '' }
 const blankEganow = { apiUsername: '', apiPassword: '', xAuth: '', eganowBaseUrl: 'https://developer.sandbox.egacoreapi.com', callbackUrl: '', collectionAccountId: '', payoutAccountId: '', networkProvider: '', isEnabled: false }
 const feeOperations = ['LOAN_REPAYMENT', 'SAVINGS_CONTRIBUTION', 'SAVINGS_WITHDRAWAL']
 const feeLabels = { LOAN_REPAYMENT: 'Loan repayment', SAVINGS_CONTRIBUTION: 'Savings contribution', SAVINGS_WITHDRAWAL: 'Savings withdrawal' }
@@ -18,6 +19,8 @@ export default function FinancialOperations() {
   const canReview = ['SUPERVISOR', 'INSTITUTION_ADMIN'].includes(staff?.role)
   const [customers, setCustomers] = useState([])
   const [linkedTenants, setLinkedTenants] = useState([])
+  const [availableVendors, setAvailableVendors] = useState([])
+  const [vendorLinks, setVendorLinks] = useState([])
   const [tenantSelections, setTenantSelections] = useState({})
   const [products, setProducts] = useState([])
   const [accounts, setAccounts] = useState([])
@@ -27,6 +30,7 @@ export default function FinancialOperations() {
   const [product, setProduct] = useState(blankProduct)
   const [editingProductId, setEditingProductId] = useState('')
   const [account, setAccount] = useState(blankAccount)
+  const [vendorLinkForm, setVendorLinkForm] = useState(blankVendorLink)
   const [transactionForm, setTransactionForm] = useState({ accountId: '', transactionType: 'DEPOSIT', amount: '', externalReference: '', phoneNumber: '', note: '' })
   const [feeForms, setFeeForms] = useState(Object.fromEntries(feeOperations.map((operation) => [operation, { feeType: 'NONE', feeValue: '0' }])))
   const [eganow, setEganow] = useState(blankEganow)
@@ -38,11 +42,12 @@ export default function FinancialOperations() {
   const [notice, setNotice] = useState('')
 
   const load = useCallback(async () => {
-    const [customerRows, tenantRows, productRows, accountRows, transactionRows, feeRows, eganowConfig, approvalPolicy] = await Promise.all([
-      institutionApi.listFinanceCustomers(), institutionApi.listFinanceLinkedTenants(), institutionApi.listFinanceProducts(),
+    const [customerRows, tenantRows, availableVendorRows, vendorLinkRows, productRows, accountRows, transactionRows, feeRows, eganowConfig, approvalPolicy] = await Promise.all([
+      institutionApi.listFinanceCustomers(), institutionApi.listFinanceLinkedTenants(), institutionApi.listFinanceAvailableVendors(),
+      institutionApi.listFinanceVendorLinks(), institutionApi.listFinanceProducts(),
       institutionApi.listFinanceAccounts(), institutionApi.listFinanceTransactions(), institutionApi.listFinanceFees(), institutionApi.getEganowProvisioning(), institutionApi.getApprovalPolicy()
     ])
-    setCustomers(customerRows); setLinkedTenants(tenantRows); setProducts(productRows); setAccounts(accountRows); setTransactions(transactionRows)
+    setCustomers(customerRows); setLinkedTenants(tenantRows); setAvailableVendors(availableVendorRows); setVendorLinks(vendorLinkRows); setProducts(productRows); setAccounts(accountRows); setTransactions(transactionRows)
     setFees(feeRows)
     setEganow({ ...blankEganow, eganowBaseUrl: eganowConfig.eganow_base_url || blankEganow.eganowBaseUrl,
       callbackUrl: eganowConfig.callback_url || '', collectionAccountId: eganowConfig.eganow_collection_account_id || '',
@@ -67,10 +72,19 @@ export default function FinancialOperations() {
     event.preventDefault()
     return submit(async () => { await institutionApi.createFinanceCustomer(customer); setCustomer(blankCustomer) }, 'Customer onboarded and queued for KYC verification.')
   }
+  function createVendorLink(event) {
+    event.preventDefault()
+    const vendor = availableVendors.find((row) => row.merchant_id === vendorLinkForm.merchantId)
+    if (!vendor) return
+    return submit(async () => {
+      await institutionApi.createFinanceVendorLink({ tenantId: vendor.tenant_id, merchantId: vendor.merchant_id, memberId: vendorLinkForm.memberId.trim() })
+      setVendorLinkForm(blankVendorLink)
+    }, 'Vendor linked to this institution. Products remain optional until the vendor opens an account.')
+  }
   function createProduct(event) {
     event.preventDefault()
     return submit(async () => {
-      const payload = { productType: product.productType, name: product.name, description: product.description,
+      const payload = { institutionPackageId: product.institutionPackageId, productType: product.productType, name: product.name, description: product.description,
         minAmountCents: Math.round(Number(product.minAmount) * 100), maxAmountCents: Math.round(Number(product.maxAmount) * 100),
         annualRateBasisPoints: Math.round(Number(product.annualRate) * 100), minBalanceCents: Math.round(Number(product.minBalance) * 100),
         interestModel: product.productType === 'LOAN' ? product.interestModel : undefined,
@@ -80,13 +94,11 @@ export default function FinancialOperations() {
         tenorOptionsMonths: product.productType === 'LOAN' ? product.tenorOptionsMonths.split(',').map((value) => Number(value.trim())) : undefined,
         lateFeeBasisPoints: product.productType === 'LOAN' ? Math.round(Number(product.lateFee) * 100) : undefined,
         gracePeriodDays: product.productType === 'LOAN' ? Number(product.graceDays) : undefined,
-        recoveryMaxAttempts: product.productType === 'LOAN' ? Number(product.recoveryMaxAttempts) : undefined,
-        recoveryIntervalMinutes: product.productType === 'LOAN' ? Number(product.recoveryIntervalMinutes) : undefined,
         minContributionHistoryCents: product.productType === 'LOAN' ? Math.round(Number(product.minContributionHistory) * 100) : undefined,
-        withdrawalsPerMonth: product.productType === 'SAVINGS' && product.withdrawalsPerMonth ? Number(product.withdrawalsPerMonth) : undefined,
-        contributionFrequency: product.productType === 'SAVINGS' ? product.contributionFrequency : undefined,
-        savingsLockInMonths: product.productType === 'SAVINGS' ? Number(product.savingsLockInMonths) : undefined,
-        earlyWithdrawalPenaltyBasisPoints: product.productType === 'SAVINGS' ? Math.round(Number(product.earlyWithdrawalPenalty) * 100) : undefined }
+        withdrawalsPerMonth: product.productType !== 'LOAN' && product.withdrawalsPerMonth ? Number(product.withdrawalsPerMonth) : undefined,
+        contributionFrequency: product.productType !== 'LOAN' ? product.contributionFrequency : undefined,
+        savingsLockInMonths: product.productType !== 'LOAN' ? Number(product.savingsLockInMonths) : undefined,
+        earlyWithdrawalPenaltyBasisPoints: product.productType !== 'LOAN' ? Math.round(Number(product.earlyWithdrawalPenalty) * 100) : undefined }
       if (editingProductId) await institutionApi.updateFinanceProductPolicy(editingProductId, payload)
       else await institutionApi.createFinanceProduct(payload)
       setProduct(blankProduct); setEditingProductId('')
@@ -94,13 +106,12 @@ export default function FinancialOperations() {
   }
   function editProduct(row) {
     setEditingProductId(row.id)
-    setProduct({ ...blankProduct, productType: row.product_type, name: row.name, description: row.description || '',
+    setProduct({ ...blankProduct, institutionPackageId: row.institution_package_id || '', productType: row.product_type, name: row.name, description: row.description || '',
       minAmount: (Number(row.min_amount_cents) / 100).toFixed(2), maxAmount: (Number(row.max_amount_cents) / 100).toFixed(2),
       annualRate: (Number(row.annual_rate_basis_points) / 100).toFixed(2), interestModel: row.loan_interest_model || 'FLAT',
       repaymentFrequency: row.repayment_frequency || 'MONTHLY', minTerm: String(row.min_term_days || 30), maxTerm: String(row.max_term_days || 365),
       tenorOptionsMonths: (row.tenor_options_months || []).join(','), lateFee: (Number(row.late_fee_basis_points || 0) / 100).toFixed(2),
       graceDays: String(row.grace_period_days || 0), minContributionHistory: (Number(row.min_contribution_history_cents || 0) / 100).toFixed(2),
-      recoveryMaxAttempts: String(row.loan_recovery_max_attempts || 0), recoveryIntervalMinutes: String(row.loan_recovery_interval_minutes || 1440),
       minBalance: (Number(row.min_balance_cents || 0) / 100).toFixed(2), withdrawalsPerMonth: String(row.withdrawals_per_month || ''),
       savingsLockInMonths: String(row.savings_lock_in_months || 0), earlyWithdrawalPenalty: (Number(row.early_withdrawal_penalty_basis_points || 0) / 100).toFixed(2),
       contributionFrequency: row.contribution_frequency || 'PER_TRANSACTION' })
@@ -109,7 +120,7 @@ export default function FinancialOperations() {
   function createAccount(event) {
     event.preventDefault()
     return submit(async () => {
-      await institutionApi.createFinanceAccount({ customerId: account.customerId, productId: account.productId,
+      await institutionApi.createFinanceAccount({ customerId: account.customerId, productId: account.productId, vendorLinkId: account.vendorLinkId,
         requestedAmountCents: Math.round(Number(account.amount) * 100), termMonths: account.termMonths ? Number(account.termMonths) : undefined,
         termDays: account.termDays ? Number(account.termDays) : undefined })
       setAccount(blankAccount)
@@ -182,20 +193,32 @@ export default function FinancialOperations() {
       </tbody></table></div>
     </section>
 
+    {canReview && <section className="surface">
+      <div className="section-head"><div><div className="eyebrow">OPTIONAL VENDOR LINK</div><h2>Link a vendor to this institution</h2></div><span className="count-pill">{vendorLinks.length}</span></div>
+      <p className="footnote">A link makes this institution’s products available to that vendor. Linking alone does not split or deduct funds. Savings and ordinary loan allocations run only on a vendor payout; institution-managed recovery of a defaulted loan may initiate its own payout leg from that vendor’s payout wallet.</p>
+      <form className="form-grid" onSubmit={createVendorLink}>
+        <label className="form-field"><span>Vendor under an approved institution link</span><select required value={vendorLinkForm.merchantId} onChange={(e) => setVendorLinkForm({ ...vendorLinkForm, merchantId: e.target.value })}><option value="">Select vendor</option>{availableVendors.map((row) => <option key={row.merchant_id} value={row.merchant_id}>{row.vendor_name} · {row.tenant_name}</option>)}</select></label>
+        <label className="form-field"><span>Institution member ID</span><input required maxLength="160" value={vendorLinkForm.memberId} onChange={(e) => setVendorLinkForm({ ...vendorLinkForm, memberId: e.target.value })} /></label>
+        <div className="form-actions"><button className="button button-primary" disabled={saving || !availableVendors.length}>Link vendor</button></div>
+      </form>
+      <div className="table-wrap"><table><thead><tr><th>Vendor</th><th>Institution member ID</th><th>Member status</th></tr></thead><tbody>{vendorLinks.map((row) => <tr key={row.id}><td>{row.vendor_name}</td><td>{row.member_id}</td><td>Linked</td></tr>)}</tbody></table></div>
+    </section>}
+
     {isAdmin && <section className="surface">
-      <div className="section-head"><div><div className="eyebrow">PRODUCT CONFIGURATION</div><h2>Loan and savings products</h2></div></div>
+      <div className="section-head"><div><div className="eyebrow">PRODUCT CONFIGURATION</div><h2>Institution financial products</h2></div></div>
       <form className="form-grid" onSubmit={createProduct}>
-        <label className="form-field"><span>Product type</span><select disabled={Boolean(editingProductId)} value={product.productType} onChange={(e) => setProduct({ ...product, productType: e.target.value })}><option value="LOAN">Loan</option><option value="SAVINGS">Savings</option></select></label>
+        <label className="form-field"><span>Product type</span><select disabled={Boolean(editingProductId)} value={product.productType} onChange={(e) => setProduct({ ...product, productType: e.target.value })}><option value="LOAN">Loan</option><option value="SAVINGS">Savings</option><option value="INVESTMENT">Investment</option></select></label>
+        <label className="form-field"><span>Institution package ID</span><input required={!editingProductId} maxLength="160" readOnly={Boolean(editingProductId)} value={product.institutionPackageId} onChange={(e) => setProduct({ ...product, institutionPackageId: e.target.value })} /><small>Your system owns this ID. Suggested format: ABC-PRODUCT-UNIQUE_ID-YYYYMMDD-HHMMSS.</small></label>
         <label className="form-field"><span>Product name</span><input required maxLength="120" value={product.name} onChange={(e) => setProduct({ ...product, name: e.target.value })} /></label>
         <label className="form-field"><span>Minimum amount (GHS)</span><input required type="number" min="0.01" step="0.01" value={product.minAmount} onChange={(e) => setProduct({ ...product, minAmount: e.target.value })} /></label>
         <label className="form-field"><span>Maximum amount (GHS)</span><input required type="number" min="0.01" step="0.01" value={product.maxAmount} onChange={(e) => setProduct({ ...product, maxAmount: e.target.value })} /></label>
         <label className="form-field"><span>Annual rate (%)</span><input required type="number" min="0" step="0.01" value={product.annualRate} onChange={(e) => setProduct({ ...product, annualRate: e.target.value })} /></label>
-        {product.productType === 'LOAN' ? <><label className="form-field"><span>Interest model</span><select required value={product.interestModel} onChange={(e) => setProduct({ ...product, interestModel: e.target.value })}><option value="FLAT">Flat simple interest</option><option value="REDUCING_BALANCE">Reducing balance (amortized)</option></select></label><label className="form-field"><span>Repayment frequency</span><select required value={product.repaymentFrequency} onChange={(e) => setProduct({ ...product, repaymentFrequency: e.target.value })}><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Minimum term (days)</span><input required type="number" min="1" value={product.minTerm} onChange={(e) => setProduct({ ...product, minTerm: e.target.value })} /></label><label className="form-field"><span>Maximum term (days)</span><input required type="number" min="1" value={product.maxTerm} onChange={(e) => setProduct({ ...product, maxTerm: e.target.value })} /></label><label className="form-field"><span>Tenor options (months, comma separated)</span><input required value={product.tenorOptionsMonths} onChange={(e) => setProduct({ ...product, tenorOptionsMonths: e.target.value })} placeholder="3,6,12" /></label><label className="form-field"><span>Late fee (%)</span><input type="number" min="0" max="100" step="0.01" value={product.lateFee} onChange={(e) => setProduct({ ...product, lateFee: e.target.value })} /></label><label className="form-field"><span>Grace period (days)</span><input type="number" min="0" max="365" value={product.graceDays} onChange={(e) => setProduct({ ...product, graceDays: e.target.value })} /></label><label className="form-field"><span>Recovery attempts (0 disables)</span><input type="number" min="0" max="20" value={product.recoveryMaxAttempts} onChange={(e) => setProduct({ ...product, recoveryMaxAttempts: e.target.value })} /></label><label className="form-field"><span>Recovery interval (minutes)</span><input type="number" min="15" max="43200" value={product.recoveryIntervalMinutes} onChange={(e) => setProduct({ ...product, recoveryIntervalMinutes: e.target.value })} /></label><label className="form-field"><span>Minimum prior contributions (GHS)</span><input type="number" min="0" step="0.01" value={product.minContributionHistory} onChange={(e) => setProduct({ ...product, minContributionHistory: e.target.value })} /></label></> : <><label className="form-field"><span>Minimum account balance (GHS)</span><input type="number" min="0" step="0.01" value={product.minBalance} onChange={(e) => setProduct({ ...product, minBalance: e.target.value })} /></label><label className="form-field"><span>Withdrawals per month (optional)</span><input type="number" min="1" value={product.withdrawalsPerMonth} onChange={(e) => setProduct({ ...product, withdrawalsPerMonth: e.target.value })} /></label><label className="form-field"><span>Lock-in period (months)</span><input type="number" min="0" value={product.savingsLockInMonths} onChange={(e) => setProduct({ ...product, savingsLockInMonths: e.target.value })} /></label><label className="form-field"><span>Contribution frequency</span><select value={product.contributionFrequency} onChange={(e) => setProduct({ ...product, contributionFrequency: e.target.value })}><option value="PER_TRANSACTION">Per transaction</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Early withdrawal penalty (%)</span><input type="number" min="0" max="100" step="0.01" value={product.earlyWithdrawalPenalty} onChange={(e) => setProduct({ ...product, earlyWithdrawalPenalty: e.target.value })} /></label></>}
+        {product.productType === 'LOAN' ? <><label className="form-field"><span>Interest model</span><select required value={product.interestModel} onChange={(e) => setProduct({ ...product, interestModel: e.target.value })}><option value="FLAT">Flat simple interest</option><option value="REDUCING_BALANCE">Reducing balance (amortized)</option></select></label><label className="form-field"><span>Repayment frequency</span><select required value={product.repaymentFrequency} onChange={(e) => setProduct({ ...product, repaymentFrequency: e.target.value })}><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Minimum term (days)</span><input required type="number" min="1" value={product.minTerm} onChange={(e) => setProduct({ ...product, minTerm: e.target.value })} /></label><label className="form-field"><span>Maximum term (days)</span><input required type="number" min="1" value={product.maxTerm} onChange={(e) => setProduct({ ...product, maxTerm: e.target.value })} /></label><label className="form-field"><span>Tenor options (months, comma separated)</span><input required value={product.tenorOptionsMonths} onChange={(e) => setProduct({ ...product, tenorOptionsMonths: e.target.value })} placeholder="3,6,12" /></label><label className="form-field"><span>Late fee (%)</span><input type="number" min="0" max="100" step="0.01" value={product.lateFee} onChange={(e) => setProduct({ ...product, lateFee: e.target.value })} /></label><label className="form-field"><span>Grace period (days)</span><input type="number" min="0" max="365" value={product.graceDays} onChange={(e) => setProduct({ ...product, graceDays: e.target.value })} /></label><label className="form-field"><span>Minimum prior contributions (GHS)</span><input type="number" min="0" step="0.01" value={product.minContributionHistory} onChange={(e) => setProduct({ ...product, minContributionHistory: e.target.value })} /></label></> : <><label className="form-field"><span>Minimum account balance (GHS)</span><input type="number" min="0" step="0.01" value={product.minBalance} onChange={(e) => setProduct({ ...product, minBalance: e.target.value })} /></label><label className="form-field"><span>Withdrawals per month (optional)</span><input type="number" min="1" value={product.withdrawalsPerMonth} onChange={(e) => setProduct({ ...product, withdrawalsPerMonth: e.target.value })} /></label><label className="form-field"><span>Lock-in period (months)</span><input type="number" min="0" value={product.savingsLockInMonths} onChange={(e) => setProduct({ ...product, savingsLockInMonths: e.target.value })} /></label><label className="form-field"><span>Contribution frequency</span><select value={product.contributionFrequency} onChange={(e) => setProduct({ ...product, contributionFrequency: e.target.value })}><option value="PER_TRANSACTION">Per transaction</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Early withdrawal penalty (%)</span><input type="number" min="0" max="100" step="0.01" value={product.earlyWithdrawalPenalty} onChange={(e) => setProduct({ ...product, earlyWithdrawalPenalty: e.target.value })} /></label></>}
         <label className="form-field form-span"><span>Description</span><textarea maxLength="2000" value={product.description} onChange={(e) => setProduct({ ...product, description: e.target.value })} /></label>
         <div className="form-span form-actions"><button className="button button-primary" disabled={saving}>{editingProductId ? 'Save product policy' : 'Create draft product'}</button>{editingProductId && <button type="button" className="button button-secondary" onClick={() => { setEditingProductId(''); setProduct(blankProduct) }}>Cancel edit</button>}</div>
       </form>
       <div className="table-wrap"><table><thead><tr><th>Product</th><th>Type</th><th>Amount bounds</th><th>Rate</th><th>Terms / limit</th><th>Status</th><th>Action</th></tr></thead><tbody>
-        {products.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small>{row.description}</small></td><td>{row.product_type}</td><td>{amount(row.min_amount_cents)}–{amount(row.max_amount_cents)}</td><td>{(Number(row.annual_rate_basis_points) / 100).toFixed(2)}%</td><td>{row.product_type === 'LOAN' ? `${row.tenor_options_months?.join(', ') || `${row.min_term_days}–${row.max_term_days} days`} · ${row.loan_interest_model || 'model unset'} · ${row.repayment_frequency || 'frequency unset'} · late fee ${(Number(row.late_fee_basis_points || 0) / 100).toFixed(2)}%` : `Min balance ${amount(row.min_balance_cents)} · ${row.savings_lock_in_months} month lock-in · ${row.contribution_frequency || 'per transaction'}`}</td><td>{row.status}</td><td><button className="button button-secondary button-small" disabled={saving} onClick={() => editProduct(row)}>Edit</button> <select aria-label={`Status for ${row.name}`} value={row.status} disabled={saving} onChange={(e) => submit(() => institutionApi.updateFinanceProduct(row.id, e.target.value), `Product status changed to ${e.target.value}.`)}>{['DRAFT', 'ACTIVE', 'PAUSED', 'RETIRED'].map((status) => <option key={status}>{status}</option>)}</select></td></tr>)}
+        {products.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small>{row.institution_package_id || 'Legacy package without institution ID'}</small><small>{row.description}</small></td><td>{row.product_type}</td><td>{amount(row.min_amount_cents)}–{amount(row.max_amount_cents)}</td><td>{(Number(row.annual_rate_basis_points) / 100).toFixed(2)}%</td><td>{row.product_type === 'LOAN' ? `${row.tenor_options_months?.join(', ') || `${row.min_term_days}–${row.max_term_days} days`} · ${row.loan_interest_model || 'model unset'} · ${row.repayment_frequency || 'frequency unset'} · late fee ${(Number(row.late_fee_basis_points || 0) / 100).toFixed(2)}%` : `Min balance ${amount(row.min_balance_cents)} · ${row.savings_lock_in_months} month lock-in · ${row.contribution_frequency || 'per transaction'}`}</td><td>{row.status}</td><td><button className="button button-secondary button-small" disabled={saving} onClick={() => editProduct(row)}>Edit</button> <select aria-label={`Status for ${row.name}`} value={row.status} disabled={saving} onChange={(e) => submit(() => institutionApi.updateFinanceProduct(row.id, e.target.value), `Product status changed to ${e.target.value}.`)}>{['DRAFT', 'ACTIVE', 'PAUSED', 'RETIRED'].map((status) => <option key={status}>{status}</option>)}</select></td></tr>)}
       </tbody></table></div>
     </section>}
 
@@ -203,6 +226,7 @@ export default function FinancialOperations() {
       <div className="section-head"><div><div className="eyebrow">ACCOUNT SERVICING</div><h2>Account requests and balances</h2></div></div>
       <form className="form-grid" onSubmit={createAccount}>
         <label className="form-field"><span>Verified customer</span><select required value={account.customerId} onChange={(e) => setAccount({ ...account, customerId: e.target.value })}><option value="">Select customer</option>{customers.filter((row) => row.kyc_status === 'VERIFIED').map((row) => <option key={row.id} value={row.id}>{row.first_name} {row.last_name} · {row.customer_number}</option>)}</select></label>
+        <label className="form-field"><span>Linked vendor receiving this package</span><select required value={account.vendorLinkId} onChange={(e) => setAccount({ ...account, vendorLinkId: e.target.value })}><option value="">Select vendor</option>{vendorLinks.map((row) => <option key={row.id} value={row.id}>{row.vendor_name} · member {row.member_id}</option>)}</select></label>
         <label className="form-field"><span>Active product</span><select required value={account.productId} onChange={(e) => setAccount({ ...account, productId: e.target.value, termMonths: '', termDays: '' })}><option value="">Select product</option>{products.filter((row) => row.status === 'ACTIVE').map((row) => <option key={row.id} value={row.id}>{row.name} · {row.product_type}</option>)}</select></label>
         <label className="form-field"><span>Amount (GHS)</span><input required type="number" min="0.01" step="0.01" value={account.amount} onChange={(e) => setAccount({ ...account, amount: e.target.value })} /></label>
         {products.find((row) => row.id === account.productId)?.product_type === 'LOAN' && (products.find((row) => row.id === account.productId)?.tenor_options_months?.length ? <label className="form-field"><span>Loan tenor (months)</span><select required value={account.termMonths} onChange={(e) => setAccount({ ...account, termMonths: e.target.value })}><option value="">Select tenor</option>{products.find((row) => row.id === account.productId).tenor_options_months.map((months) => <option key={months} value={months}>{months} months</option>)}</select></label> : <label className="form-field"><span>Term (days)</span><input required type="number" min="1" value={account.termDays} onChange={(e) => setAccount({ ...account, termDays: e.target.value })} /></label>)}
@@ -225,9 +249,9 @@ export default function FinancialOperations() {
       <div className="section-head"><div><div className="eyebrow">LEDGER OPERATIONS</div><h2>Record and review transactions</h2></div></div>
       <form className="form-grid" onSubmit={createTransaction}>
         <label className="form-field"><span>Account</span><select required value={transactionForm.accountId} onChange={(e) => setTransactionForm({ ...transactionForm, accountId: e.target.value })}><option value="">Select active account</option>{accounts.filter((row) => ['APPROVED', 'ACTIVE', 'OVERDUE'].includes(row.status)).map((row) => <option key={row.id} value={row.id}>{row.account_number} · {row.first_name} {row.last_name}{row.status === 'OVERDUE' ? ' · OVERDUE' : ''}</option>)}</select></label>
-        <label className="form-field"><span>Operation</span><select value={transactionForm.transactionType} onChange={(e) => setTransactionForm({ ...transactionForm, transactionType: e.target.value })}>{['DEPOSIT', 'WITHDRAWAL', 'LOAN_DISBURSEMENT', 'LOAN_REPAYMENT'].map((type) => <option key={type}>{type}</option>)}</select></label>
+        <label className="form-field"><span>Operation</span><select value={transactionForm.transactionType} onChange={(e) => setTransactionForm({ ...transactionForm, transactionType: e.target.value })}>{['DEPOSIT', 'WITHDRAWAL', 'LOAN_DISBURSEMENT'].map((type) => <option key={type}>{type}</option>)}</select></label>
         <label className="form-field"><span>Amount (GHS)</span><input required type="number" min="0.01" step="0.01" value={transactionForm.amount} onChange={(e) => setTransactionForm({ ...transactionForm, amount: e.target.value })} /></label>
-        <label className="form-field"><span>External reference</span><input required minLength="3" maxLength="160" value={transactionForm.externalReference} onChange={(e) => setTransactionForm({ ...transactionForm, externalReference: e.target.value })} /></label>
+        <label className="form-field"><span>Institution transaction reference</span><input required minLength="3" maxLength="160" value={transactionForm.externalReference} onChange={(e) => setTransactionForm({ ...transactionForm, externalReference: e.target.value })} /><small>Suggested format: ABC-PRODUCT-UNIQUE_ID-YYYYMMDD-HHMMSS. Your institution owns and generates this ID.</small></label>
         <label className="form-field"><span>Customer mobile (233XXXXXXXXX)</span><input required pattern="233[0-9]{9}" value={transactionForm.phoneNumber} onChange={(e) => setTransactionForm({ ...transactionForm, phoneNumber: e.target.value })} /></label>
         <label className="form-field form-span"><span>Note</span><input maxLength="1000" value={transactionForm.note} onChange={(e) => setTransactionForm({ ...transactionForm, note: e.target.value })} /></label>
         <div className="form-span form-actions"><button className="button button-primary" disabled={saving}>Record pending transaction</button></div>

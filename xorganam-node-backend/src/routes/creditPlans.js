@@ -2,7 +2,6 @@ import { Router } from 'express'
 import { query, withTransaction } from '../db/pool.js'
 import { authenticate, requireAnyRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
-import { calculateInstitutionAmount } from '../services/splitPaymentService.js'
 import { recordCreditWebhookEvent } from '../services/creditWebhookOutbox.js'
 import { issueInstallmentToken, verifyInstallmentToken, installmentPaymentUrl } from '../services/creditInstallmentToken.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
@@ -276,7 +275,6 @@ creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', re
         WHERE id = $1 AND status IN ('PENDING', 'OVERDUE')
         RETURNING id, installment_number, amount_due, paid_at`, [plan.installment_id, req.user.id]
     )
-    await recordCashSplitAccrual(tx, plan)
     const remaining = await tx.query(
       `SELECT COUNT(*)::int AS count FROM credit_plan_installments
         WHERE credit_plan_id = $1 AND status <> 'PAID'`, [plan.id]
@@ -298,31 +296,3 @@ creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', re
   if (result.conflict) return res.status(409).json({ message: 'This installment is already paid or has a platform collection in progress.' })
   res.json(result)
 }))
-
-async function recordCashSplitAccrual(tx, plan) {
-  const { rows } = await tx.query(
-    `SELECT r.id, r.institution_id, r.type, r.amount, l.cash_sales_included_in_split
-       FROM split_rules r
-       JOIN tenant_institution_links l
-         ON l.tenant_id = r.tenant_id AND l.institution_id = r.institution_id
-        AND l.status = 'ACTIVE' AND l.verification_status = 'APPROVED'
-      WHERE r.tenant_id = $1 AND r.active AND r.effective_from <= now()
-        AND (r.effective_to IS NULL OR r.effective_to > now())
-        AND ((r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = $2)
-             OR (r.scope_level = 'TENANT_DEFAULT' AND r.merchant_id IS NULL))
-        AND l.cash_sales_included_in_split = TRUE
-      ORDER BY CASE WHEN r.merchant_id = $2 THEN 0 ELSE 1 END, r.created_at DESC LIMIT 1`,
-    [plan.tenant_id, plan.merchant_id]
-  )
-  const rule = rows[0]
-  if (!rule) return
-  const accruedAmount = calculateInstitutionAmount(plan.amount_due, rule)
-  if (accruedAmount <= 0) return
-  await tx.query(
-    `INSERT INTO periodic_accrual_ledger
-       (tenant_id, merchant_id, institution_id, split_rule_id, source_credit_installment_id, accrued_amount)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (source_credit_installment_id) DO NOTHING`,
-    [plan.tenant_id, plan.merchant_id, rule.institution_id, rule.id, plan.installment_id, accruedAmount]
-  )
-}
