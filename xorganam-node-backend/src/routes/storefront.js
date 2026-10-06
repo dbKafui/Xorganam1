@@ -57,6 +57,27 @@ function validateProductInput(input, partial = false) {
     product.categoryId = input.categoryId || null
     if (product.categoryId && !UUID.test(product.categoryId)) throw new StorefrontOrderError('categoryId is invalid.')
   }
+  if (input.storefrontCategoryId !== undefined) {
+    product.storefrontCategoryId = input.storefrontCategoryId || null
+    if (product.storefrontCategoryId && !UUID.test(product.storefrontCategoryId)) throw new StorefrontOrderError('storefrontCategoryId is invalid.')
+  }
+  if (input.specifications !== undefined) {
+    const specifications = input.specifications
+    if (!specifications || typeof specifications !== 'object' || Array.isArray(specifications)) {
+      throw new StorefrontOrderError('specifications must be a key/value object.')
+    }
+    const entries = Object.entries(specifications)
+    if (entries.length > 30) throw new StorefrontOrderError('A product may have at most 30 specifications.')
+    product.specifications = Object.fromEntries(entries.map(([rawKey, rawValue]) => {
+      const key = String(rawKey).trim()
+      if (!key || key.length > 80 || !['string', 'number', 'boolean'].includes(typeof rawValue)) {
+        throw new StorefrontOrderError('Each specification needs a label up to 80 characters and a text, number, or boolean value.')
+      }
+      const value = String(rawValue).trim()
+      if (!value || value.length > 500) throw new StorefrontOrderError('Specification values must be 1–500 characters.')
+      return [key, value]
+    }))
+  }
   if (input.media !== undefined) {
     if (!Array.isArray(input.media) || input.media.length > 10) throw new StorefrontOrderError('media must contain at most 10 HTTPS image URLs.')
     product.media = input.media.map((item, position) => ({
@@ -77,6 +98,7 @@ function validateProductInput(input, partial = false) {
 async function publicProducts(tenantId, condition = '', params = []) {
   const { rows } = await query(
     `SELECT p.id, p.tenant_id, p.name, p.description, p.listing_type, p.price, p.category_id,
+            p.storefront_category_id, vc.name AS storefront_category_name, p.specifications,
             p.featured, p.sort_priority, p.created_at,
             COALESCE((SELECT json_agg(json_build_object('id', r.id, 'url', r.url, 'altText', r.alt_text, 'position', r.position) ORDER BY r.position)
                         FROM product_media r WHERE r.product_id = p.id), '[]'::json) AS media,
@@ -85,7 +107,8 @@ async function publicProducts(tenantId, condition = '', params = []) {
                               'unlimitedStock', st.unlimited_stock) ORDER BY m.display_name)
                         FROM product_stock st JOIN merchants m ON m.id = st.merchant_id
                          WHERE st.product_id = p.id AND m.is_active AND m.account_setup_status = 'ACTIVE'), '[]'::json) AS stock_by_branch
-       FROM products p WHERE p.tenant_id = $1 AND p.visible ${condition}
+       FROM products p LEFT JOIN storefront_product_categories vc ON vc.id = p.storefront_category_id AND vc.tenant_id = p.tenant_id
+      WHERE p.tenant_id = $1 AND p.visible ${condition}
       ORDER BY p.featured DESC, p.sort_priority DESC, p.created_at DESC`, [tenantId, ...params]
   )
   return rows
@@ -101,7 +124,7 @@ publicStorefrontRouter.get('/storefronts/:slug', asyncHandler(async (req, res) =
   )
   const storefront = rows[0]
   if (!storefront) return res.status(404).json({ message: 'Storefront not found.' })
-  const [products, branches, reviews, creditDefaults] = await Promise.all([
+  const [products, branches, reviews, creditDefaults, categories] = await Promise.all([
     publicProducts(storefront.tenant_id),
     query(`SELECT id, display_name FROM merchants
             WHERE tenant_id = $1 AND is_active AND account_setup_status = 'ACTIVE'
@@ -110,9 +133,10 @@ publicStorefrontRouter.get('/storefronts/:slug', asyncHandler(async (req, res) =
             WHERE tenant_id = $1 AND target_type = 'VENDOR' AND status = 'VISIBLE'
             ORDER BY created_at DESC LIMIT 20`, [storefront.tenant_id]),
     query(`SELECT enabled, down_payment_percent, installment_count, installment_frequency, first_due_days
-             FROM tenant_credit_plan_defaults WHERE tenant_id = $1`, [storefront.tenant_id])
+             FROM tenant_credit_plan_defaults WHERE tenant_id = $1`, [storefront.tenant_id]),
+    query(`SELECT id, name FROM storefront_product_categories WHERE tenant_id = $1 ORDER BY lower(name)`, [storefront.tenant_id])
   ])
-  res.json({ storefront, products, branches: branches.rows, reviews: reviews.rows, creditDefaults: creditDefaults.rows[0] || null })
+  res.json({ storefront, products, branches: branches.rows, reviews: reviews.rows, creditDefaults: creditDefaults.rows[0] || null, categories: categories.rows })
 }))
 
 publicStorefrontRouter.get('/marketplace/products/:productId/reviews', asyncHandler(async (req, res) => {
@@ -231,6 +255,62 @@ async function startOrderCheckout(req, res, marketplaceOrder) {
 
 storefrontRouter.use(authenticate)
 
+storefrontRouter.get('/categories', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'), asyncHandler(async (req, res) => {
+  const tenantId = scopedTenant(req, res)
+  if (!tenantId) return
+  const { rows } = await query(
+    `SELECT c.id, c.name, c.created_at, count(p.id)::int AS product_count
+       FROM storefront_product_categories c
+       LEFT JOIN products p ON p.tenant_id = c.tenant_id AND p.storefront_category_id = c.id
+      WHERE c.tenant_id = $1 GROUP BY c.id ORDER BY lower(c.name)`, [tenantId]
+  )
+  res.json(rows)
+}))
+
+storefrontRouter.post('/categories', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER'), asyncHandler(async (req, res) => {
+  const tenantId = scopedTenant(req, res)
+  if (!tenantId) return
+  const name = String(req.body?.name || '').trim()
+  if (!name || name.length > 80) return res.status(400).json({ message: 'Category name is required and must be at most 80 characters.' })
+  try {
+    const { rows } = await query(
+      `INSERT INTO storefront_product_categories (tenant_id, name) VALUES ($1, $2) RETURNING id, name, created_at`, [tenantId, name]
+    )
+    res.status(201).json(rows[0])
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ message: 'A category with that name already exists in this storefront.' })
+    throw error
+  }
+}))
+
+storefrontRouter.patch('/categories/:categoryId', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER'), asyncHandler(async (req, res) => {
+  const tenantId = scopedTenant(req, res)
+  if (!tenantId) return
+  if (!UUID.test(req.params.categoryId)) return res.status(400).json({ message: 'Invalid category ID.' })
+  const name = String(req.body?.name || '').trim()
+  if (!name || name.length > 80) return res.status(400).json({ message: 'Category name is required and must be at most 80 characters.' })
+  try {
+    const { rows } = await query(
+      `UPDATE storefront_product_categories SET name = $3 WHERE id = $1 AND tenant_id = $2 RETURNING id, name`,
+      [req.params.categoryId, tenantId, name]
+    )
+    if (!rows.length) return res.status(404).json({ message: 'Storefront category not found.' })
+    res.json(rows[0])
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ message: 'A category with that name already exists in this storefront.' })
+    throw error
+  }
+}))
+
+storefrontRouter.delete('/categories/:categoryId', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER'), asyncHandler(async (req, res) => {
+  const tenantId = scopedTenant(req, res)
+  if (!tenantId) return
+  if (!UUID.test(req.params.categoryId)) return res.status(400).json({ message: 'Invalid category ID.' })
+  const { rowCount } = await query(`DELETE FROM storefront_product_categories WHERE id = $1 AND tenant_id = $2`, [req.params.categoryId, tenantId])
+  if (!rowCount) return res.status(404).json({ message: 'Storefront category not found.' })
+  res.status(204).end()
+}))
+
 storefrontRouter.get('/', asyncHandler(async (req, res) => {
   const tenantId = scopedTenant(req, res)
   if (!tenantId) return
@@ -292,7 +372,7 @@ storefrontRouter.get('/products', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER
   const tenantId = scopedTenant(req, res)
   if (!tenantId) return
   const { rows } = await query(
-    `SELECT p.*, c.name AS category_name,
+    `SELECT p.*, c.name AS category_name, vc.name AS storefront_category_name,
             COALESCE((SELECT json_agg(json_build_object('id', m.id, 'url', m.url, 'altText', m.alt_text, 'position', m.position) ORDER BY m.position)
                         FROM product_media m WHERE m.product_id = p.id), '[]'::json) AS media,
             COALESCE((SELECT json_agg(json_build_object('merchantId', st.merchant_id, 'branchName', merchant.display_name,
@@ -301,6 +381,7 @@ storefrontRouter.get('/products', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER
                         FROM product_stock st JOIN merchants merchant ON merchant.id = st.merchant_id
                        WHERE st.product_id = p.id), '[]'::json) AS stock_by_branch
        FROM products p LEFT JOIN marketplace_categories c ON c.id = p.category_id
+       LEFT JOIN storefront_product_categories vc ON vc.id = p.storefront_category_id AND vc.tenant_id = p.tenant_id
       WHERE p.tenant_id = $1 ORDER BY p.created_at DESC`, [tenantId]
   )
   res.json(rows)
@@ -313,11 +394,15 @@ storefrontRouter.post('/products', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGE
   try { product = validateProductInput(req.body || {}) } catch (error) { return res.status(400).json({ message: error.message }) }
   try {
     const created = await withTransaction(async (tx) => {
+      if (product.storefrontCategoryId) {
+        const category = await tx.query(`SELECT id FROM storefront_product_categories WHERE id = $1 AND tenant_id = $2`, [product.storefrontCategoryId, tenantId])
+        if (!category.rows.length) throw new StorefrontOrderError('Choose a category from this storefront.')
+      }
       const { rows } = await tx.query(
-        `INSERT INTO products (tenant_id, name, description, listing_type, price, category_id, featured, sort_priority)
-         VALUES ($1, $2, NULLIF($3, ''), $4::product_listing_type, $5, $6, $7, $8) RETURNING *`,
+        `INSERT INTO products (tenant_id, name, description, listing_type, price, category_id, storefront_category_id, specifications, featured, sort_priority)
+         VALUES ($1, $2, NULLIF($3, ''), $4::product_listing_type, $5, $6, $7, $8::jsonb, $9, $10) RETURNING *`,
         [tenantId, product.name, product.description, product.listingType, product.priceCents / 100,
-          product.categoryId || null, product.featured || false, product.sortPriority || 0]
+          product.categoryId || null, product.storefrontCategoryId || null, JSON.stringify(product.specifications || {}), product.featured || false, product.sortPriority || 0]
       )
       for (const media of product.media || []) await tx.query(
         `INSERT INTO product_media (product_id, url, alt_text, position) VALUES ($1, $2, $3, $4)`,
@@ -327,6 +412,7 @@ storefrontRouter.post('/products', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGE
     })
     res.status(201).json(created)
   } catch (error) {
+    if (error instanceof StorefrontOrderError) return res.status(error.status).json({ message: error.message })
     if (error.code === '23503') return res.status(400).json({ message: 'Choose an existing marketplace category.' })
     throw error
   }
@@ -338,18 +424,22 @@ storefrontRouter.patch('/products/:productId', requireAnyRole('TENANT_ADMIN', 'T
   if (!UUID.test(req.params.productId)) return res.status(400).json({ message: 'Invalid product ID.' })
   let product
   try { product = validateProductInput(req.body || {}, true) } catch (error) { return res.status(400).json({ message: error.message }) }
-  const fields = ['name', 'description', 'listingType', 'priceCents', 'categoryId', 'featured', 'sortPriority']
+  const fields = ['name', 'description', 'listingType', 'priceCents', 'categoryId', 'storefrontCategoryId', 'specifications', 'featured', 'sortPriority']
   const values = []
   const sets = []
-  const sqlColumns = { name: 'name', description: 'description', listingType: 'listing_type', priceCents: 'price', categoryId: 'category_id', featured: 'featured', sortPriority: 'sort_priority' }
+  const sqlColumns = { name: 'name', description: 'description', listingType: 'listing_type', priceCents: 'price', categoryId: 'category_id', storefrontCategoryId: 'storefront_category_id', specifications: 'specifications', featured: 'featured', sortPriority: 'sort_priority' }
   for (const key of fields) {
     if (product[key] === undefined) continue
-    values.push(key === 'priceCents' ? product[key] / 100 : (key === 'categoryId' ? product[key] : product[key]))
-    sets.push(`${sqlColumns[key]} = $${values.length}${key === 'listingType' ? '::product_listing_type' : ''}`)
+    values.push(key === 'priceCents' ? product[key] / 100 : key === 'specifications' ? JSON.stringify(product[key]) : product[key])
+    sets.push(`${sqlColumns[key]} = $${values.length}${key === 'listingType' ? '::product_listing_type' : key === 'specifications' ? '::jsonb' : ''}`)
   }
   if (!sets.length && product.media === undefined) return res.status(400).json({ message: 'Provide at least one product field to update.' })
   try {
     const result = await withTransaction(async (tx) => {
+      if (product.storefrontCategoryId) {
+        const category = await tx.query(`SELECT id FROM storefront_product_categories WHERE id = $1 AND tenant_id = $2`, [product.storefrontCategoryId, tenantId])
+        if (!category.rows.length) throw new StorefrontOrderError('Choose a category from this storefront.')
+      }
       let current
       if (sets.length) {
         values.push(req.params.productId, tenantId)
@@ -372,6 +462,7 @@ storefrontRouter.patch('/products/:productId', requireAnyRole('TENANT_ADMIN', 'T
     if (!result) return res.status(404).json({ message: 'Product not found.' })
     res.json(result)
   } catch (error) {
+    if (error instanceof StorefrontOrderError) return res.status(error.status).json({ message: error.message })
     if (error.code === '23503') return res.status(400).json({ message: 'Choose an existing marketplace category.' })
     throw error
   }

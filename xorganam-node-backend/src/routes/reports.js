@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
-import { authenticate, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { authenticate, requirePermission, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 
 export const reportsRouter = Router()
@@ -43,6 +43,7 @@ async function computeTotals(whereClause, params) {
 // ---------------------------------------------------------------------
 reportsRouter.get(
   '/merchant',
+  requirePermission('VIEW_REPORTS'),
   asyncHandler(async (req, res) => {
     if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to reports.' })
     const { merchantId } = req.query
@@ -56,6 +57,9 @@ reportsRouter.get(
     const merchant = merchantRow.rows[0]
 
     if (scopeOrRespond(req, res, merchant.tenant_id) === null) return
+    if (req.user.merchantId && String(req.user.merchantId) !== String(merchant.id)) {
+      return res.status(403).json({ message: 'You do not have access to other merchants.' })
+    }
 
     const totals = await computeTotals('merchant_id = $1', [merchantId])
 
@@ -79,7 +83,9 @@ reportsRouter.get(
 // ---------------------------------------------------------------------
 reportsRouter.get(
   '/tenant',
+  requirePermission('VIEW_REPORTS'),
   asyncHandler(async (req, res) => {
+    if (req.user.merchantId) return res.status(403).json({ message: 'Merchant-assigned users cannot view tenant-wide reports.' })
     if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to tenant-wide reports.' })
     const tenantId = scopeOrRespond(req, res, req.query.tenantId)
     if (!tenantId) return

@@ -107,8 +107,8 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     throw new CollectionRejectedError('Amount must be a valid positive amount with at most two decimal places.')
   }
   const collectionFee = await computeFee(merchant.tenant_id, 'COLLECTION', amount)
-  const customerFee = collectionFee.chargedPayer === 'CUSTOMER' ? collectionFee.configuredChargeAmount : 0
-  const gatewayAmount = Math.round((Number(amount) + Number(customerFee || 0)) * 100) / 100
+  // Fees are recorded for reconciliation; Eganow applies any actual deduction.
+  const gatewayAmount = amount
   const normalizedCollectionMethod = String(collectionMethod || 'MOMO').toUpperCase()
   if (!['MOMO', 'CARD'].includes(normalizedCollectionMethod)) throw new CollectionRejectedError('Choose Mobile Money or Card collection.')
   if (normalizedCollectionMethod === 'MOMO' && !msisdn) throw new CollectionRejectedError('A mobile number is required.')

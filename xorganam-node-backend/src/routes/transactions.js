@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
-import { authenticate, requireRole, requireAnyRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { authenticate, requireRole, requirePermission, userHasPermission, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
 import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
@@ -82,6 +82,7 @@ function scopeOrRespond(req, res, requestedTenantId) {
 // ---------------------------------------------------------------------
 transactionsRouter.get(
   '/',
+  requirePermission('VIEW_TRANSACTIONS'),
   asyncHandler(async (req, res) => {
     const tenantId = scopeOrRespond(req, res, req.query.tenantId)
     if (!tenantId) return
@@ -166,6 +167,9 @@ transactionsRouter.get(
 
     const txn = rows[0]
     if (scopeOrRespond(req, res, txn.tenant_id) === null) return
+    if (!await userHasPermission(req.user.id, 'VIEW_TRANSACTIONS', txn.merchant_id, req.user.role)) {
+      return res.status(403).json({ message: 'You do not have VIEW_TRANSACTIONS permission for this merchant.' })
+    }
 
     // Enforce merchant scoping for transaction detail
     if (req.user?.merchantId && String(txn.merchant_id) !== String(req.user.merchantId)) {
@@ -198,7 +202,7 @@ transactionsRouter.get(
 // ---------------------------------------------------------------------
 transactionsRouter.post(
   '/collect',
-  requireRole('TENANT_OPERATOR'),
+  requirePermission('INITIATE_COLLECTION'),
   asyncHandler(async (req, res) => {
     const { merchantId, amount, msisdn, network, narration, payoutMsisdn, payoutMobileNumber, accountNoOrMsisdn, collectionMethod, cardNumber, cardholderName, expiryDateMonth, expiryDateYear, cvv } = req.body || {}
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
@@ -253,7 +257,7 @@ transactionsRouter.post(
 // ---------------------------------------------------------------------
 transactionsRouter.post(
   '/internal-transfer',
-  requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'),
+  requirePermission('INITIATE_PAYOUT'),
   asyncHandler(async (req, res) => {
     const { sourceTransactionId, amount } = req.body || {}
     if (!sourceTransactionId) return res.status(400).json({ message: 'sourceTransactionId is required.' })
@@ -273,6 +277,9 @@ transactionsRouter.post(
     const source = sourceRows.rows[0]
 
     if (scopeOrRespond(req, res, source.tenant_id) === null) return
+    if (req.body?.merchantId && String(req.body.merchantId) !== String(source.merchant_id)) {
+      return res.status(403).json({ message: 'The source transaction does not belong to the specified merchant.' })
+    }
     // Enforce merchant scoping for operations on a specific transaction
     if (req.user?.merchantId && String(source.merchant_id) !== String(req.user.merchantId)) {
       return res.status(403).json({ message: 'You do not have access to this transaction.' })
@@ -357,7 +364,7 @@ transactionsRouter.post(
 // ---------------------------------------------------------------------
 transactionsRouter.post(
   '/payout',
-  requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'),
+  requirePermission('INITIATE_PAYOUT'),
   asyncHandler(async (req, res) => {
     const { sourceTransactionId, amount, accountNoOrMsisdn, network, destinationType = 'MOMO', accountName, bankCode } = req.body || {}
     if (!sourceTransactionId) return res.status(400).json({ message: 'sourceTransactionId is required.' })
@@ -377,6 +384,9 @@ transactionsRouter.post(
     const source = sourceRows.rows[0]
 
     if (scopeOrRespond(req, res, source.tenant_id) === null) return
+    if (req.body?.merchantId && String(req.body.merchantId) !== String(source.merchant_id)) {
+      return res.status(403).json({ message: 'The source transaction does not belong to the specified merchant.' })
+    }
     if (req.user?.merchantId && String(source.merchant_id) !== String(req.user.merchantId)) {
       return res.status(403).json({ message: 'You do not have access to this transaction.' })
     }
@@ -460,11 +470,12 @@ transactionsRouter.post(
     if (!destination || (normalizedDestinationType === 'BANK' && (!supportedBanks.has(String(bankCode || '').toUpperCase()) || !String(accountName || '').trim() || !/^\d{6,34}$/.test(String(destination).replace(/\s/g, ''))))) {
       return res.status(400).json({ message: 'Provide a valid destination, recipient name, and supported bank.' })
     }
-    const availableAmount = Math.max(0, Number(source.base_amount ?? source.amount) - (source.fee_charged_payer === 'MERCHANT' ? Number(source.fee_charged_amount || 0) : 0))
+    const availableAmount = Math.max(0, Number(source.base_amount ?? source.amount))
     const requestedPayoutAmount = amount == null || amount === '' ? availableAmount : Number(amount)
     const payoutFee = await computeFee(source.tenant_id, 'PAYOUT', requestedPayoutAmount)
-    const payoutAmount = Math.round((requestedPayoutAmount - (payoutFee.chargedPayer === 'MERCHANT' ? payoutFee.chargedAmount : 0)) * 100) / 100
-    if (!Number.isFinite(requestedPayoutAmount) || payoutAmount <= 0 || requestedPayoutAmount > availableAmount) return res.status(400).json({ message: 'Payout amount is invalid after configured fees.' })
+    // Xorganam records configured fees for reconciliation; Eganow performs deductions.
+    const payoutAmount = Math.round(requestedPayoutAmount * 100) / 100
+    if (!Number.isFinite(requestedPayoutAmount) || payoutAmount <= 0 || requestedPayoutAmount > availableAmount) return res.status(400).json({ message: 'Payout amount is invalid or exceeds the available collection amount.' })
 
     const inserted = await withTransaction(async (tx) => {
       await tx.query('SELECT id FROM transactions WHERE id = $1 FOR UPDATE', [source.id])

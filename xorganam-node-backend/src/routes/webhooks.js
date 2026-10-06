@@ -51,7 +51,7 @@ async function handleInstitutionEganowWebhook(req, res) {
   if (transaction.status !== 'PENDING_GATEWAY') return res.status(200).json({ message: 'Institution payment was already reconciled.', transactionId: transaction.id, status: transaction.status })
   const expectedCents = ['LOAN_DISBURSEMENT', 'WITHDRAWAL'].includes(transaction.transaction_type)
     ? Number(transaction.payout_amount_cents)
-    : Number(transaction.amount_cents) + Number(transaction.fee_cents)
+    : Number(transaction.amount_cents)
   const callbackAmount = value('amount', 'Amount')
   if (callbackAmount !== undefined && Math.round(Number(callbackAmount) * 100) !== expectedCents) {
     return res.status(409).json({ message: 'Callback amount does not match the institution transaction.' })

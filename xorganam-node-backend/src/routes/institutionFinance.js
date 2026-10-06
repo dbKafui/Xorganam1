@@ -595,8 +595,10 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
   const penalty = item.transaction_type === 'WITHDRAWAL' && item.is_early_withdrawal
     ? Math.round(amount * Number(item.early_withdrawal_penalty_basis_points || 0) / 10000) : 0
   const payout = item.transaction_type === 'WITHDRAWAL' || item.transaction_type === 'LOAN_DISBURSEMENT'
-  const gatewayAmount = payout ? amount - fee - penalty : amount + fee
-  if (gatewayAmount <= 0) return res.status(409).json({ message: 'Configured fee leaves no positive amount to pay out.' })
+  // Fees are recorded locally for reconciliation. Eganow is responsible for
+  // applying them; only the separate early-withdrawal penalty changes principal.
+  const gatewayAmount = payout ? amount - penalty : amount
+  if (gatewayAmount <= 0) return res.status(409).json({ message: 'Configured penalty leaves no positive amount to pay out.' })
 
   const startResult = await withTransaction(async (tx) => {
     const { rows: accounts } = await tx.query(
@@ -913,7 +915,7 @@ tenantInstitutionFinanceRouter.post('/transactions', asyncHandler(async (req, re
   await query(`UPDATE institution_financial_transactions SET fee_cents = $2 WHERE id = $1`, [transaction.id, fee])
   try {
     const gateway = await initiateInstitutionCollection(transaction.institution_id, {
-      reference, amount: (amount + fee) / 100, msisdn: transaction.payer_phone_number,
+      reference, amount: amount / 100, msisdn: transaction.payer_phone_number,
       narration: `${transactionType.replaceAll('_', ' ')} ${reference}`
     })
     const result = await reconcileInstitutionTransaction(transaction.institution_id, transaction.id, gateway)

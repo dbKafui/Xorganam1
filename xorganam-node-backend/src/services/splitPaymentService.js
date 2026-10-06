@@ -134,11 +134,9 @@ export async function recordPeriodicAccrualAndVendorLeg(tx, { collectionTxn, mer
     [collectionTxn.id, rule.institution_id]
   )).rows[0]?.accrued_amount ?? calculated)
   let vendorAmount = baseAmount - accruedAmount
-  if (collectionTxn.fee_charged_payer === 'MERCHANT') vendorAmount -= Number(collectionTxn.fee_charged_amount || 0)
   const payoutFee = await computeFee(collectionTxn.tenant_id, 'PAYOUT', Math.max(0, vendorAmount), (sql, params) => tx.query(sql, params))
-  if (payoutFee.chargedPayer === 'MERCHANT') vendorAmount -= payoutFee.chargedAmount
   vendorAmount = Math.round(vendorAmount * 100) / 100
-  if (vendorAmount <= 0) throw new Error('Configured fees and institution accrual leave no positive vendor payout.')
+  if (vendorAmount <= 0) throw new Error('Institution allocation leaves no positive vendor payout.')
   const payoutReference = `${createReference('PO')}-VENDOR`
   await tx.query(
     `INSERT INTO transactions
@@ -198,11 +196,9 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
     if (rows[0]) institutionAmount = Number(rows[0].accrued_amount)
   }
   let vendorAmount = Math.round((baseAmount - institutionAmount) * 100) / 100
-  if (collectionTxn.fee_charged_payer === 'MERCHANT') vendorAmount -= Number(collectionTxn.fee_charged_amount || 0)
   const payoutFee = await computeFee(tenantId, 'PAYOUT', Math.max(0, vendorAmount))
-  if (payoutFee.chargedPayer === 'MERCHANT') vendorAmount -= payoutFee.chargedAmount
   vendorAmount = Math.round(vendorAmount * 100) / 100
-  if (vendorAmount <= 0) throw new Error('Configured fees and institution split leave no positive vendor payout.')
+  if (vendorAmount <= 0) throw new Error('Institution split leaves no positive vendor payout.')
   const institution = {
     msisdn: rule.settlement_msisdn,
     institutionId: rule.institution_id

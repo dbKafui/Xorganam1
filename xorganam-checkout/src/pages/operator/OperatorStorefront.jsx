@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi, publicApi } from '../../api/client'
 
-const blankProduct = { name: '', description: '', listingType: 'PHYSICAL', price: '', categoryId: '', imageUrl: '' }
+const blankProduct = { name: '', description: '', listingType: 'PHYSICAL', price: '', categoryId: '', storefrontCategoryId: '', imageUrls: '' }
 const blankDefaults = { enabled: false, downPaymentPercent: '0', installmentCount: '4', installmentFrequency: 'MONTHLY', markupAmount: '0', lateFeeAmount: '0', lateFeeGraceDays: '0', missedInstallmentThreshold: '3', firstDueDays: '30' }
 const storefrontBase = import.meta.env.VITE_STOREFRONT_PUBLIC_URL || ''
 
@@ -15,6 +15,9 @@ export default function OperatorStorefront() {
   const [products, setProducts] = useState([])
   const [branches, setBranches] = useState([])
   const [categories, setCategories] = useState([])
+  const [storefrontCategories, setStorefrontCategories] = useState([])
+  const [categoryName, setCategoryName] = useState('')
+  const [editingCategoryId, setEditingCategoryId] = useState('')
   const [orders, setOrders] = useState([])
   const [defaults, setDefaults] = useState(blankDefaults)
   const [slug, setSlug] = useState('')
@@ -22,6 +25,7 @@ export default function OperatorStorefront() {
   const [defaultBranch, setDefaultBranch] = useState('')
   const [brandingText, setBrandingText] = useState('{"theme":{"primaryColor":"#1a2b3c","font":"Inter"},"blocks":[]}')
   const [productForm, setProductForm] = useState(blankProduct)
+  const [specificationRows, setSpecificationRows] = useState([])
   const [editingProductId, setEditingProductId] = useState('')
   const [selectedBranch, setSelectedBranch] = useState(user?.merchantId || '')
   const [stockForm, setStockForm] = useState({})
@@ -31,11 +35,12 @@ export default function OperatorStorefront() {
 
   const refresh = useCallback(async () => {
     if (!user?.tenantId) return
-    const [productRows, orderRows, merchantRows, categoryRows, defaultRows] = await Promise.all([
+    const [productRows, orderRows, merchantRows, categoryRows, storefrontCategoryRows, defaultRows] = await Promise.all([
       operatorApi.listStorefrontProducts(user.tenantId),
       operatorApi.getStorefrontOrders({ tenantId: user.tenantId, ...(user.merchantId ? { merchantId: user.merchantId } : {}) }),
       operatorApi.listMerchants(user.tenantId),
       publicApi.getMarketplaceCategories(),
+      operatorApi.listStorefrontCategories(user.tenantId),
       isManager ? operatorApi.getCreditDefaults(user.tenantId) : Promise.resolve(null)
     ])
     setProducts(productRows || [])
@@ -44,6 +49,7 @@ export default function OperatorStorefront() {
     setBranches(availableBranches)
     if (!selectedBranch && (user.merchantId || availableBranches[0]?.id)) setSelectedBranch(user.merchantId || availableBranches[0].id)
     setCategories(categoryRows || [])
+    setStorefrontCategories(storefrontCategoryRows || [])
     if (defaultRows) setDefaults({ ...blankDefaults, ...defaultRows, downPaymentPercent: String(defaultRows.down_payment_percent ?? 0), installmentCount: String(defaultRows.installment_count ?? 4), installmentFrequency: defaultRows.installment_frequency || 'MONTHLY', markupAmount: String(defaultRows.markup_amount ?? 0), lateFeeAmount: String(defaultRows.late_fee_amount ?? 0), lateFeeGraceDays: String(defaultRows.late_fee_grace_days ?? 0), missedInstallmentThreshold: String(defaultRows.missed_installment_threshold ?? 3), firstDueDays: String(defaultRows.first_due_days ?? 30) })
     const storefront = await operatorApi.getStorefront(user.tenantId).catch((requestError) => requestError.status === 404 ? null : Promise.reject(requestError))
     setStore(storefront)
@@ -70,9 +76,21 @@ export default function OperatorStorefront() {
   async function createProduct(event) {
     event.preventDefault(); setBusy(true); setError(''); setNotice('')
     try {
-      const media = productForm.imageUrl.trim() ? [{ url: productForm.imageUrl.trim(), altText: productForm.name }] : []
+      const specifications = {}
+      const labels = new Set()
+      for (const row of specificationRows) {
+        const label = row.label.trim()
+        const value = row.value.trim()
+        if (!label && !value) continue
+        if (!label || !value) throw new Error('Complete both the label and value for each specification.')
+        if (labels.has(label.toLowerCase())) throw new Error(`The specification “${label}” is listed more than once.`)
+        labels.add(label.toLowerCase())
+        specifications[label] = value
+      }
+      const media = productForm.imageUrls.split('\n').map((url) => url.trim()).filter(Boolean).map((url) => ({ url, altText: productForm.name }))
       const payload = { tenantId: user.tenantId, name: productForm.name, description: productForm.description,
-        listingType: productForm.listingType, price: Number(productForm.price), categoryId: productForm.categoryId || null, media }
+        listingType: productForm.listingType, price: Number(productForm.price), categoryId: productForm.categoryId || null,
+        storefrontCategoryId: productForm.storefrontCategoryId || null, specifications, media }
       if (editingProductId) {
         await operatorApi.updateStorefrontProduct(editingProductId, payload)
         setNotice('Product details updated.')
@@ -80,7 +98,7 @@ export default function OperatorStorefront() {
         await operatorApi.createStorefrontProduct(payload)
         setNotice('Product created. Set its stock by branch below.')
       }
-      setEditingProductId(''); setProductForm(blankProduct); await refresh()
+      setEditingProductId(''); setProductForm(blankProduct); setSpecificationRows([]); await refresh()
     } catch (requestError) { setError(requestError.message) }
     finally { setBusy(false) }
   }
@@ -88,8 +106,36 @@ export default function OperatorStorefront() {
   function editProduct(product) {
     setEditingProductId(product.id)
     setProductForm({ name: product.name, description: product.description || '', listingType: product.listing_type,
-      price: String(product.price), categoryId: product.category_id || '', imageUrl: product.media?.[0]?.url || '' })
+      price: String(product.price), categoryId: product.category_id || '', storefrontCategoryId: product.storefront_category_id || '',
+      imageUrls: (product.media || []).map((item) => item.url).join('\n') })
+    setSpecificationRows(Object.entries(product.specifications || {}).map(([label, value], index) => ({ id: `${product.id}-${index}`, label, value: String(value) })))
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  async function saveStorefrontCategory(event) {
+    event.preventDefault(); setBusy(true); setError(''); setNotice('')
+    try {
+      const payload = { tenantId: user.tenantId, name: categoryName }
+      if (editingCategoryId) await operatorApi.updateStorefrontCategory(editingCategoryId, payload)
+      else await operatorApi.createStorefrontCategory(payload)
+      const wasEditing = Boolean(editingCategoryId)
+      setCategoryName(''); setEditingCategoryId('')
+      setNotice(wasEditing ? 'Category renamed.' : 'Category created.')
+      await refresh()
+    } catch (requestError) { setError(requestError.message) }
+    finally { setBusy(false) }
+  }
+
+  async function deleteStorefrontCategory(category) {
+    if (!window.confirm(`Delete “${category.name}”? Products in this category will become uncategorized.`)) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await operatorApi.deleteStorefrontCategory(category.id, user.tenantId)
+      if (editingCategoryId === category.id) { setEditingCategoryId(''); setCategoryName('') }
+      setNotice('Category deleted. Products remain in your catalog.')
+      await refresh()
+    } catch (requestError) { setError(requestError.message) }
+    finally { setBusy(false) }
   }
 
   async function saveStock(product) {
@@ -162,18 +208,28 @@ export default function OperatorStorefront() {
       <div className="field"><label>Name</label><input required maxLength="160" value={productForm.name} onChange={(e) => setProductForm({ ...productForm, name: e.target.value })} /></div>
       <div className="field"><label>Price (GHS)</label><input required type="number" min="0.01" step="0.01" value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} /></div>
       <div className="field"><label>Listing type</label><select value={productForm.listingType} onChange={(e) => setProductForm({ ...productForm, listingType: e.target.value })}><option value="PHYSICAL">Physical product</option><option value="SERVICE">Service</option></select></div>
+      <div className="field"><label>Your storefront category</label><select value={productForm.storefrontCategoryId} onChange={(e) => setProductForm({ ...productForm, storefrontCategoryId: e.target.value })}><option value="">Uncategorized</option>{storefrontCategories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></div>
       <div className="field"><label>Marketplace category</label><select value={productForm.categoryId} onChange={(e) => setProductForm({ ...productForm, categoryId: e.target.value })}><option value="">Storefront only</option>{categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></div>
-      <div className="field"><label>HTTPS image URL (optional)</label><input type="url" value={productForm.imageUrl} onChange={(e) => setProductForm({ ...productForm, imageUrl: e.target.value })} /><small>Updating this field replaces the product's current images with this one. Leave blank to clear images.</small></div>
-      <div className="field"><label>Description and specifications</label><textarea rows="3" maxLength="10000" value={productForm.description} onChange={(e) => setProductForm({ ...productForm, description: e.target.value })} placeholder="Add details customers need to choose this product." /></div>
-    </div><button className="btn btn-primary" disabled={busy}>{editingProductId ? 'Save product changes' : 'Add product'}</button>{editingProductId && <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => { setEditingProductId(''); setProductForm(blankProduct) }}>Cancel edit</button>}</form></section>}
+      <div className="field"><label>Product image URLs</label><textarea rows="4" value={productForm.imageUrls} onChange={(e) => setProductForm({ ...productForm, imageUrls: e.target.value })} placeholder={'https://example.com/product-front.jpg\nhttps://example.com/product-side.jpg'} /><small>One HTTPS image URL per line, up to 10. Saving replaces the current gallery.</small></div>
+      <div className="field"><label>Description</label><textarea rows="3" maxLength="10000" value={productForm.description} onChange={(e) => setProductForm({ ...productForm, description: e.target.value })} placeholder="Describe the product for customers." /></div>
+      <div className="field storefront-specification-field"><label>Product specifications</label><small>Add details such as size, color, material, model, or dimensions.</small>
+        {specificationRows.map((row) => <div className="storefront-specification-row" key={row.id}><input aria-label="Specification name" maxLength="80" placeholder="Size" value={row.label} onChange={(event) => setSpecificationRows((current) => current.map((item) => item.id === row.id ? { ...item, label: event.target.value } : item))} /><input aria-label="Specification value" maxLength="500" placeholder="Large" value={row.value} onChange={(event) => setSpecificationRows((current) => current.map((item) => item.id === row.id ? { ...item, value: event.target.value } : item))} /><button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setSpecificationRows((current) => current.filter((item) => item.id !== row.id))}>Remove</button></div>)}
+        <button type="button" className="btn btn-secondary btn-sm" disabled={busy || specificationRows.length >= 30} onClick={() => setSpecificationRows((current) => [...current, { id: `new-${Date.now()}-${current.length}`, label: '', value: '' }])}>Add specification</button>
+      </div>
+    </div><button className="btn btn-primary" disabled={busy}>{editingProductId ? 'Save product changes' : 'Add product'}</button>{editingProductId && <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => { setEditingProductId(''); setProductForm(blankProduct); setSpecificationRows([]) }}>Cancel edit</button>}</form></section>}
 
-    <section className="card"><div className="section-heading"><div><h2>Product catalog & branch stock</h2><p>Product photos, specifications and prices are shown to customers in your tenant store.</p></div><span className="catalog-count">{products.length} {products.length === 1 ? 'product' : 'products'}</span></div>
+    {isManager && <section className="card"><div className="section-heading"><div><h2>Storefront categories</h2><p>Create categories to organize products in your store. Marketplace categories remain managed separately.</p></div><span className="catalog-count">{storefrontCategories.length} {storefrontCategories.length === 1 ? 'category' : 'categories'}</span></div>
+      <form onSubmit={saveStorefrontCategory} className="store-category-form"><div className="field"><label>{editingCategoryId ? 'Rename category' : 'New category name'}</label><input required maxLength="80" value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Clothing, groceries, electronics…" /></div><button className="btn btn-primary" disabled={busy}>{editingCategoryId ? 'Save category' : 'Add category'}</button>{editingCategoryId && <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => { setEditingCategoryId(''); setCategoryName('') }}>Cancel</button>}</form>
+      {storefrontCategories.map((category) => <div className="credit-plan-row" key={category.id}><span><strong>{category.name}</strong><small>{category.product_count || 0} products</small></span><span className="store-stock-actions"><button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setEditingCategoryId(category.id); setCategoryName(category.name) }}>Rename</button><button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => deleteStorefrontCategory(category)}>Delete</button></span></div>)}
+    </section>}
+
+    <section className="card"><div className="section-heading"><div><h2>Product catalog & branch stock</h2><p>Manage product images, descriptions, specifications, categories, and stock by branch.</p></div><span className="catalog-count">{products.length} {products.length === 1 ? 'product' : 'products'}</span></div>
       <div className="field"><label>Branch for stock management</label><select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)}>{branches.map((branch) => <option value={branch.id} key={branch.id}>{branch.displayName}</option>)}</select></div>
       {!products.length ? <div className="empty-state">No products yet.</div> : products.map((product) => {
         const current = product.stock_by_branch?.find((item) => item.merchantId === selectedBranch)
         const form = stockForm[product.id] || { quantity: current?.quantityAvailable ?? 0, unlimited: current?.unlimitedStock ?? false }
         return <div className="credit-plan-row" key={product.id}>
-          <span><strong>{product.name}</strong><small>{money(product.price)} · {product.listing_type.toLowerCase()} · {product.visible ? 'visible' : 'hidden'}</small></span>
+          <span><strong>{product.name}</strong><small>{money(product.price)} · {product.listing_type.toLowerCase()} · {product.storefront_category_name || 'uncategorized'} · {product.media?.length || 0} photos · {Object.keys(product.specifications || {}).length} specifications · {product.visible ? 'visible' : 'hidden'}</small></span>
           <span className="store-stock-actions">{isManager && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => editProduct(product)}>Edit details</button>}<input aria-label={`Quantity for ${product.name}`} type="number" min="0" max="1000000" value={form.quantity ?? 0} disabled={form.unlimited || busy} onChange={(e) => setStockForm({ ...stockForm, [product.id]: { ...form, quantity: e.target.value } })} />
             {product.listing_type === 'SERVICE' && <label><input type="checkbox" checked={Boolean(form.unlimited)} onChange={(e) => setStockForm({ ...stockForm, [product.id]: { ...form, unlimited: e.target.checked } })} /> Unlimited</label>}
             <button className="btn btn-secondary btn-sm" disabled={!selectedBranch || busy} onClick={() => saveStock(product)}>Save stock</button>

@@ -59,7 +59,7 @@ export default function OperatorTransactionDetail() {
     setNotice('')
     setBusy(true)
     try {
-      await operatorApi.internalTransfer({ sourceTransactionId: txn.id, amount: Number(transferAmount) || undefined })
+      await operatorApi.internalTransfer({ sourceTransactionId: txn.id, merchantId: txn.merchantId, amount: Number(transferAmount) || undefined })
       setNotice('Internal transfer initiated.')
       load()
     } catch (err) {
@@ -77,6 +77,7 @@ export default function OperatorTransactionDetail() {
     try {
       await operatorApi.payout({
         sourceTransactionId: txn.id,
+        merchantId: txn.merchantId,
         amount: Number(payoutForm.amount) || undefined,
         accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined,
         destinationType: payoutForm.destinationType,

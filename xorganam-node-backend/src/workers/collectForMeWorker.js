@@ -133,11 +133,9 @@ async function processCollectForMeJob(job) {
   const payoutDestination = collectionTxn.payout_msisdn || merchant.mobile_money_number
   const payoutBaseAmount = Number(collectionTxn.base_amount ?? collectionTxn.amount)
   let vendorAmount = payoutBaseAmount
-  if (collectionTxn.fee_charged_payer === 'MERCHANT') vendorAmount -= Number(collectionTxn.fee_charged_amount || 0)
   const payoutFee = await computeFee(tenantId, 'PAYOUT', Math.max(0, vendorAmount))
-  if (payoutFee.chargedPayer === 'MERCHANT') vendorAmount -= payoutFee.chargedAmount
   vendorAmount = Math.round(vendorAmount * 100) / 100
-  if (vendorAmount <= 0) throw new Error('Configured fees leave no positive amount for the vendor payout.')
+  if (vendorAmount <= 0) throw new Error('No positive amount is available for the vendor payout.')
   const payoutParentId = transferTxn?.id || collectionTxn.id
   const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT', 'NONE') || await createChildTransaction({
     tenantId,

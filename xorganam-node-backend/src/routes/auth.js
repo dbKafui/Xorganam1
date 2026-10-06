@@ -4,6 +4,7 @@ import { verifyPassword } from '../security/password.js'
 import { signToken } from '../security/jwt.js'
 import { authenticate } from '../middleware/auth.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
+import { asyncHandler } from '../middleware/asyncHandler.js'
 
 export const authRouter = Router()
 
@@ -53,7 +54,7 @@ authRouter.post('/login', async (req, res) => {
   res.json({ mfaRequired: true, mfaEnrollmentRequired: !user.mfa_enabled, challengeToken, user: mapUser(user) })
 })
 
-authRouter.get('/me', authenticate, async (req, res) => {
+authRouter.get('/me', authenticate, asyncHandler(async (req, res) => {
   const { rows } = await query(
     `SELECT u.id, u.tenant_id, u.merchant_id, u.first_name, u.last_name, u.email, u.role, u.is_active,
             t.company_name AS tenant_company_name
@@ -65,8 +66,18 @@ authRouter.get('/me', authenticate, async (req, res) => {
 
   if (rows.length === 0) return res.status(401).json({ message: 'Session no longer valid.' })
 
-  res.json(mapUser(rows[0]))
-})
+  const { rows: permissions } = await query(
+    `SELECT permission_type, resource_id FROM user_permissions WHERE user_id = $1`, [req.user.id]
+  )
+
+  res.json({
+    ...mapUser(rows[0]),
+    permissions: permissions.map((permission) => ({
+      permissionType: permission.permission_type,
+      resourceId: permission.resource_id
+    }))
+  })
+}))
 
 function mapUser(row) {
   return {

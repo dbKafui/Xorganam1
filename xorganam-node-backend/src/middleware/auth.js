@@ -1,6 +1,7 @@
 import { verifyToken } from '../security/jwt.js'
 import { query } from '../db/pool.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
+import { ROLE_PERMISSIONS } from '../constants/permissions.js'
 
 /**
  * Verifies the Bearer token and attaches req.user = { id, tenantId, role }.
@@ -149,12 +150,14 @@ export function resolveTenantScope(req, requestedTenantId) {
  * @param resourceId Optional resource ID (e.g., merchant ID)
  * @returns true if the user has the permission, false otherwise
  */
-export async function userHasPermission(userId, permissionType, resourceId = null) {
+export async function userHasPermission(userId, permissionType, resourceId = null, role = null) {
+  if (role === 'PLATFORM_ADMIN' || role === 'TENANT_ADMIN') return true
+  if (ROLE_PERMISSIONS[role]?.includes(permissionType)) return true
   const { rows } = await query(
     `SELECT 1 FROM user_permissions
       WHERE user_id = $1
         AND permission_type = $2
-        AND (resource_id IS NULL OR resource_id = $3)
+        AND (resource_id IS NULL OR ($3::uuid IS NOT NULL AND resource_id = $3))
       LIMIT 1`,
     [userId, permissionType, resourceId]
   )
@@ -173,11 +176,19 @@ export function requirePermission(permissionType) {
     if (req.user.isPlatformAdmin) return next()
 
     // Check if user has the permission
-    const hasPermission = await userHasPermission(req.user.id, permissionType)
-    if (!hasPermission) {
-      return res.status(403).json({ message: `You do not have ${permissionType} permission.` })
+    try {
+      const resourceId = req.params.merchantId || req.query.merchantId || req.body?.merchantId || null
+      if (resourceId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(resourceId))) {
+        return res.status(400).json({ message: 'merchantId must be a valid UUID.' })
+      }
+      const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId, req.user.role)
+      if (!hasPermission) {
+        return res.status(403).json({ message: `You do not have ${permissionType} permission.` })
+      }
+      next()
+    } catch (error) {
+      next(error)
     }
-    next()
   }
 }
 
@@ -197,10 +208,14 @@ export function requireResourcePermission(permissionType, resourceIdParam) {
       return res.status(400).json({ message: `${resourceIdParam} is required.` })
     }
 
-    const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId)
-    if (!hasPermission) {
-      return res.status(403).json({ message: `You do not have ${permissionType} permission for this resource.` })
+    try {
+      const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId, req.user.role)
+      if (!hasPermission) {
+        return res.status(403).json({ message: `You do not have ${permissionType} permission for this resource.` })
+      }
+      next()
+    } catch (error) {
+      next(error)
     }
-    next()
   }
 }

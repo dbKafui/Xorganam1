@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback } from 'react'
 import { operatorAuth } from '../api/client'
+import { hasPermission as checkPermission } from '../constants/permissions'
 
 const OperatorAuthContext = createContext(null)
 
@@ -39,6 +40,7 @@ export function OperatorAuthProvider({ children }) {
     if (!result.mfaRequired && result.token) {
       operatorAuth.saveSession(result)
       setUser(result.user)
+      operatorAuth.me().then(setUser).catch(() => {})
     }
     return result
   }, [])
@@ -47,6 +49,7 @@ export function OperatorAuthProvider({ children }) {
     const result = await operatorAuth.verifyMfa(challengeToken, code)
     operatorAuth.saveSession(result)
     setUser(result.user)
+    operatorAuth.me().then(setUser).catch(() => {})
     return result.user
   }, [])
 
@@ -66,8 +69,13 @@ export function OperatorAuthProvider({ children }) {
     [user]
   )
 
+  const hasPermission = useCallback(
+    (permissionType, resourceId = null) => !!user && checkPermission(user.role, user.permissions || [], permissionType, resourceId),
+    [user]
+  )
+
   return (
-    <OperatorAuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, register, logout, hasMinRole }}>
+    <OperatorAuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, register, logout, hasMinRole, hasPermission }}>
       {children}
     </OperatorAuthContext.Provider>
   )

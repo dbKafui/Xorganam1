@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
-import { authenticate, requireRole, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { authenticate, requireRole, requirePermission, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 
 export const merchantsRouter = Router()
@@ -21,10 +21,18 @@ function scopeOrRespond(req, res, requestedTenantId) {
 
 merchantsRouter.get(
   '/',
+  requirePermission('VIEW_MERCHANTS'),
   asyncHandler(async (req, res) => {
     const listAllTenants = req.user.isPlatformAdmin && !req.query.tenantId
     const tenantId = listAllTenants ? null : scopeOrRespond(req, res, req.query.tenantId)
     if (!listAllTenants && !tenantId) return
+    let merchantId = req.query.merchantId || null
+    if (req.user.merchantId) {
+      if (merchantId && String(merchantId) !== String(req.user.merchantId)) {
+        return res.status(403).json({ message: 'You do not have access to other merchants.' })
+      }
+      merchantId = String(req.user.merchantId)
+    }
 
     const { rows } = await query(
       `SELECT m.id, m.tenant_id, t.company_name AS tenant_company_name,
@@ -35,19 +43,17 @@ merchantsRouter.get(
          JOIN tenants t ON t.id = m.tenant_id
          LEFT JOIN merchant_settings ms ON ms.tenant_id = m.tenant_id AND ms.merchant_id = m.id
         WHERE ($1::uuid IS NULL OR m.tenant_id = $1)
+          AND ($2::uuid IS NULL OR m.id = $2)
         ORDER BY m.onboarded_at DESC`,
-      [tenantId]
+      [tenantId, merchantId]
     )
-    const scopedRows = req.user.role === 'TENANT_BRANCH_MANAGER'
-      ? rows.filter((row) => String(row.id) === String(req.user.merchantId))
-      : rows
-    res.json(scopedRows.map(mapMerchant))
+    res.json(rows.map(mapMerchant))
   })
 )
 
 merchantsRouter.post(
   '/',
-  requireRole('TENANT_MANAGER'),
+  requirePermission('MANAGE_MERCHANTS'),
   asyncHandler(async (req, res) => {
     const tenantId = scopeOrRespond(req, res, req.body?.tenantId)
     if (!tenantId) return
@@ -126,6 +132,7 @@ merchantsRouter.patch(
 
 merchantsRouter.get(
   '/:merchantId',
+  requirePermission('VIEW_MERCHANTS'),
   asyncHandler(async (req, res) => {
     const { rows } = await query(
       `SELECT m.id, m.tenant_id, m.display_name, m.mobile_money_number, m.network_provider, m.payout_mode,
@@ -140,8 +147,8 @@ merchantsRouter.get(
 
     const merchant = rows[0]
     if (scopeOrRespond(req, res, merchant.tenant_id) === null) return
-    if (req.user.role === 'TENANT_BRANCH_MANAGER' && String(merchant.id) !== String(req.user.merchantId)) {
-      return res.status(403).json({ message: 'Branch managers can only access their assigned merchant.' })
+    if (req.user.merchantId && String(merchant.id) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'You can only access your assigned merchant.' })
     }
 
     res.json({
@@ -156,11 +163,14 @@ merchantsRouter.get(
 
 merchantsRouter.put(
   '/:merchantId',
-  requireRole('TENANT_MANAGER'),
+  requirePermission('MANAGE_MERCHANTS'),
   asyncHandler(async (req, res) => {
     const existing = await query('SELECT tenant_id FROM merchants WHERE id = $1', [req.params.merchantId])
     if (existing.rows.length === 0) return res.status(404).json({ message: 'Merchant not found.' })
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
+    if (req.user.merchantId && String(req.params.merchantId) !== String(req.user.merchantId)) {
+      return res.status(403).json({ message: 'You can only manage your assigned merchant.' })
+    }
 
     const { displayName, mobileMoneyNumber, networkProvider, payoutMode, isActive } = req.body || {}
 

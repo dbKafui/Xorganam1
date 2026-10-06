@@ -10,6 +10,7 @@ export default function Storefront() {
   const marketplaceEntry = searchParams.get('source') === 'marketplace'
   const [data, setData] = useState(null)
   const [cart, setCart] = useState({})
+  const [selectedCategoryId, setSelectedCategoryId] = useState('')
   const [branchId, setBranchId] = useState('')
   const [fulfillment, setFulfillment] = useState('PICKUP')
   const [address, setAddress] = useState('')
@@ -25,15 +26,35 @@ export default function Storefront() {
   const [cardRedirectHtml, setCardRedirectHtml] = useState('')
 
   useEffect(() => {
+    let current = true
+    setData(null)
+    setError('')
+    setBranchId('')
+    setCart({})
+    setSelectedCategoryId('')
+    setPayment(null)
+    setCardRedirectHtml('')
+    setNotice('')
+    setFulfillment('PICKUP')
+    setAddress('')
+    setCustomerPhone('')
+    setCustomerName('')
+    setPaymentMethod('EGANOW')
+    setCollectionMethod('MOMO')
+    setCard({ number: '', name: '', month: '', year: '', cvv: '' })
     publicApi.getStorefront(slug).then((result) => {
+      if (!current) return
       setData(result)
       if (result.branches?.[0]) setBranchId(result.branches[0].id)
-    }).catch((requestError) => setError(requestError.message))
+    }).catch((requestError) => {
+      if (current) setError(requestError.message)
+    })
+    return () => { current = false }
   }, [slug])
 
   useEffect(() => {
-    if (data?.creditDefaults?.enabled) setPaymentMethod('CREDIT')
-  }, [data?.creditDefaults?.enabled])
+    setPaymentMethod(data?.creditDefaults?.enabled ? 'CREDIT' : 'EGANOW')
+  }, [slug, data?.creditDefaults?.enabled])
 
   useEffect(() => {
     if (!payment?.reference || payment.status !== 'PENDING_PAYMENT') return undefined
@@ -59,28 +80,48 @@ export default function Storefront() {
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [payment?.reference, payment?.status])
 
-  const products = data?.products || []
+  const allProducts = data?.products || []
+  const products = selectedCategoryId ? allProducts.filter((product) => product.storefront_category_id === selectedCategoryId) : allProducts
   const blocks = data?.storefront?.branding_config?.blocks || []
   const hasProductGrid = blocks.some((block) => block.type === 'product_grid')
-  const total = useMemo(() => products.reduce((sum, product) => sum + Number(product.price) * Number(cart[product.id] || 0), 0), [products, cart])
+  const total = useMemo(() => allProducts.reduce((sum, product) => sum + Number(product.price) * Number(cart[product.id] || 0), 0), [allProducts, cart])
   const theme = data?.storefront?.branding_config?.theme || {}
+  const inventoryBranchId = fulfillment === 'DELIVERY' ? data?.storefront?.default_fulfillment_branch_id : branchId
+
+  function stockFor(product) {
+    const stock = product.stock_by_branch?.find((item) => item.merchantId === inventoryBranchId)
+    if (!stock) return { available: false, quantity: 0, unlimited: false }
+    if (stock.unlimitedStock) return { available: true, quantity: 100, unlimited: true }
+    const quantity = Math.max(0, Number(stock.quantityAvailable) || 0)
+    return { available: quantity > 0, quantity: Math.min(100, quantity), unlimited: false }
+  }
 
   function add(product) {
+    const stock = stockFor(product)
     setError(''); setNotice(''); setPayment(null)
-    setCart((current) => ({ ...current, [product.id]: Number(current[product.id] || 0) + 1 }))
+    if (!stock.available) return
+    setCart((current) => ({ ...current, [product.id]: Math.min(stock.quantity, 100, Number(current[product.id] || 0) + 1) }))
   }
   function changeQty(productId, value) {
-    const quantity = Number(value)
+    const quantity = Math.trunc(Number(value))
+    const product = allProducts.find((item) => item.id === productId)
+    const maxQuantity = product ? stockFor(product).quantity : 100
     setCart((current) => {
       const next = { ...current }
-      if (!quantity || quantity < 0) delete next[productId]
-      else next[productId] = Math.min(100, quantity)
+      if (!quantity || quantity < 0 || maxQuantity <= 0) delete next[productId]
+      else next[productId] = Math.min(100, maxQuantity, quantity)
       return next
     })
   }
 
   async function checkout(event) {
     event.preventDefault(); setSubmitting(true); setError(''); setNotice('')
+    const unavailable = allProducts.find((product) => cart[product.id] && Number(cart[product.id]) > stockFor(product).quantity)
+    if (unavailable) {
+      setSubmitting(false)
+      setError(`${unavailable.name} no longer has enough stock at the selected fulfillment location.`)
+      return
+    }
     const items = Object.entries(cart).map(([productId, quantity]) => ({ productId, quantity }))
     try {
       const createOrder = marketplaceEntry ? publicApi.createMarketplaceOrder : publicApi.createStorefrontOrder
@@ -105,11 +146,15 @@ export default function Storefront() {
   if (!data) return <main className="storefront-shell"><h1>Storefront unavailable</h1><p>{error}</p><Link to="/marketplace">Browse marketplace</Link></main>
 
   function ProductCard({ product }) {
-    const image = product.media?.[0]
+    const gallery = product.media || []
+    const stock = stockFor(product)
+    const quantityInCart = Number(cart[product.id] || 0)
     return <article className="store-product-card">
-      {image ? <img src={image.url} alt={image.altText || product.name} loading="lazy" /> : <div className="store-product-placeholder">{product.listing_type === 'SERVICE' ? 'Service' : 'Product'}</div>}
-      <div className="store-product-copy"><h3>{product.name}</h3><p>{product.description}</p><strong>{money(product.price)}</strong>
-        <button className="btn btn-primary" type="button" onClick={() => add(product)}>Add to cart</button>
+      {gallery.length ? <div className="store-product-images">{gallery.map((image) => <img src={image.url} alt={image.altText || product.name} loading="lazy" key={image.id || image.position || image.url} />)}</div> : <div className="store-product-placeholder">{product.listing_type === 'SERVICE' ? 'Service' : 'Product'}</div>}
+      <div className="store-product-copy">{product.storefront_category_name && <span className="store-category-tag">{product.storefront_category_name}</span>}<h3>{product.name}</h3><p>{product.description}</p><strong>{money(product.price)}</strong>
+        {Object.keys(product.specifications || {}).length > 0 && <dl className="store-product-specs">{Object.entries(product.specifications).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>}
+        <small>{!stock.available ? 'Out of stock at this location' : stock.unlimited ? 'Available' : `${stock.quantity} available`}</small>
+        <button className="btn btn-primary" type="button" disabled={!stock.available || quantityInCart >= stock.quantity} onClick={() => add(product)}>{!stock.available ? 'Unavailable' : quantityInCart >= stock.quantity ? 'Stock limit reached' : 'Add to cart'}</button>
       </div>
     </article>
   }
@@ -120,6 +165,13 @@ export default function Storefront() {
       {theme.logoUrl && <img className="store-logo" src={theme.logoUrl} alt={`${data.storefront.vendor_name} logo`} />}
       <div><p className="eyebrow">Vendor storefront</p><h1>{data.storefront.vendor_name}</h1></div>
     </header>
+    <section className="storefulfillment-location">
+      <div className="field"><label htmlFor="store-fulfillment">Fulfillment</label><select id="store-fulfillment" value={fulfillment} onChange={(event) => setFulfillment(event.target.value)}><option value="PICKUP">Pickup</option><option value="DELIVERY" disabled={!data.storefront.default_fulfillment_branch_id}>Delivery</option></select></div>
+      {fulfillment === 'PICKUP'
+        ? <div className="field"><label htmlFor="store-branch">Pickup location</label><select id="store-branch" value={branchId} onChange={(event) => setBranchId(event.target.value)}>{data.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.display_name}</option>)}</select></div>
+        : <p>Delivery inventory is checked at the vendor’s configured fulfillment location.</p>}
+    </section>
+    {data.categories?.length > 0 && <div className="store-category-filter"><label htmlFor="store-category-filter">Browse category</label><select id="store-category-filter" value={selectedCategoryId} onChange={(event) => setSelectedCategoryId(event.target.value)}><option value="">All products</option>{data.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>}
     {blocks.map((block, index) => {
       if (block.type === 'hero') return <section key={index} className="store-hero" style={{ backgroundColor: block.props.backgroundColor, color: block.props.textColor, ...block.props.style, backgroundImage: block.props.imageUrl ? `linear-gradient(90deg,rgba(0,0,0,.48),rgba(0,0,0,.08)),url("${block.props.imageUrl}")` : undefined }}>
         <h2>{block.props.headline}</h2>{block.props.subheadline && <p>{block.props.subheadline}</p>}
@@ -136,10 +188,10 @@ export default function Storefront() {
     {Object.keys(cart).length > 0 && <aside className="store-cart card">
       <div className="portal-header"><h2>Your cart</h2><strong>{money(total)}</strong></div>
       <form onSubmit={checkout}>
-        {products.filter((product) => cart[product.id]).map((product) => <div className="store-cart-line" key={product.id}><label>{product.name} · {money(product.price)}</label><input aria-label={`Quantity for ${product.name}`} type="number" min="0" max="100" value={cart[product.id]} onChange={(e) => changeQty(product.id, e.target.value)} /></div>)}
+        {allProducts.filter((product) => cart[product.id]).map((product) => <div className="store-cart-line" key={product.id}><label>{product.name} · {money(product.price)}</label><input aria-label={`Quantity for ${product.name}`} type="number" min="0" max="100" value={cart[product.id]} onChange={(e) => changeQty(product.id, e.target.value)} /></div>)}
         <div className="two-col">
-          <div className="field"><label>Fulfillment</label><select value={fulfillment} onChange={(e) => setFulfillment(e.target.value)}><option value="PICKUP">Pickup</option><option value="DELIVERY" disabled={!data.storefront.default_fulfillment_branch_id}>Delivery</option></select></div>
-          {fulfillment === 'PICKUP' ? <div className="field"><label>Pickup branch</label><select required value={branchId} onChange={(e) => setBranchId(e.target.value)}>{data.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.display_name}</option>)}</select></div> : <div className="field"><label>Delivery address</label><input required maxLength="1000" value={address} onChange={(e) => setAddress(e.target.value)} /></div>}
+          {fulfillment === 'DELIVERY' && <div className="field"><label>Delivery address</label><input required maxLength="1000" value={address} onChange={(e) => setAddress(e.target.value)} />
+          </div>}
           <div className="field"><label>Your mobile number</label><input required inputMode="tel" autoComplete="tel" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} placeholder="0551234567" /></div>
           <div className="field"><label>Name (optional)</label><input maxLength="160" value={customerName} onChange={(e) => setCustomerName(e.target.value)} /></div>
         </div>
