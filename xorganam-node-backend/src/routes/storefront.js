@@ -201,6 +201,12 @@ async function startOrderCheckout(req, res, marketplaceOrder) {
     const result = await initiateCollection(prepared.order.merchant_id || prepared.order.merchantId, {
       amount: prepared.collectionAmount,
       msisdn: prepared.customerIdentifier,
+      collectionMethod: req.body?.collectionMethod,
+      cardNumber: req.body?.cardNumber,
+      cardholderName: req.body?.cardholderName,
+      expiryDateMonth: req.body?.expiryDateMonth,
+      expiryDateYear: req.body?.expiryDateYear,
+      cvv: req.body?.cvv,
       narration: `Storefront order ${prepared.order.id}`,
       orderId: prepared.order.id,
       creditPlanId: prepared.paymentMethod === 'CREDIT' ? prepared.credit.planId : null
@@ -212,7 +218,8 @@ async function startOrderCheckout(req, res, marketplaceOrder) {
     await query(`UPDATE orders SET collection_transaction_id = $2 WHERE id = $1 AND status = 'PENDING_PAYMENT'`, [prepared.order.id, result.transactionId])
     res.status(201).json({ orderId: prepared.order.id, status: 'PENDING_PAYMENT', totalAmount: prepared.totalAmount,
       paymentAmount: prepared.collectionAmount, paymentMethod: prepared.paymentMethod, reference: result.internalReference,
-      message: prepared.paymentMethod === 'CREDIT' ? 'Approve the down-payment prompt on your phone.' : result.message })
+      redirectHtml: result.redirectHtml || null,
+      message: String(req.body?.collectionMethod || 'MOMO').toUpperCase() === 'CARD' ? 'Complete card verification to finish payment.' : prepared.paymentMethod === 'CREDIT' ? 'Approve the down-payment prompt on your phone.' : result.message })
   } catch (error) {
     if (error instanceof CollectionRejectedError) {
       await cancelAndRestock(prepared.order.id, { onlyPending: true, reason: error.message })
@@ -233,7 +240,7 @@ storefrontRouter.get('/', asyncHandler(async (req, res) => {
          ON m.tenant_id = s.tenant_id AND m.is_default_fulfillment_branch
       WHERE s.tenant_id = $1`, [tenantId]
   )
-  if (!rows.length) return res.status(404).json({ message: 'Storefront has not been configured.' })
+  if (!rows.length) return res.json(null)
   res.json(rows[0])
 }))
 

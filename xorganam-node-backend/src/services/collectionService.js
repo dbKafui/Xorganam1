@@ -3,6 +3,7 @@ import { query, withTransaction } from '../db/pool.js'
 import { createEganowClientForTenant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
 import { getTenantEganowContext, TenantCredentialsError } from './credentialsService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
+import { computeFee } from './feeService.js'
 
 export class CollectionRejectedError extends Error {}
 
@@ -40,6 +41,23 @@ function inferPaypartnerCodeFromMsisdn(msisdn) {
   return null
 }
 
+function validCardNumber(value) {
+  const digits = String(value || '').replace(/[\s-]/g, '')
+  if (!/^\d{12,19}$/.test(digits)) return false
+  let sum = 0
+  let double = false
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let digit = Number(digits[index])
+    if (double) {
+      digit *= 2
+      if (digit > 9) digit -= 9
+    }
+    sum += digit
+    double = !double
+  }
+  return sum % 10 === 0
+}
+
 /**
  * Looks up a merchant by id with no tenant assumption - used by the
  * anonymous checkout flow, which only ever knows a merchantId (the
@@ -67,7 +85,7 @@ export async function findMerchantForCollection(merchantId) {
  * @param {{ amount: number, msisdn: string, network?: string, narration?: string, payoutMsisdn?: string }} input
  * @returns {Promise<{ transactionId: string, internalReference: string, status: string, tenantId: string }>}
  */
-export async function initiateCollection(merchantId, { amount, msisdn, network, narration, payoutMsisdn = null, callback = null, creditPlanId = null, creditInstallmentId = null, orderId = null }) {
+export async function initiateCollection(merchantId, { amount, msisdn, network, narration, collectionMethod = 'MOMO', cardNumber = null, cardholderName = null, expiryDateMonth = null, expiryDateYear = null, cvv = null, payoutMsisdn = null, callback = null, creditPlanId = null, creditInstallmentId = null, orderId = null }) {
   const merchant = await findMerchantForCollection(merchantId)
 
   if (!merchant || !merchant.is_active) {
@@ -88,9 +106,14 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
   if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(Math.round(amount * 100)) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
     throw new CollectionRejectedError('Amount must be a valid positive amount with at most two decimal places.')
   }
-  if (!msisdn) {
-    throw new CollectionRejectedError('A mobile number is required.')
-  }
+  const collectionFee = await computeFee(merchant.tenant_id, 'COLLECTION', amount)
+  const customerFee = collectionFee.chargedPayer === 'CUSTOMER' ? collectionFee.configuredChargeAmount : 0
+  const gatewayAmount = Math.round((Number(amount) + Number(customerFee || 0)) * 100) / 100
+  const normalizedCollectionMethod = String(collectionMethod || 'MOMO').toUpperCase()
+  if (!['MOMO', 'CARD'].includes(normalizedCollectionMethod)) throw new CollectionRejectedError('Choose Mobile Money or Card collection.')
+  if (normalizedCollectionMethod === 'MOMO' && !msisdn) throw new CollectionRejectedError('A mobile number is required.')
+  if (normalizedCollectionMethod === 'CARD' && !validCardNumber(cardNumber)) throw new CollectionRejectedError('Enter a valid payment card number.')
+  if (normalizedCollectionMethod === 'CARD' && (!String(cardholderName || '').trim() || !Number.isInteger(Number(expiryDateMonth)) || Number(expiryDateMonth) < 1 || Number(expiryDateMonth) > 12 || !/^\d{2}$/.test(String(expiryDateYear || '')) || !/^\d{3,4}$/.test(String(cvv || '')))) throw new CollectionRejectedError('Enter the cardholder name, expiry date, and valid CVV.')
 
   // Load tenant-scoped config before inserting the transaction. The Eganow
   // client will use the tenant DB base URL first, then its developer fallback.
@@ -105,8 +128,8 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
   }
 
   const internalReference = `COL-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-  const normalizedMsisdn = normalizeMsisdn(msisdn)
-  if (!/^233[0-9]{9}$/.test(normalizedMsisdn)) {
+  const normalizedMsisdn = msisdn ? normalizeMsisdn(msisdn) : null
+  if ((normalizedCollectionMethod === 'MOMO' || normalizedMsisdn) && !/^233[0-9]{9}$/.test(normalizedMsisdn || '')) {
     throw new CollectionRejectedError('A valid Ghana mobile number is required.')
   }
   const normalizedPayoutMsisdn = payoutMsisdn ? normalizeMsisdn(payoutMsisdn) : null
@@ -191,28 +214,34 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
         `INSERT INTO transactions
            (tenant_id, merchant_id, type, status, amount, currency, internal_reference,
             collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn,
-            notification_sent, credit_plan_id, credit_installment_id, order_id)
-         VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $5, 'INITIATED', $6, FALSE, $7, $8, $9)
+            notification_sent, credit_plan_id, credit_installment_id, order_id, base_amount,
+            fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+         VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $5, 'INITIATED', $6, FALSE, $7, $8, $9,
+                 $10, $11, $12, $13, $14, $15)
          RETURNING id`,
-        [merchant.tenant_id, merchant.id, amount, internalReference, normalizedMsisdn, normalizedPayoutMsisdn,
-          validatedPlanId, validatedInstallmentId, validatedOrderId]
+        [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedPayoutMsisdn,
+          validatedPlanId, validatedInstallmentId, validatedOrderId, amount, collectionFee.chargedAmount,
+          collectionFee.chargedPayer, collectionFee.eganowCost, collectionFee.platformMargin, collectionFee.feeConfigVersionId]
       )
       return inserted.rows[0].id
     })
   } else {
     const { rows } = await query(
       `INSERT INTO transactions
-         (tenant_id, merchant_id, type, status, amount, currency, internal_reference, collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn, notification_sent)
-       VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $6, 'INITIATED', $7, FALSE)
+         (tenant_id, merchant_id, type, status, amount, currency, internal_reference, collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn, notification_sent,
+          base_amount, fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+       VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $6, 'INITIATED', $7, FALSE, $8, $9, $10, $11, $12, $13)
        RETURNING id`,
-      [merchant.tenant_id, merchant.id, amount, internalReference, normalizedMsisdn, normalizedMsisdn, normalizedPayoutMsisdn]
+      [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedMsisdn, normalizedPayoutMsisdn,
+        amount, collectionFee.chargedAmount, collectionFee.chargedPayer, collectionFee.eganowCost,
+        collectionFee.platformMargin, collectionFee.feeConfigVersionId]
     )
     transactionId = rows[0].id
   }
 
   try {
     let paypartnerCode
-    const inferredPaypartnerCode = inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
+    const inferredPaypartnerCode = normalizedCollectionMethod === 'CARD' ? 'CARDGATEWAY' : inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
 
     if (inferredPaypartnerCode) {
       paypartnerCode = inferredPaypartnerCode
@@ -236,7 +265,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     if (String(callbackUrl).includes('localhost') || String(callbackUrl).includes('127.0.0.1') || String(callbackUrl).includes('::1')) {
     }
 
-    if (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn)) {
+    if (normalizedCollectionMethod === 'MOMO' && (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn))) {
       throw new CollectionRejectedError('A valid phone number is required in local or international format (e.g., 0244123456 or 233244123456).')
     }
 
@@ -256,12 +285,14 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       return 'GH0233'
     }
 
-    const countryCode = inferCountryCode(normalizedMsisdn)
+    const countryCode = normalizedMsisdn ? inferCountryCode(normalizedMsisdn) : 'GH0233'
+    let accountName = merchant.display_name
+
+    if (normalizedCollectionMethod === 'MOMO') {
 
     const kycBody = {
       paypartnerCode,
       mobileNumber: normalizedMsisdn,
-      accountNoOrCardNoOrMSISDN: normalizedMsisdn,
       languageId: 'en',
       countryCode
     }
@@ -320,7 +351,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       // continue to attempt collection
     }
 
-    const accountName = kycResponse?.data?.accountName || null
+    accountName = kycResponse?.data?.accountName || accountName
 
     // Persist the KYC / name-enquiry result for display in transaction views
     try {
@@ -330,17 +361,22 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     } catch {
       // Name enquiry is supplemental; do not print customer data or provider errors.
     }
+    }
 
     const body = {
       paypartnerCode,
       amount,
-      accountNoOrCardNoOrMSISDN: normalizedMsisdn,
-      countryCode,
-      accountName: accountName || merchant.display_name,
+      accountNoOrCardNoOrMSISDN: normalizedMsisdn || String(cardNumber).replace(/[\s-]/g, ''),
+      accountName: normalizedCollectionMethod === 'CARD' ? String(cardholderName).trim() : accountName || merchant.display_name,
       transactionId: internalReference,
       transCurrencyIso: 'GHS',
       languageId: 'en',
       callback: callbackUrl
+    }
+    if (normalizedCollectionMethod === 'CARD') {
+      body.expiryDateMonth = Number(expiryDateMonth)
+      body.expiryDateYear = Number(expiryDateYear)
+      body.cvv = String(cvv)
     }
     
     // Include narration only if provided (avoid sending undefined/null)
@@ -348,7 +384,8 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       body.narration = narration
     }
 
-    const response = await client.post('/api/transactions/collection', body)
+    body.amount = gatewayAmount
+    const response = await client.post(normalizedCollectionMethod === 'CARD' ? '/api/transactions/card/collect' : '/api/transactions/collection', body)
 
     const normalized = normalizeEganowResponse(response.data)
 
@@ -378,6 +415,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       internalReference,
       status: 'PENDING',
       paymentGatewayStatus: gatewayStatus,
+      redirectHtml: normalized.redirectHtml || response.data?.redirectHtml || response.data?.data?.redirectHtml || null,
       message: 'Transaction initiated.',
       tenantId: merchant.tenant_id
     }

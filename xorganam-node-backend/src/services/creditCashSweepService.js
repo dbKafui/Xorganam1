@@ -104,7 +104,7 @@ async function processCashSweep(parentId) {
   }
 
   if (leg.eganow_reference) {
-    const status = await queryTransactionStatus(sweep.tenant_id, leg.eganow_reference)
+    const status = await queryTransactionStatus(sweep.tenant_id, leg.internal_reference)
     if (isGatewaySuccess(status.status)) return markCashLegPaid(parentId, leg.id, status.status)
     if (isGatewayFailure(status.status)) return markCashLegFailed(parentId, leg.id, status.status)
     await query(`UPDATE institution_sweep_ledger SET status = 'PENDING', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])

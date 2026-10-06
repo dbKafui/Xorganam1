@@ -56,14 +56,14 @@ async function processExpiredOrder() {
       await markStorefrontOrderPaid(tx, collection.id)
       return { orderId: order.id, placed: true }
     }
-    if (collection.status !== 'PENDING' || !collection.eganow_reference) {
+    if (collection.status !== 'PENDING' || !collection.internal_reference) {
       return { orderId: order.id, pendingReconciliation: true }
     }
 
     // Keep the order row locked through the authoritative Eganow check and
     // compare-and-swap cancellation, so a concurrent webhook cannot both
     // place the order and release its stock.
-    const result = await queryTransactionStatus(order.tenant_id, collection.eganow_reference)
+    const result = await queryTransactionStatus(order.tenant_id, collection.internal_reference)
     if (isGatewaySuccess(result.status)) {
       await tx.query(
         `UPDATE transactions SET status = 'RECEIVED', payment_gateway_status = $2,

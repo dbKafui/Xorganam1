@@ -8,12 +8,62 @@ import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewayS
 import { reconcileTransaction } from '../services/reconciliationService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
+import { processSplitPayout } from '../services/splitPaymentService.js'
+import { computeFee } from '../services/feeService.js'
 
 // No env-level Eganow callback fallback: tenant-stored callback must be used.
 
 export const transactionsRouter = Router()
 
 transactionsRouter.use(authenticate)
+
+transactionsRouter.get('/fee-config', requireRole('TENANT_ADMIN'), asyncHandler(async (req, res) => {
+  const tenantId = scopeOrRespond(req, res, req.query.tenantId)
+  if (!tenantId) return
+  const { rows } = await query(`SELECT id, stage, charge_calc_type, charge_flat_amount, charge_percentage,
+      charge_cap_amount, charge_payer, eganow_cost_calc_type, eganow_cost_flat_amount,
+      eganow_cost_percentage, eganow_cost_cap_amount, effective_from
+    FROM fee_config_versions WHERE tenant_id = $1 AND effective_to IS NULL ORDER BY stage`, [tenantId])
+  res.json({ feeConfigs: rows })
+}))
+
+transactionsRouter.put('/fee-config', requireRole('TENANT_ADMIN'), asyncHandler(async (req, res) => {
+  const tenantId = scopeOrRespond(req, res, req.body?.tenantId)
+  if (!tenantId) return
+  const configs = req.body?.feeConfigs
+  const calcTypes = new Set(['FLAT', 'PERCENTAGE', 'PERCENTAGE_WITH_CAP'])
+  const stages = new Set(['COLLECTION', 'PAYOUT'])
+  const payers = new Set(['CUSTOMER', 'MERCHANT', 'WAIVED'])
+  if (!Array.isArray(configs) || configs.length < 1 || configs.length > 2) return res.status(400).json({ message: 'Provide one collection and/or payout fee configuration.' })
+  const seen = new Set()
+  for (const item of configs) {
+    if (!stages.has(item.stage) || seen.has(item.stage) || !calcTypes.has(item.chargeCalcType) || !calcTypes.has(item.eganowCostCalcType) || !payers.has(item.chargePayer) || (item.stage === 'PAYOUT' && item.chargePayer === 'CUSTOMER')) return res.status(400).json({ message: 'Fee stage, calculation type, or payer is invalid.' })
+    seen.add(item.stage)
+    for (const value of [item.chargeFlatAmount, item.chargePercentage, item.chargeCapAmount, item.eganowCostFlatAmount, item.eganowCostPercentage, item.eganowCostCapAmount]) {
+      if (value != null && (!Number.isFinite(Number(value)) || Number(value) < 0)) return res.status(400).json({ message: 'Fee amounts and rates must be non-negative numbers.' })
+    }
+    if (['PERCENTAGE', 'PERCENTAGE_WITH_CAP'].includes(item.chargeCalcType) && (!Number.isFinite(Number(item.chargePercentage)) || Number(item.chargePercentage) > 100)) return res.status(400).json({ message: 'Fee percentages must be between 0 and 100.' })
+    if (['PERCENTAGE', 'PERCENTAGE_WITH_CAP'].includes(item.eganowCostCalcType) && (!Number.isFinite(Number(item.eganowCostPercentage)) || Number(item.eganowCostPercentage) > 100)) return res.status(400).json({ message: 'Eganow cost percentages must be between 0 and 100.' })
+    if (item.chargeCalcType === 'FLAT' && item.chargeFlatAmount == null || item.chargeCalcType === 'PERCENTAGE_WITH_CAP' && item.chargeCapAmount == null) return res.status(400).json({ message: 'Provide the flat fee or percentage cap required by the selected calculation.' })
+    if (item.eganowCostCalcType === 'FLAT' && item.eganowCostFlatAmount == null || item.eganowCostCalcType === 'PERCENTAGE_WITH_CAP' && item.eganowCostCapAmount == null) return res.status(400).json({ message: 'Provide the Eganow flat cost or percentage cap required by the selected calculation.' })
+  }
+  await withTransaction(async (tx) => {
+    for (const item of configs) {
+      await tx.query(`UPDATE fee_config_versions SET effective_to = now()
+        WHERE tenant_id = $1 AND stage = $2 AND effective_to IS NULL`, [tenantId, item.stage])
+      await tx.query(`INSERT INTO fee_config_versions
+        (tenant_id, stage, charge_calc_type, charge_flat_amount, charge_percentage, charge_cap_amount,
+         charge_payer, eganow_cost_calc_type, eganow_cost_flat_amount, eganow_cost_percentage,
+         eganow_cost_cap_amount, created_by_user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [tenantId, item.stage, item.chargeCalcType, item.chargeFlatAmount ?? null, item.chargePercentage ?? null,
+        item.chargeCapAmount ?? null, item.chargePayer, item.eganowCostCalcType,
+        item.eganowCostFlatAmount ?? null, item.eganowCostPercentage ?? null,
+        item.eganowCostCapAmount ?? null, req.user.id])
+    }
+  })
+  res.json({ updated: [...seen] })
+}))
 
 function scopeOrRespond(req, res, requestedTenantId) {
   try {
@@ -150,7 +200,7 @@ transactionsRouter.post(
   '/collect',
   requireRole('TENANT_OPERATOR'),
   asyncHandler(async (req, res) => {
-    const { merchantId, amount, msisdn, network, narration, payoutMsisdn, payoutMobileNumber, accountNoOrMsisdn } = req.body || {}
+    const { merchantId, amount, msisdn, network, narration, payoutMsisdn, payoutMobileNumber, accountNoOrMsisdn, collectionMethod, cardNumber, cardholderName, expiryDateMonth, expiryDateYear, cvv } = req.body || {}
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
 
     const merchantRow = await query('SELECT tenant_id FROM merchants WHERE id = $1', [merchantId])
@@ -167,6 +217,12 @@ transactionsRouter.post(
         msisdn,
         network,
         narration,
+        collectionMethod,
+        cardNumber,
+        cardholderName,
+        expiryDateMonth,
+        expiryDateYear,
+        cvv,
         payoutMsisdn: payoutMsisdn || payoutMobileNumber || accountNoOrMsisdn || null,
         callback: undefined
       })
@@ -180,7 +236,8 @@ transactionsRouter.post(
         id: result.transactionId,
         internalReference: result.internalReference,
         status: result.status,
-        paymentGatewayStatus: result.paymentGatewayStatus || result.status
+        paymentGatewayStatus: result.paymentGatewayStatus || result.status,
+        redirectHtml: result.redirectHtml || null
       })
     } catch (err) {
       if (err instanceof CollectionRejectedError) return res.status(400).json({ message: err.message })
@@ -202,7 +259,8 @@ transactionsRouter.post(
     if (!sourceTransactionId) return res.status(400).json({ message: 'sourceTransactionId is required.' })
 
     const sourceRows = await query(
-      `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
+      `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.base_amount,
+              t.fee_charged_amount, t.fee_charged_payer, t.payout_msisdn, t.currency, t.internal_reference,
               m.eganow_collection_account_id, m.eganow_payout_account_id, m.account_setup_status, m.network_provider, m.display_name,
               COALESCE(ms.allow_manual_control, FALSE) AS allow_manual_control
          FROM transactions t
@@ -301,11 +359,12 @@ transactionsRouter.post(
   '/payout',
   requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'),
   asyncHandler(async (req, res) => {
-    const { sourceTransactionId, amount, accountNoOrMsisdn, network } = req.body || {}
+    const { sourceTransactionId, amount, accountNoOrMsisdn, network, destinationType = 'MOMO', accountName, bankCode } = req.body || {}
     if (!sourceTransactionId) return res.status(400).json({ message: 'sourceTransactionId is required.' })
 
     const sourceRows = await query(
-      `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.currency, t.internal_reference,
+      `SELECT t.id, t.tenant_id, t.merchant_id, t.status, t.amount, t.base_amount,
+              t.fee_charged_amount, t.fee_charged_payer, t.currency, t.internal_reference,
               m.display_name, m.mobile_money_number, m.network_provider, m.account_setup_status,
               COALESCE(ms.allow_manual_control, FALSE) AS allow_manual_control
          FROM transactions t
@@ -327,31 +386,121 @@ transactionsRouter.post(
     if (req.user.role === 'TENANT_BRANCH_MANAGER' && !source.allow_manual_control) {
       return res.status(403).json({ message: 'Manual controls are not enabled for this merchant.' })
     }
-    if (source.status !== 'SWEPT_INTERNAL') {
+    if (!['SWEPT_INTERNAL', 'PARTIALLY_SETTLED'].includes(source.status)) {
       return res.status(400).json({ message: 'Source transaction must be SWEPT_INTERNAL before payout.' })
     }
 
-    const internalReference = `PO-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-    const payoutAmount = Number(amount) || source.amount
-    const destination = accountNoOrMsisdn || source.mobile_money_number
+    const splitRows = await query(
+      `SELECT r.*, i.settlement_msisdn, i.settlement_account_name,
+              COALESCE(smc.vendor_payout_mode, 'PERIODIC') AS vendor_payout_mode,
+              COALESCE(smc.priority_deduction_selected, FALSE) AS priority_deduction_selected
+         FROM split_rules r
+         JOIN institutions i ON i.id = r.institution_id AND i.status = 'ACTIVE'
+         JOIN tenant_institution_links l ON l.tenant_id = r.tenant_id AND l.institution_id = r.institution_id
+           AND l.status = 'ACTIVE' AND l.verification_status = 'APPROVED'
+         LEFT JOIN tenant_merchant_settlement_config smc ON smc.tenant_id = r.tenant_id
+           AND smc.merchant_id = $2 AND smc.institution_id = r.institution_id
+        WHERE r.tenant_id = $1 AND r.active AND r.effective_from <= now()
+          AND (r.effective_to IS NULL OR r.effective_to > now())
+          AND ((r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = $2)
+            OR (r.scope_level = 'TENANT_DEFAULT' AND r.merchant_id IS NULL))
+        ORDER BY CASE WHEN r.merchant_id = $2 THEN 0 ELSE 1 END, r.created_at DESC LIMIT 1`,
+      [source.tenant_id, source.merchant_id]
+    )
+    if (splitRows.rows[0]) {
+      if (String(destinationType).toUpperCase() !== 'MOMO') return res.status(409).json({ message: 'Bank payouts are not enabled for split settlement.' })
+      try {
+        const splitResult = await processSplitPayout({
+          tenantId: source.tenant_id,
+          merchantId: source.merchant_id,
+          collectionTxn: source,
+          merchant: { id: source.merchant_id, display_name: source.display_name, mobile_money_number: source.mobile_money_number, network_provider: source.network_provider },
+          rule: splitRows.rows[0],
+          finalAttempt: false
+        })
+        if (splitResult.pending) return res.status(202).json({ id: source.id, status: 'SWEPT_INTERNAL', paymentGatewayStatus: 'PENDING' })
+        return res.json({ id: source.id, status: splitResult.status || 'SWEPT_INTERNAL', legs: splitResult.results || {} })
+      } catch (error) {
+        if (error instanceof EganowApiError) return res.status(502).json({ message: 'One or more split payout legs failed. Retry or reconcile the payout.' })
+        throw error
+      }
+    }
+    if (source.status === 'PARTIALLY_SETTLED') return res.status(409).json({ message: 'The split rule for this partially settled transaction is no longer active. Contact support before retrying.' })
 
-    const inserted = await query(
+    // A source collection may have only one manual payout. Reconcile that payout
+    // on retries instead of creating a new gateway reference and risking a double payment.
+    const existingPayout = await query(
+      `SELECT id, internal_reference, status, payment_gateway_status
+         FROM transactions
+        WHERE parent_transaction_id = $1 AND type = 'PAYOUT' AND manually_triggered = TRUE
+        ORDER BY created_at DESC LIMIT 1`, [source.id]
+    )
+    if (existingPayout.rows[0]) {
+      const payout = existingPayout.rows[0]
+      if (payout.status === 'PENDING') {
+        try {
+          const reconciled = await reconcileTransaction(payout.id, source.tenant_id)
+          return res.status(reconciled?.status === 'PENDING' ? 202 : 200).json({
+            id: payout.id, internalReference: payout.internal_reference,
+            status: reconciled?.status || 'PENDING', paymentGatewayStatus: reconciled?.payment_gateway_status || payout.payment_gateway_status
+          })
+        } catch {
+          return res.status(202).json({ id: payout.id, internalReference: payout.internal_reference, status: 'PENDING', paymentGatewayStatus: payout.payment_gateway_status || 'UNKNOWN' })
+        }
+      }
+      if (payout.status === 'PAID_OUT') return res.json({ id: payout.id, internalReference: payout.internal_reference, status: 'PAID_OUT' })
+      return res.status(409).json({ message: 'A manual payout already exists for this collection. Reconcile or resolve it before attempting another payout.', id: payout.id, status: payout.status })
+    }
+
+    const internalReference = `PO-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+    const normalizedDestinationType = String(destinationType).toUpperCase()
+    const destination = accountNoOrMsisdn || (normalizedDestinationType === 'MOMO' ? source.mobile_money_number : null)
+    if (!['MOMO', 'BANK'].includes(normalizedDestinationType)) return res.status(400).json({ message: 'Choose Mobile Money or Bank payout.' })
+    const supportedBanks = new Set(['GCBGH', 'SOCIETE', 'ARBAPEX', 'OMNIBSIC', 'FIRSTATGH', 'FBNGH', 'BANKOFAFRICA', 'FIDELITY', 'FNBGH', 'CBG', 'ACCESSGH', 'UNAFBKGH', 'GTBANKGH', 'PBL', 'CAL', 'ECOBANKGH', 'ZENITHGH', 'REPUBLIC', 'UMB', 'ADB', 'NIB', 'ABSA', 'STANCHART', 'STANBICGH'])
+    if (!destination || (normalizedDestinationType === 'BANK' && (!supportedBanks.has(String(bankCode || '').toUpperCase()) || !String(accountName || '').trim() || !/^\d{6,34}$/.test(String(destination).replace(/\s/g, ''))))) {
+      return res.status(400).json({ message: 'Provide a valid destination, recipient name, and supported bank.' })
+    }
+    const availableAmount = Math.max(0, Number(source.base_amount ?? source.amount) - (source.fee_charged_payer === 'MERCHANT' ? Number(source.fee_charged_amount || 0) : 0))
+    const requestedPayoutAmount = amount == null || amount === '' ? availableAmount : Number(amount)
+    const payoutFee = await computeFee(source.tenant_id, 'PAYOUT', requestedPayoutAmount)
+    const payoutAmount = Math.round((requestedPayoutAmount - (payoutFee.chargedPayer === 'MERCHANT' ? payoutFee.chargedAmount : 0)) * 100) / 100
+    if (!Number.isFinite(requestedPayoutAmount) || payoutAmount <= 0 || requestedPayoutAmount > availableAmount) return res.status(400).json({ message: 'Payout amount is invalid after configured fees.' })
+
+    const inserted = await withTransaction(async (tx) => {
+      await tx.query('SELECT id FROM transactions WHERE id = $1 FOR UPDATE', [source.id])
+      const existing = await tx.query(
+        `SELECT id, internal_reference, status, payment_gateway_status FROM transactions
+          WHERE parent_transaction_id = $1 AND type = 'PAYOUT' AND manually_triggered = TRUE
+          ORDER BY created_at DESC LIMIT 1`, [source.id]
+      )
+      if (existing.rows[0]) return { row: existing.rows[0], created: false }
+      const created = await tx.query(
       `INSERT INTO transactions
          (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference, payout_msisdn,
-          manually_triggered, initiated_by_user_id)
-       VALUES ($1, $2, $3, 'PAYOUT', 'PENDING', $4, $5, $6, $7, TRUE, $8)
+          manually_triggered, initiated_by_user_id, payout_leg, base_amount, fee_charged_amount, fee_charged_payer,
+          fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+       VALUES ($1, $2, $3, 'PAYOUT', 'PENDING', $4, $5, $6, $7, TRUE, $8, 'NONE', $9, $10, $11, $12, $13, $14)
        RETURNING id`,
-      [source.tenant_id, source.merchant_id, source.id, payoutAmount, source.currency, internalReference, destination, req.user.id]
-    )
-    const payoutId = inserted.rows[0].id
+      [source.tenant_id, source.merchant_id, source.id, payoutAmount, source.currency, internalReference, destination, req.user.id,
+        requestedPayoutAmount, payoutFee.chargedAmount, payoutFee.chargedPayer, payoutFee.eganowCost, payoutFee.platformMargin, payoutFee.feeConfigVersionId]
+      )
+      return { row: { id: created.rows[0].id, internal_reference: internalReference, status: 'PENDING' }, created: true }
+    })
+    if (!inserted.created) {
+      const payout = inserted.row
+      return res.status(payout.status === 'PENDING' ? 202 : 409).json({ id: payout.id, internalReference: payout.internal_reference, status: payout.status, paymentGatewayStatus: payout.payment_gateway_status })
+    }
+    const payoutId = inserted.row.id
 
     try {
       const result = await disburseToMobileMoney(source.tenant_id, {
         reference: internalReference,
         amount: payoutAmount,
         currency: source.currency,
-        accountNoOrCardNoOrMsisdn: destination,
-        network: network || source.network_provider,
+        accountNoOrCardNoOrMsisdn: normalizedDestinationType === 'BANK' ? String(destination).replace(/\s/g, '') : destination,
+        accountName: accountName || 'Recipient',
+        destinationType: normalizedDestinationType,
+        network: normalizedDestinationType === 'BANK' ? bankCode : network || source.network_provider,
         narration: `Manual payout for ${source.internal_reference}`
       })
 
@@ -389,9 +538,11 @@ transactionsRouter.post(
 
       res.json({ id: payoutId, internalReference, status: 'PAID_OUT' })
     } catch (err) {
-      const message = err instanceof EganowApiError ? err.message : err.message
-      await query(`UPDATE transactions SET status = 'FAILED', failure_reason = $2, updated_at = now() WHERE id = $1`, [payoutId, message])
-      res.status(502).json({ message: 'Payout failed.', detail: message })
+      // A transport/API error can happen after the provider accepted the request.
+      // Keep the same reference pending and reconcile it; never expose it to a fresh submission.
+      await query(`UPDATE transactions SET payment_gateway_status = 'UNKNOWN', updated_at = now() WHERE id = $1 AND status = 'PENDING'`, [payoutId])
+      await enqueueCollectionStatusPollJob({ tenantId: source.tenant_id, merchantId: source.merchant_id, transactionId: payoutId })
+      res.status(202).json({ id: payoutId, internalReference, status: 'PENDING', paymentGatewayStatus: 'UNKNOWN' })
     }
   })
 )

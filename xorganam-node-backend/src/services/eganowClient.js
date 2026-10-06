@@ -159,6 +159,7 @@ function normalizeEganowResponse(data) {
     reference,
     transactionId,
     message,
+    redirectHtml: data.redirectHtml ?? data.data?.redirectHtml ?? null,
     eganowReference: reference
   }
 }
@@ -376,14 +377,15 @@ export async function sweepToPayoutAccount(tenantId, { amount, network: _network
 /**
  * External disbursal: merchant's payout account -> her MoMo number.
  */
-export async function disburseToMobileMoney(tenantId, { reference, amount, currency, accountNoOrCardNoOrMsisdn, network, narration, callback }) {
+export async function disburseToMobileMoney(tenantId, { reference, amount, currency, accountNoOrCardNoOrMsisdn, network, narration, callback, destinationType = 'MOMO', accountName = 'Recipient' }) {
   const { client, callbackUrl: tenantCallbackUrl } = await createEganowClientForTenant(tenantId)
 
   return withRetry(
     async () => {
-      const normalizedDestination = normalizeMsisdnInput(accountNoOrCardNoOrMsisdn)
+      const isBank = String(destinationType).toUpperCase() === 'BANK'
+      const normalizedDestination = isBank ? String(accountNoOrCardNoOrMsisdn || '').replace(/\s/g, '') : normalizeMsisdnInput(accountNoOrCardNoOrMsisdn)
       let paypartnerCode = normalizePaypartnerCode(network)
-      const inferredPaypartnerCode = inferPaypartnerCodeFromMsisdn(normalizedDestination)
+      const inferredPaypartnerCode = isBank ? null : inferPaypartnerCodeFromMsisdn(normalizedDestination)
       if (inferredPaypartnerCode) {
         if (paypartnerCode && paypartnerCode !== inferredPaypartnerCode) {
         }
@@ -398,7 +400,7 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
         paypartnerCode,
         amount,
         accountNoOrCardNoOrMSISDN: normalizedDestination,
-        accountName: 'Recipient',
+        accountName,
         transactionId: reference,
         narration,
         transCurrencyIso: currency,

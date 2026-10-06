@@ -23,7 +23,7 @@ function normalizeMsisdn(rawMsisdn) {
 export default function OperatorInitiateCollection() {
   const { user } = useOperatorAuth()
   const [merchants, setMerchants] = useState([])
-  const [form, setForm] = useState({ merchantId: '', amount: '', msisdn: '', network: '', narration: '' })
+  const [form, setForm] = useState({ merchantId: '', amount: '', msisdn: '', network: '', narration: '', collectionMethod: 'MOMO', cardNumber: '', cardholderName: '', expiryDateMonth: '', expiryDateYear: '', cvv: '' })
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -39,14 +39,16 @@ export default function OperatorInitiateCollection() {
     setResult(null)
     setBusy(true)
     try {
-      const normalizedMsisdn = normalizeMsisdn(form.msisdn)
-      if (!normalizedMsisdn || normalizedMsisdn.length !== 12) {
+      const normalizedMsisdn = form.collectionMethod === 'MOMO' ? normalizeMsisdn(form.msisdn) : ''
+      if (form.collectionMethod === 'MOMO' && (!normalizedMsisdn || normalizedMsisdn.length !== 12)) {
         throw new Error('Enter a valid mobile number in local or international format.')
       }
       const response = await operatorApi.collectForTenant(user.tenantId, {
         merchantId: form.merchantId,
         amount: Number(form.amount),
-        msisdn: normalizedMsisdn,
+        msisdn: normalizedMsisdn || undefined,
+        collectionMethod: form.collectionMethod,
+        ...(form.collectionMethod === 'CARD' ? { cardNumber: form.cardNumber, cardholderName: form.cardholderName, expiryDateMonth: Number(form.expiryDateMonth), expiryDateYear: form.expiryDateYear.slice(-2), cvv: form.cvv } : {}),
         network: form.network || undefined,
         narration: form.narration || undefined
       })
@@ -83,6 +85,7 @@ export default function OperatorInitiateCollection() {
               {result.message && (
                 <div>Gateway message: <span className="mono">{result.message}</span></div>
               )}
+              {result.redirectHtml && <iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={(() => { try { return decodeURIComponent(escape(atob(result.redirectHtml))) } catch { return atob(result.redirectHtml) } })()} style={{ width: '100%', minHeight: 500, border: 0 }} />}
               <div>
                 <Link to={`/operator/transactions/${result.id}`}>View it →</Link>
               </div>
@@ -105,7 +108,8 @@ export default function OperatorInitiateCollection() {
             <label>Amount (GHS)</label>
             <input required type="number" step="0.01" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} />
           </div>
-          <div className="field">
+          <div className="field"><label>Collection method</label><select value={form.collectionMethod} onChange={(e) => setForm((f) => ({ ...f, collectionMethod: e.target.value }))}><option value="MOMO">Mobile Money</option><option value="CARD">Visa / Mastercard</option></select></div>
+          {form.collectionMethod === 'MOMO' && <div className="field">
             <label>Customer mobile number</label>
             <input
               required
@@ -113,9 +117,9 @@ export default function OperatorInitiateCollection() {
               onChange={(e) => setForm((f) => ({ ...f, msisdn: e.target.value }))}
               placeholder="0551234567 or 233551234567"
             />
-          </div>
+          </div>}
         </div>
-        <div className="two-col">
+        {form.collectionMethod === 'MOMO' && <div className="two-col">
           <div className="field">
             <label>Paypartner (optional)</label>
             <select value={form.network} onChange={(e) => setForm((f) => ({ ...f, network: e.target.value }))}>
@@ -124,11 +128,12 @@ export default function OperatorInitiateCollection() {
               ))}
             </select>
           </div>
-          <div className="field">
+          {form.collectionMethod === 'MOMO' && <div className="field">
             <label>Narration (optional)</label>
             <input value={form.narration} onChange={(e) => setForm((f) => ({ ...f, narration: e.target.value }))} />
-          </div>
-        </div>
+          </div>}
+        </div>}
+        {form.collectionMethod === 'CARD' && <div className="two-col"><div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={form.cardNumber} onChange={(e) => setForm((f) => ({ ...f, cardNumber: e.target.value }))} /></div><div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={form.cardholderName} onChange={(e) => setForm((f) => ({ ...f, cardholderName: e.target.value }))} /></div><div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" value={form.expiryDateMonth} onChange={(e) => setForm((f) => ({ ...f, expiryDateMonth: e.target.value }))} /></div><div className="field"><label>Expiry year</label><input required inputMode="numeric" placeholder="2030" value={form.expiryDateYear} onChange={(e) => setForm((f) => ({ ...f, expiryDateYear: e.target.value }))} /></div><div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={form.cvv} onChange={(e) => setForm((f) => ({ ...f, cvv: e.target.value }))} /></div></div>}
 
         <button className="btn btn-primary" disabled={busy || !form.merchantId}>{busy ? 'Starting…' : 'Start collection'}</button>
       </form>

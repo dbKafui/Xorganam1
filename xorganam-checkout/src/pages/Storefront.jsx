@@ -16,10 +16,13 @@ export default function Storefront() {
   const [customerPhone, setCustomerPhone] = useState('')
   const [customerName, setCustomerName] = useState('')
   const [paymentMethod, setPaymentMethod] = useState('EGANOW')
+  const [collectionMethod, setCollectionMethod] = useState('MOMO')
+  const [card, setCard] = useState({ number: '', name: '', month: '', year: '', cvv: '' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [payment, setPayment] = useState(null)
+  const [cardRedirectHtml, setCardRedirectHtml] = useState('')
 
   useEffect(() => {
     publicApi.getStorefront(slug).then((result) => {
@@ -27,6 +30,10 @@ export default function Storefront() {
       if (result.branches?.[0]) setBranchId(result.branches[0].id)
     }).catch((requestError) => setError(requestError.message))
   }, [slug])
+
+  useEffect(() => {
+    if (data?.creditDefaults?.enabled) setPaymentMethod('CREDIT')
+  }, [data?.creditDefaults?.enabled])
 
   useEffect(() => {
     if (!payment?.reference || payment.status !== 'PENDING_PAYMENT') return undefined
@@ -80,8 +87,12 @@ export default function Storefront() {
       const result = await createOrder(slug, {
         items, customerPhone, customerName,
         fulfillmentType: fulfillment, fulfillmentAddress: fulfillment === 'DELIVERY' ? address : undefined,
-        merchantId: fulfillment === 'PICKUP' ? branchId : undefined, paymentMethod
+        merchantId: fulfillment === 'PICKUP' ? branchId : undefined, paymentMethod, collectionMethod,
+        ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {})
       })
+      if (result.redirectHtml) {
+        try { setCardRedirectHtml(decodeURIComponent(escape(atob(result.redirectHtml)))) } catch { setCardRedirectHtml(atob(result.redirectHtml)) }
+      } else setCardRedirectHtml('')
       setPayment({ ...result, reference: result.reference || null })
       if (result.reference) setNotice(result.message || 'Payment prompt sent. Approve it on your phone.')
       else setNotice(result.status === 'PLACED' ? 'Credit purchase confirmed. Your order is placed.' : 'Order created.')
@@ -133,8 +144,10 @@ export default function Storefront() {
           <div className="field"><label>Name (optional)</label><input maxLength="160" value={customerName} onChange={(e) => setCustomerName(e.target.value)} /></div>
         </div>
         {data.creditDefaults?.enabled && <div className="field"><label>Payment method</label><select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}><option value="EGANOW">Pay now with Eganow</option><option value="CREDIT">Hire-purchase ({data.creditDefaults.installment_count} {String(data.creditDefaults.installment_frequency).toLowerCase()} installments; {data.creditDefaults.down_payment_percent}% down payment)</option></select></div>}
+        {(paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="field"><label>Collection method</label><select value={collectionMethod} onChange={(e) => setCollectionMethod(e.target.value)}><option value="MOMO">Mobile Money</option><option value="CARD">Visa / Mastercard</option></select></div>}
+        {collectionMethod === 'CARD' && (paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="two-col"><div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={card.number} onChange={(e) => setCard((v) => ({ ...v, number: e.target.value }))} /></div><div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={card.name} onChange={(e) => setCard((v) => ({ ...v, name: e.target.value }))} /></div><div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" autoComplete="cc-exp-month" value={card.month} onChange={(e) => setCard((v) => ({ ...v, month: e.target.value }))} /></div><div className="field"><label>Expiry year</label><input required inputMode="numeric" autoComplete="cc-exp-year" placeholder="2030" value={card.year} onChange={(e) => setCard((v) => ({ ...v, year: e.target.value }))} /></div><div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={card.cvv} onChange={(e) => setCard((v) => ({ ...v, cvv: e.target.value }))} /></div></div>}
         {error && <div className="status-banner error" role="alert">{error}</div>}{notice && <div className="status-banner success" role="status">{notice}</div>}
-        {payment && <div className="order-confirmation"><strong>Order {payment.orderId}</strong><span>Status: {payment.status}</span>{payment.paymentAmount > 0 && <span>Payment prompt amount: {money(payment.paymentAmount)}</span>}<Link to="/my-orders">Track your order</Link></div>}
+        {payment && <div className="order-confirmation"><strong>Order {payment.orderId}</strong><span>Status: {payment.status}</span>{payment.paymentAmount > 0 && <span>Payment prompt amount: {money(payment.paymentAmount)}</span>}{cardRedirectHtml && <><h3>Verify card payment</h3><iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={cardRedirectHtml} style={{ width: '100%', minHeight: 500, border: 0 }} /></>}<Link to="/my-orders">Track your order</Link></div>}
         <button className="btn btn-primary" disabled={submitting || !branchId && fulfillment === 'PICKUP'}>{submitting ? 'Starting checkout…' : `Place order · ${money(total)}`}</button>
       </form>
     </aside>}

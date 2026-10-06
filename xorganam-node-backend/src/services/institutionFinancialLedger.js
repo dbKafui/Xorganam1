@@ -69,6 +69,14 @@ async function postSuccess(transactionId, gatewayResult) {
           updated_at = now() WHERE id = $1 RETURNING *`,
       [transactionId, gatewayResult.status, gatewayResult.reference, gatewayResult.transactionId]
     )
+    await tx.query(
+      `UPDATE institution_transactions
+          SET status = CASE WHEN type = 'PAYOUT' THEN 'PAID_OUT'::institution_txn_status
+                            ELSE 'RECEIVED'::institution_txn_status END,
+              eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
+        WHERE internal_reference = $1`,
+      [item.external_reference, gatewayResult.reference]
+    )
     return { transaction: updated[0] }
   })
 }
@@ -125,6 +133,10 @@ export async function reconcileInstitutionTransaction(institutionId, transaction
           failure_reason = COALESCE($6, 'Eganow rejected the transaction.'), updated_at = now()
         WHERE id = $1 AND institution_id = $2 AND status = 'PENDING_GATEWAY' RETURNING *`,
       [transactionId, institutionId, status, gatewayResult.reference, gatewayResult.transactionId, gatewayResult.message]
+    )
+    if (rows[0]) await query(
+      `UPDATE institution_transactions SET status = 'FAILED', eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
+        WHERE internal_reference = $1`, [rows[0].external_reference, gatewayResult.reference]
     )
     return { transaction: rows[0] || null }
   }

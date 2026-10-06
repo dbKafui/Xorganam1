@@ -15,7 +15,7 @@ export default function OperatorTransactionDetail() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [transferAmount, setTransferAmount] = useState('')
-  const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '' })
+  const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '', destinationType: 'MOMO', bankCode: '', accountName: '' })
   const [busy, setBusy] = useState(false)
   const [reconciling, setReconciling] = useState(false)
   const [disputeReason, setDisputeReason] = useState('')
@@ -78,7 +78,10 @@ export default function OperatorTransactionDetail() {
       await operatorApi.payout({
         sourceTransactionId: txn.id,
         amount: Number(payoutForm.amount) || undefined,
-        accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined
+        accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined,
+        destinationType: payoutForm.destinationType,
+        bankCode: payoutForm.destinationType === 'BANK' ? payoutForm.bankCode : undefined,
+        accountName: payoutForm.accountName || undefined
       })
       setNotice('Payout initiated.')
       load()
@@ -199,9 +202,10 @@ export default function OperatorTransactionDetail() {
               <input type="number" step="0.01" placeholder={txn.amount} value={payoutForm.amount} onChange={(e) => setPayoutForm((f) => ({ ...f, amount: e.target.value }))} />
             </div>
             <div className="field">
-              <label>Destination (defaults to merchant's MoMo number)</label>
-              <input value={payoutForm.accountNoOrMsisdn} onChange={(e) => setPayoutForm((f) => ({ ...f, accountNoOrMsisdn: e.target.value }))} placeholder="Leave blank to use the merchant's number on file" />
+              <label>Destination type</label><select value={payoutForm.destinationType} onChange={(e) => setPayoutForm((f) => ({ ...f, destinationType: e.target.value }))}><option value="MOMO">Mobile Money</option><option value="BANK">Bank account</option></select>
             </div>
+            <div className="field"><label>{payoutForm.destinationType === 'BANK' ? 'Bank account number' : 'Mobile number'}</label><input required={payoutForm.destinationType === 'BANK'} value={payoutForm.accountNoOrMsisdn} onChange={(e) => setPayoutForm((f) => ({ ...f, accountNoOrMsisdn: e.target.value }))} placeholder={payoutForm.destinationType === 'MOMO' ? "Leave blank to use merchant's number" : 'Bank account number'} /></div>
+            {payoutForm.destinationType === 'BANK' && <><div className="field"><label>Bank</label><select required value={payoutForm.bankCode} onChange={(e) => setPayoutForm((f) => ({ ...f, bankCode: e.target.value }))}><option value="">Choose bank</option>{[['GCBGH','GCB Bank'],['SOCIETE','Societe Generale'],['ARBAPEX','ARB Apex'],['OMNIBSIC','OmniBSIC'],['FIRSTATGH','First Atlantic'],['FBNGH','First Bank'],['BANKOFAFRICA','Bank of Africa'],['FIDELITY','Fidelity Bank'],['FNBGH','First National Bank'],['CBG','Consolidated Bank Ghana'],['ACCESSGH','Access Bank'],['UNAFBKGH','UBA'],['GTBANKGH','Guaranty Trust Bank'],['PBL','Prudential Bank'],['CAL','CAL Bank'],['ECOBANKGH','Ecobank Ghana'],['ZENITHGH','Zenith Bank'],['REPUBLIC','Republic Bank'],['UMB','Universal Merchant Bank'],['ADB','Agricultural Development Bank'],['NIB','National Investment Bank'],['ABSA','Absa Bank Ghana'],['STANCHART','Standard Chartered'],['STANBICGH','Stanbic Bank']].map(([code,label]) => <option key={code} value={code}>{label}</option>)}</select></div><div className="field"><label>Account holder name</label><input required value={payoutForm.accountName} onChange={(e) => setPayoutForm((f) => ({ ...f, accountName: e.target.value }))} /></div></>}
           </div>
           <button className="btn btn-primary" disabled={busy}>Start payout</button>
         </form>

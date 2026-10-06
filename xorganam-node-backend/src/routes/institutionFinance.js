@@ -643,6 +643,13 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
     return started.length ? { transaction: started[0] } : { error: 'Transaction was already reviewed.' }
   })
   if (startResult.error) return res.status(409).json({ message: startResult.error })
+  await query(
+    `INSERT INTO institution_transactions
+       (institution_id, type, amount, internal_reference)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (internal_reference) DO NOTHING`,
+    [req.institutionAuth.institutionId, payout ? 'PAYOUT' : 'COLLECTION', gatewayAmount / 100, item.external_reference]
+  )
   try {
     const initiate = payout ? initiateInstitutionPayout : initiateInstitutionCollection
     const gateway = await initiate(req.institutionAuth.institutionId, {
@@ -653,7 +660,10 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
     return res.status(result.pending ? 202 : 200).json(result.transaction || { id: item.id, status: 'PENDING_GATEWAY', message: 'Awaiting Eganow result; reconcile by reference if callback is delayed.' })
   } catch (error) {
     const definitive = isDefinitiveEganowRejection(error)
-    if (definitive) await query(`UPDATE institution_financial_transactions SET status = 'FAILED', payment_gateway_status = 'REJECTED', failure_reason = $2, updated_at = now() WHERE id = $1 AND status = 'PENDING_GATEWAY'`, [item.id, 'Eganow rejected this payment request.'])
+    if (definitive) {
+      await query(`UPDATE institution_financial_transactions SET status = 'FAILED', payment_gateway_status = 'REJECTED', failure_reason = $2, updated_at = now() WHERE id = $1 AND status = 'PENDING_GATEWAY'`, [item.id, 'Eganow rejected this payment request.'])
+      await query(`UPDATE institution_transactions SET status = 'FAILED', updated_at = now() WHERE internal_reference = $1`, [item.external_reference])
+    }
     else await query(`UPDATE institution_financial_transactions SET payment_gateway_status = 'UNKNOWN', failure_reason = 'Provider result is uncertain. Reconcile before retrying.', updated_at = now() WHERE id = $1 AND status = 'PENDING_GATEWAY'`, [item.id])
     return res.status(definitive ? 502 : 202).json({ id: item.id, status: definitive ? 'FAILED' : 'PENDING_GATEWAY', message: definitive ? 'Eganow rejected the payment request.' : 'Eganow response was uncertain. Check status before retrying.' })
   }

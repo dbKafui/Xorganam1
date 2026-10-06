@@ -5,9 +5,10 @@ import { query, withTransaction } from '../db/pool.js'
 import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { TenantCredentialsError } from '../services/credentialsService.js'
 import { sendMerchantSms } from '../services/notificationService.js'
-import { processSplitPayout } from '../services/splitPaymentService.js'
+import { processSplitPayout, recordPeriodicAccrualAndVendorLeg } from '../services/splitPaymentService.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 import { reconcileTransaction } from '../services/reconciliationService.js'
+import { computeFee } from '../services/feeService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '10', 10)
 
@@ -88,7 +89,10 @@ async function processCollectForMeJob(job) {
           status: 'SWEPT_INTERNAL',
           paymentGatewayStatus: transferResult.status,
           eganowReference: transferResult.reference,
-          eganowTransactionId: transferResult.transactionId
+          eganowTransactionId: transferResult.transactionId,
+          periodicSplit: context.splitRule?.mode === 'PERIODIC' && context.splitRule.vendor_payout_mode === 'PER_TRANSACTION'
+            ? { rule: context.splitRule, merchant }
+            : null
         })
         await markTransactionResult(collectionTxn.id, { success: true, status: 'SWEPT_INTERNAL' })
       } catch (err) {
@@ -109,7 +113,8 @@ async function processCollectForMeJob(job) {
       merchantId,
       collectionTxn,
       merchant,
-      rule: context.splitRule
+      rule: context.splitRule,
+      finalAttempt: Number(job.attemptsMade || 0) >= Math.max(0, Number(job.opts?.attempts || 1) - 1)
     })
     if (!splitResult.skipped) {
       if (splitResult.status === 'PAID_OUT') {
@@ -126,6 +131,13 @@ async function processCollectForMeJob(job) {
   // ---- Step 2: External Disbursal - payout account -> merchant's MoMo -
   transferTxn = transferTxn || await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER', 'NONE')
   const payoutDestination = collectionTxn.payout_msisdn || merchant.mobile_money_number
+  const payoutBaseAmount = Number(collectionTxn.base_amount ?? collectionTxn.amount)
+  let vendorAmount = payoutBaseAmount
+  if (collectionTxn.fee_charged_payer === 'MERCHANT') vendorAmount -= Number(collectionTxn.fee_charged_amount || 0)
+  const payoutFee = await computeFee(tenantId, 'PAYOUT', Math.max(0, vendorAmount))
+  if (payoutFee.chargedPayer === 'MERCHANT') vendorAmount -= payoutFee.chargedAmount
+  vendorAmount = Math.round(vendorAmount * 100) / 100
+  if (vendorAmount <= 0) throw new Error('Configured fees leave no positive amount for the vendor payout.')
   const payoutParentId = transferTxn?.id || collectionTxn.id
   const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT', 'NONE') || await createChildTransaction({
     tenantId,
@@ -133,9 +145,11 @@ async function processCollectForMeJob(job) {
     parentTransactionId: payoutParentId,
     type: 'PAYOUT',
     payoutLeg: 'NONE',
-    amount: collectionTxn.amount,
+    amount: vendorAmount,
     currency: collectionTxn.currency,
-    payoutMsisdn: payoutDestination
+    payoutMsisdn: payoutDestination,
+    baseAmount: payoutBaseAmount,
+    fee: payoutFee
   })
   await query('UPDATE transactions SET payout_msisdn = COALESCE(payout_msisdn, $2), updated_at = now() WHERE id = $1', [
     payoutTxn.id,
@@ -150,7 +164,7 @@ async function processCollectForMeJob(job) {
   try {
     const payoutResult = await disburseToMobileMoney(tenantId, {
       reference: payoutTxn.internal_reference,
-      amount: collectionTxn.amount,
+      amount: payoutTxn.amount,
       currency: collectionTxn.currency,
       accountNoOrCardNoOrMsisdn: payoutDestination,
       network: merchant.network_provider,
@@ -226,10 +240,11 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
     `SELECT
         m.id, m.display_name, m.eganow_collection_account_id, m.eganow_payout_account_id,
         m.mobile_money_number, m.network_provider,
-        t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference, t.payout_msisdn,
+        t.id AS txn_id, t.tenant_id AS txn_tenant_id, t.status AS txn_status, t.amount, t.base_amount, t.fee_charged_amount,
+        t.fee_charged_payer, t.currency, t.internal_reference, t.payout_msisdn,
         sr.id AS split_rule_id, sr.mode AS split_rule_mode, sr.type AS split_rule_type,
         sr.amount AS split_rule_amount, sr.leg_execution_order,
-        i.id AS split_institution_id, i.settlement_msisdn,
+        i.id AS split_institution_id, i.settlement_msisdn, i.settlement_account_name,
         COALESCE(smc.vendor_payout_mode, 'PERIODIC') AS vendor_payout_mode,
         COALESCE(smc.priority_deduction_selected, FALSE) AS priority_deduction_selected
      FROM merchants m
@@ -273,8 +288,13 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
     },
     collectionTxn: {
       id: row.txn_id,
+      tenant_id: row.txn_tenant_id,
+      merchant_id: row.id,
       status: row.txn_status,
       amount: row.amount,
+      base_amount: row.base_amount,
+      fee_charged_amount: row.fee_charged_amount,
+      fee_charged_payer: row.fee_charged_payer,
       currency: row.currency,
       internal_reference: row.internal_reference,
       payout_msisdn: row.payout_msisdn
@@ -288,6 +308,7 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
           leg_execution_order: row.leg_execution_order,
           institution_id: row.split_institution_id,
           settlement_msisdn: row.settlement_msisdn,
+          settlement_account_name: row.settlement_account_name,
           vendor_payout_mode: row.vendor_payout_mode,
           priority_deduction_selected: row.priority_deduction_selected
         }
@@ -295,17 +316,20 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
   }
 }
 
-async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, payoutLeg = 'NONE', amount, currency, payoutMsisdn = null }) {
+async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, payoutLeg = 'NONE', amount, currency, payoutMsisdn = null, baseAmount = null, fee = null }) {
   const internalReference = `${type === 'INTERNAL_TRANSFER' ? 'IT' : 'PO'}-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
 
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `INSERT INTO transactions
-         (tenant_id, merchant_id, parent_transaction_id, type, payout_leg, status, amount, currency, internal_reference, payout_msisdn)
-       VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9)
+         (tenant_id, merchant_id, parent_transaction_id, type, payout_leg, status, amount, currency, internal_reference, payout_msisdn,
+          base_amount, fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+       VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
-       RETURNING id, internal_reference, status`,
-      [tenantId, merchantId, parentTransactionId, type, payoutLeg, amount, currency, internalReference, payoutMsisdn]
+       RETURNING id, internal_reference, status, amount`,
+      [tenantId, merchantId, parentTransactionId, type, payoutLeg, amount, currency, internalReference, payoutMsisdn,
+        baseAmount, fee?.chargedAmount ?? null, fee?.chargedPayer ?? null, fee?.eganowCost ?? null,
+        fee?.platformMargin ?? null, fee?.feeConfigVersionId ?? null]
     )
 
     if (rows.length > 0) {
@@ -313,7 +337,7 @@ async function createChildTransaction({ tenantId, merchantId, parentTransactionI
     }
 
     const { rows: existingRows } = await client.query(
-      `SELECT id, internal_reference, status
+      `SELECT id, internal_reference, status, amount
          FROM transactions
         WHERE parent_transaction_id = $1 AND type = $2 AND payout_leg = $3
         LIMIT 1`,
@@ -326,7 +350,7 @@ async function createChildTransaction({ tenantId, merchantId, parentTransactionI
 
 async function findChildTransaction(parentTransactionId, type, payoutLeg = 'NONE') {
   const { rows } = await query(
-    `SELECT id, internal_reference, status
+    `SELECT id, internal_reference, status, amount
        FROM transactions
       WHERE parent_transaction_id = $1 AND type = $2 AND payout_leg = $3
       ORDER BY created_at ASC
@@ -336,7 +360,7 @@ async function findChildTransaction(parentTransactionId, type, payoutLeg = 'NONE
   return rows[0] || null
 }
 
-async function markTransactionResult(transactionId, { success, status, paymentGatewayStatus, eganowReference, eganowTransactionId, failureReason }) {
+async function markTransactionResult(transactionId, { success, status, paymentGatewayStatus, eganowReference, eganowTransactionId, failureReason, periodicSplit = null }) {
   const update = async (tx) => {
     const { rows } = await tx.query(
       `UPDATE transactions
@@ -355,6 +379,16 @@ async function markTransactionResult(transactionId, { success, status, paymentGa
     if (status === 'SWEPT_INTERNAL' && transaction?.type === 'INTERNAL_TRANSFER' && transaction.parent_transaction_id) {
       await tx.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [transaction.parent_transaction_id])
       await markCreditInstallmentCollected(tx, transaction.parent_transaction_id)
+      if (periodicSplit) {
+        const { rows: collections } = await tx.query(
+          `SELECT id, tenant_id, merchant_id, amount, base_amount, currency, internal_reference,
+                  payout_msisdn, fee_charged_amount, fee_charged_payer
+             FROM transactions WHERE id = $1 FOR UPDATE`, [transaction.parent_transaction_id]
+        )
+        if (collections[0]) await recordPeriodicAccrualAndVendorLeg(tx, {
+          collectionTxn: collections[0], merchant: periodicSplit.merchant, rule: periodicSplit.rule
+        })
+      }
     } else if (status === 'SWEPT_INTERNAL' && transaction?.type === 'COLLECTION') {
       await markCreditInstallmentCollected(tx, transaction.id)
     }

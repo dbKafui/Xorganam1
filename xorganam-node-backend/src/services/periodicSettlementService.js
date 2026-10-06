@@ -187,7 +187,7 @@ async function createSweep(config) {
        VALUES ($1, $2, $3, 'SWEEP_PAYOUT', 'PENDING', $4, 'GHS', $5, $6)
        ON CONFLICT ON CONSTRAINT uq_transactions_periodic_sweep DO NOTHING
        RETURNING id`,
-      [config.tenant_id, config.merchant_id, config.institution_id, institutionAmount + vendorAmount, config.period.key, reference('SWEEP')]
+      [config.tenant_id, config.merchant_id, config.institution_id, institutionAmount + vendorAmount, config.period.key, reference('PS')]
     )
     if (!parent.rows[0]) {
       const existing = await client.query(
@@ -226,7 +226,7 @@ async function createSweep(config) {
 
 async function findLeg(parentId, payoutLeg) {
   const { rows } = await query(
-    `SELECT id, status, amount, internal_reference, payout_msisdn, eganow_reference
+    `SELECT id, status, amount, internal_reference, payout_msisdn, eganow_reference, payment_gateway_status, payout_leg
        FROM transactions
       WHERE parent_transaction_id = $1 AND type = 'PAYOUT' AND payout_leg = $2`,
     [parentId, payoutLeg]
@@ -235,27 +235,38 @@ async function findLeg(parentId, payoutLeg) {
 }
 
 async function createLeg(parent, config, payoutLeg, amount, destination) {
-  const existing = await findLeg(parent.id, payoutLeg)
-  if (existing) return existing
-  const { rows } = await query(
-    `INSERT INTO transactions
-       (tenant_id, merchant_id, institution_id, parent_transaction_id, type, payout_leg,
-        status, amount, currency, internal_reference, payout_msisdn, period_key)
-     VALUES ($1, $2, $3, $4, 'PAYOUT', $5, 'PENDING', $6, 'GHS', $7, $8, $9)
-     ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
-     RETURNING id, status, amount, internal_reference, payout_msisdn`,
-    [config.tenant_id, config.merchant_id, payoutLeg === 'INSTITUTION' ? config.institution_id : null,
-      parent.id, payoutLeg, amount, reference(`SWEEP-${payoutLeg}`), destination, config.period.key]
-  )
-  return rows[0] || findLeg(parent.id, payoutLeg)
+  let leg = await findLeg(parent.id, payoutLeg)
+  if (!leg) {
+    const { rows } = await query(
+      `INSERT INTO transactions
+         (tenant_id, merchant_id, institution_id, parent_transaction_id, type, payout_leg,
+          status, amount, currency, internal_reference, payout_msisdn, period_key)
+       VALUES ($1, $2, $3, $4, 'PAYOUT', $5, 'PENDING', $6, 'GHS', $7, $8, $9)
+       ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
+       RETURNING id, status, amount, internal_reference, payout_msisdn, payout_leg`,
+      [config.tenant_id, config.merchant_id, payoutLeg === 'INSTITUTION' ? config.institution_id : null,
+        parent.id, payoutLeg, amount, reference(`SWEEP-${payoutLeg}`), destination, config.period.key]
+    )
+    leg = rows[0] || await findLeg(parent.id, payoutLeg)
+  }
+  if (payoutLeg === 'INSTITUTION' && leg) {
+    await query(
+      `INSERT INTO institution_transactions
+         (institution_id, type, status, amount, internal_reference, counterparty_transaction_id)
+       VALUES ($1, 'COLLECTION', 'PENDING', $2, $3, $4)
+       ON CONFLICT (internal_reference) DO NOTHING`,
+      [config.institution_id, leg.amount, `ICOL-${leg.id}`, leg.id]
+    )
+  }
+  return leg
 }
 
 async function settleLeg(leg, config, network) {
   if (leg.status === 'PAID_OUT') return 'PAID_OUT'
   if (leg.status === 'FAILED') return 'FAILED'
 
-  if (leg.eganow_reference) {
-    const statusResult = await queryTransactionStatus(config.tenant_id, leg.eganow_reference)
+  if (leg.eganow_reference || (leg.payment_gateway_status && leg.payment_gateway_status !== 'READY')) {
+    const statusResult = await queryTransactionStatus(config.tenant_id, leg.internal_reference)
     if (isGatewaySuccess(statusResult.status) || isGatewayFailure(statusResult.status)) {
       const status = isGatewaySuccess(statusResult.status) ? 'PAID_OUT' : 'FAILED'
       await query(
@@ -263,6 +274,12 @@ async function settleLeg(leg, config, network) {
                 failure_reason = $4, completed_at = CASE WHEN $2 <> 'PENDING' THEN now() ELSE completed_at END,
                 updated_at = now() WHERE id = $1`,
         [leg.id, status, statusResult.status, status === 'FAILED' ? `Eganow returned ${statusResult.status}.` : null]
+      )
+      if (leg.payout_leg === 'INSTITUTION') await query(
+        `UPDATE institution_transactions
+            SET status = CASE WHEN $2 = 'PAID_OUT' THEN 'RECEIVED'::institution_txn_status ELSE 'FAILED'::institution_txn_status END,
+                eganow_reference = COALESCE($3, eganow_reference), updated_at = now()
+          WHERE counterparty_transaction_id = $1`, [leg.id, status, statusResult.reference || null]
       )
       return status
     }
@@ -287,6 +304,14 @@ async function settleLeg(leg, config, network) {
       WHERE id = $1`,
     [leg.id, status, result.reference, result.transactionId, result.status,
       status === 'FAILED' ? `Eganow returned ${result.status}.` : null, result.raw]
+  )
+  if (leg.payout_leg === 'INSTITUTION') await query(
+    `UPDATE institution_transactions
+        SET status = CASE WHEN $2 = 'PAID_OUT' THEN 'RECEIVED'::institution_txn_status
+                          WHEN $2 = 'FAILED' THEN 'FAILED'::institution_txn_status
+                          ELSE 'PENDING'::institution_txn_status END,
+            eganow_reference = COALESCE($3, eganow_reference), updated_at = now()
+      WHERE counterparty_transaction_id = $1`, [leg.id, status, result.reference || null]
   )
   if (status === 'PENDING') throw new SweepPendingError(`Sweep leg ${leg.id} is still pending.`)
   return status

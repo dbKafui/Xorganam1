@@ -113,7 +113,7 @@ export async function enqueueCollectForMeJob(jobData) {
       // Idempotent: a redelivered webhook for the same transaction won't
       // queue a duplicate sweep+payout job. Use a sanitized jobId
       // (BullMQ forbids certain characters such as ':').
-      jobId: makeSafeJobId('collect-for-me', jobData.transactionId),
+      jobId: makeSafeJobId('collect-for-me', jobData.retryToken ? `${jobData.transactionId}-${jobData.retryToken}` : jobData.transactionId),
       attempts: 5,
       backoff: { type: 'exponential', delay: 2000 },
       removeOnComplete: { age: 60 * 60 * 24 * 7 }, // keep 7 days for audit
