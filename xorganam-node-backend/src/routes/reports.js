@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
-import { authenticate, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { authenticate, requirePermission, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 
 export const reportsRouter = Router()
@@ -22,11 +22,13 @@ function scopeOrRespond(req, res, requestedTenantId) {
 async function computeTotals(whereClause, params) {
   const { rows } = await query(
     `SELECT
-      COALESCE(SUM(amount) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')), 0) AS total_collected,
+      COALESCE(SUM(amount) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED')), 0) AS total_collected,
         COALESCE(SUM(amount) FILTER (WHERE type = 'PAYOUT' AND status = 'PAID_OUT'), 0) AS total_paid_out,
-        COALESCE(SUM(fees), 0) AS total_fees,
+        COALESCE(SUM(fee_charged_amount) FILTER (WHERE fee_config_version_id IS NOT NULL), 0) AS total_fees,
+        COALESCE(SUM(fee_platform_margin) FILTER (WHERE fee_config_version_id IS NOT NULL), 0) AS total_platform_margin,
+        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED') AND fee_config_version_id IS NULL) AS fee_data_unavailable_count,
         COUNT(*) FILTER (WHERE type = 'COLLECTION') AS collection_count,
-        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT')) AS successful_count,
+        COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED')) AS successful_count,
         COUNT(*) FILTER (WHERE status = 'FAILED') AS failed_count,
         COUNT(*) FILTER (WHERE status = 'PENDING') AS pending_count
      FROM transactions
@@ -41,7 +43,9 @@ async function computeTotals(whereClause, params) {
 // ---------------------------------------------------------------------
 reportsRouter.get(
   '/merchant',
+  requirePermission('VIEW_REPORTS'),
   asyncHandler(async (req, res) => {
+    if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to reports.' })
     const { merchantId } = req.query
     if (!merchantId) return res.status(400).json({ message: 'merchantId is required.' })
 
@@ -53,6 +57,9 @@ reportsRouter.get(
     const merchant = merchantRow.rows[0]
 
     if (scopeOrRespond(req, res, merchant.tenant_id) === null) return
+    if (req.user.merchantId && String(req.user.merchantId) !== String(merchant.id)) {
+      return res.status(403).json({ message: 'You do not have access to other merchants.' })
+    }
 
     const totals = await computeTotals('merchant_id = $1', [merchantId])
 
@@ -76,7 +83,10 @@ reportsRouter.get(
 // ---------------------------------------------------------------------
 reportsRouter.get(
   '/tenant',
+  requirePermission('VIEW_REPORTS'),
   asyncHandler(async (req, res) => {
+    if (req.user.merchantId) return res.status(403).json({ message: 'Merchant-assigned users cannot view tenant-wide reports.' })
+    if (req.user.role === 'TENANT_BRANCH_MANAGER') return res.status(403).json({ message: 'Branch managers do not have access to tenant-wide reports.' })
     const tenantId = scopeOrRespond(req, res, req.query.tenantId)
     if (!tenantId) return
 
@@ -87,7 +97,7 @@ reportsRouter.get(
 
     const perMerchant = await query(
       `SELECT m.id, m.display_name,
-              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'COLLECTION' AND t.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT')), 0) AS total_collected,
+              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'COLLECTION' AND t.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT','PARTIALLY_SETTLED')), 0) AS total_collected,
               COUNT(t.id) FILTER (WHERE t.type = 'COLLECTION') AS transaction_count
          FROM merchants m
          LEFT JOIN transactions t ON t.merchant_id = m.id
@@ -129,7 +139,7 @@ reportsRouter.get(
 
     const topTenants = await query(
       `SELECT t.id, t.company_name,
-              COALESCE(SUM(tr.amount) FILTER (WHERE tr.type = 'COLLECTION' AND tr.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT')), 0) AS total_volume,
+              COALESCE(SUM(tr.amount) FILTER (WHERE tr.type = 'COLLECTION' AND tr.status IN ('RECEIVED','SWEPT_INTERNAL','PAID_OUT','PARTIALLY_SETTLED')), 0) AS total_volume,
               COUNT(tr.id) FILTER (WHERE tr.type = 'COLLECTION') AS transaction_count
          FROM tenants t
          LEFT JOIN transactions tr ON tr.tenant_id = t.id
@@ -157,7 +167,8 @@ function mapTotals(row) {
     totalCollected: Number(row.total_collected),
     totalPaidOut: Number(row.total_paid_out),
     totalFees: Number(row.total_fees),
-    netRevenue: Number(row.total_collected) - Number(row.total_fees),
+    netRevenue: Number(row.total_platform_margin),
+    feeDataUnavailableTransactions: Number(row.fee_data_unavailable_count),
     collectionCount: Number(row.collection_count),
     successfulCount: Number(row.successful_count),
     failedCount: Number(row.failed_count),

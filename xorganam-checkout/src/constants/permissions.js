@@ -49,6 +49,12 @@ export const PERMISSION_LABELS = {
 
 // Role-based default permissions
 export const ROLE_PERMISSIONS = {
+  TENANT_BRANCH_MANAGER: [
+    PERMISSION_TYPES.INITIATE_PAYOUT,
+    PERMISSION_TYPES.VIEW_PAYOUTS,
+    PERMISSION_TYPES.VIEW_MERCHANTS,
+    PERMISSION_TYPES.VIEW_TRANSACTIONS
+  ],
   TENANT_VIEWER: [
     PERMISSION_TYPES.VIEW_COLLECTIONS,
     PERMISSION_TYPES.VIEW_PAYOUTS,
@@ -134,11 +140,14 @@ export function getPermissionDescription(permissionType) {
 /**
  * Check if a permission is granted (or can be inferred from role)
  */
-export function hasPermission(userRole, grantedPermissions, permissionType) {
+export function hasPermission(userRole, grantedPermissions = [], permissionType, resourceId = null) {
   // Check if it's a default role permission
   const roleDefaults = getDefaultPermissionsForRole(userRole)
   if (roleDefaults.includes(permissionType)) return true
   
   // Check if it's in the explicitly granted permissions
-  return grantedPermissions.some(p => p.permissionType === permissionType)
+  return grantedPermissions.some(
+    (permission) => permission.permissionType === permissionType &&
+      (!permission.resourceId || (resourceId && permission.resourceId === resourceId))
+  )
 }

@@ -17,6 +17,7 @@ export default function Merchants() {
   const [merchants, setMerchants] = useState([])
   const [form, setForm] = useState(emptyForm)
   const [editForm, setEditForm] = useState(null)
+  const [accountForm, setAccountForm] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(true)
@@ -74,6 +75,16 @@ export default function Merchants() {
     } catch (err) {
       setError(err.message)
     }
+  }
+
+  async function saveAccounts(event) {
+    event.preventDefault()
+    try {
+      await merchantsApi.setEganowAccounts(accountForm.id, accountForm)
+      setNotice('Eganow accounts saved. Merchant is active for payments.')
+      setAccountForm(null)
+      load()
+    } catch (err) { setError(err.message) }
   }
 
   return (
@@ -192,17 +203,19 @@ export default function Merchants() {
         ) : (
           <table className="ledger">
             <thead>
-              <tr><th>Tenant</th><th>Name</th><th>MoMo</th><th>Mode</th><th>Status</th><th></th></tr>
+              <tr><th>Tenant</th><th>Name</th><th>MoMo</th><th>Mode</th><th>Account setup</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
               {merchants.map((merchant) => (
                 <tr key={merchant.id}>
                   <td>{merchant.tenantCompanyName}</td>
-                  <td>{merchant.displayName}</td>
+                  <td>{merchant.displayName}<small className="mono" style={{ display: 'block' }}>{merchant.vendorReference}</small></td>
                   <td className="mono">{merchant.mobileMoneyNumber}</td>
                   <td>{merchant.payoutMode === 'AUTO_SWEEP' ? 'Collect for me' : 'Collection only'}</td>
+                  <td>{merchant.accountSetupStatus || 'PENDING'}</td>
                   <td>{merchant.isActive ? 'Active' : 'Inactive'}</td>
                   <td style={{ display: 'flex', gap: 6 }}>
+                    {merchant.accountSetupStatus !== 'ACTIVE' && <button className="btn btn-secondary btn-sm" onClick={() => setAccountForm({ id: merchant.id, eganowCollectionAccountId: '', eganowPayoutAccountId: '' })}>Set Eganow accounts</button>}
                     <button className="btn btn-secondary btn-sm" onClick={() => setEditForm(merchant)}>Edit</button>
                     <button className="btn btn-danger btn-sm" onClick={() => deleteMerchant(merchant.id)}>Delete</button>
                   </td>
@@ -212,6 +225,15 @@ export default function Merchants() {
           </table>
         )}
       </div>
+      {accountForm && <form className="panel" onSubmit={saveAccounts}>
+        <h2>Set Eganow accounts</h2>
+        <div className="form-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+          <div className="field"><label>Collection account ID</label><input required value={accountForm.eganowCollectionAccountId} onChange={(event) => setAccountForm((form) => ({ ...form, eganowCollectionAccountId: event.target.value }))} /></div>
+          <div className="field"><label>Payout account ID</label><input required value={accountForm.eganowPayoutAccountId} onChange={(event) => setAccountForm((form) => ({ ...form, eganowPayoutAccountId: event.target.value }))} /></div>
+        </div>
+        <button className="btn btn-primary">Activate merchant</button>
+        <button type="button" className="btn btn-secondary" onClick={() => setAccountForm(null)}>Cancel</button>
+      </form>}
     </div>
   )
 }

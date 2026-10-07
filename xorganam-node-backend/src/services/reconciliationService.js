@@ -1,7 +1,9 @@
-import { query } from '../db/pool.js'
+import { query, withTransaction } from '../db/pool.js'
 import { queryTransactionStatus, EganowApiError, isGatewaySuccess, isGatewayFailure } from './eganowClient.js'
 import { enqueueCollectForMeJob } from '../queue/queue.js'
 import { sendMerchantSms } from './notificationService.js'
+import { markCreditInstallmentCollected } from './creditInstallmentSettlement.js'
+import { markStorefrontOrderPaid } from './storefrontOrderService.js'
 
 /**
  * Forces an immediate status re-check against Eganow for a transaction
@@ -28,7 +30,7 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
 
   let upstreamStatus
   try {
-    const result = await queryTransactionStatus(txn.tenant_id, txn.internal_reference)
+    const result = await queryTransactionStatus(txn.tenant_id, txn.internal_reference, { merchantId: txn.merchant_id })
     upstreamStatus = result.status
   } catch (err) {
     if (err instanceof EganowApiError) {
@@ -53,17 +55,17 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
 
   if (isGatewaySuccess(upstreamStatus)) {
     if (txn.type === 'INTERNAL_TRANSFER') {
-      await query(
-        `UPDATE transactions
-            SET status = 'SWEPT_INTERNAL',
-                payment_gateway_status = $2,
-                completed_at = now(),
-                updated_at = now()
-          WHERE id = $1`,
-        [txn.id, upstreamStatus]
-      )
+      await withTransaction(async (client) => {
+        await client.query(
+          `UPDATE transactions SET status = 'SWEPT_INTERNAL', payment_gateway_status = $2,
+                  completed_at = now(), updated_at = now() WHERE id = $1`, [txn.id, upstreamStatus]
+        )
+        if (txn.parent_transaction_id) {
+          await client.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [txn.parent_transaction_id])
+          await markCreditInstallmentCollected(client, txn.parent_transaction_id)
+        }
+      })
       if (txn.parent_transaction_id) {
-        await query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [txn.parent_transaction_id])
         await enqueueCollectForMeJob({ tenantId: txn.tenant_id, merchantId: txn.merchant_id, transactionId: txn.parent_transaction_id })
       }
       return { ...txn, status: 'SWEPT_INTERNAL', payment_gateway_status: upstreamStatus }
@@ -97,15 +99,13 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
 
     // Gateway success confirms the collection. The payout lifecycle is
     // tracked separately as SWEPT_INTERNAL / PAID_OUT.
-    await query(
-      `UPDATE transactions
-          SET status = 'RECEIVED',
-              payment_gateway_status = $2,
-              completed_at = now(),
-              updated_at = now()
-        WHERE id = $1`,
-      [txn.id, upstreamStatus]
-    )
+    await withTransaction(async (tx) => {
+      await tx.query(
+        `UPDATE transactions SET status = 'RECEIVED', payment_gateway_status = $2,
+                completed_at = now(), updated_at = now() WHERE id = $1`, [txn.id, upstreamStatus]
+      )
+      await markStorefrontOrderPaid(tx, txn.id)
+    })
 
     const merchantRow = await query(
       `SELECT payout_mode, mobile_money_number FROM merchants WHERE id = $1`,

@@ -1,9 +1,9 @@
 # Frontend Team Page Updates - Complete Summary
 
 ## Overview
-Successfully updated the operator checkout Team page (`xorganam-checkout/src/pages/operator/OperatorTeam.jsx`) to support:
-1. Merchant-specific user isolation
-2. Permission-based access control
+The operator checkout Team page (`xorganam-checkout/src/pages/operator/OperatorTeam.jsx`) provides:
+1. Merchant assignment and merchant-scoped access for assigned staff on supported endpoints
+2. Permission management UI and backend permission checks on the endpoint groups listed below
 3. Improved user management UI with dedicated sections
 4. Better table layout with consolidated actions
 
@@ -59,7 +59,7 @@ const [merchantAssignmentUser, setMerchantAssignmentUser] = useState(null)
 
 ### 4. Improved Permissions Panel
 **Location:** Below merchant assignment section (only visible when permissions button clicked)
-**Visibility:** `user.role === 'TENANT_ADMIN' && selectedUser`
+**Visibility:** Tenant administrators only, matching the backend permission-management routes
 
 **Features:**
 - Lists current permissions with merchant names displayed (not just IDs)
@@ -68,7 +68,7 @@ const [merchantAssignmentUser, setMerchantAssignmentUser] = useState(null)
   - Merchant display name if resource-specific (e.g., "• Market Woman 1")
   - Revoke button for removal
 - Grant new permissions section with:
-  - Permission type input field
+  - Permission type dropdown
   - Resource dropdown (Tenant-wide or specific merchant)
   - Grant button
 - Styled in card with gray background for the grant section
@@ -76,17 +76,34 @@ const [merchantAssignmentUser, setMerchantAssignmentUser] = useState(null)
 ### 5. API Integration
 **File:** `xorganam-checkout/src/api/client.js`
 
-Verified all endpoints are properly defined:
+The following API methods are defined in the client and have matching backend route handlers:
 ```javascript
 listUsers: (tenantId, merchantId) => request('/users', { params: { tenantId, merchantId }, auth: true }),
 updateUser: (userId, payload) => request(`/users/${userId}`, { method: 'PUT', body: payload, auth: true }),
-updateUserStatus: (userId, isActive) => request(`/users/${userId}/status`, { method: 'PUT', body: { isActive }, auth: true }),
+updateUserStatus: (userId, isActive, merchantId) => request(`/users/${userId}/status`, { method: 'PUT', body: { isActive, merchantId }, auth: true }),
+assignRole: (userId, role, merchantId) => request(`/users/${userId}/assign-role`, { method: 'POST', body: { role, merchantId }, auth: true }),
 assignMerchant: (userId, merchantId) => request(`/users/${userId}/assign-merchant`, { method: 'POST', body: { merchantId }, auth: true }),
 unassignMerchant: (userId) => request(`/users/${userId}/unassign-merchant`, { method: 'POST', auth: true }),
 listUserPermissions: (userId) => request(`/users/${userId}/permissions`, { auth: true }),
 grantPermission: (userId, payload) => request(`/users/${userId}/permissions`, { method: 'POST', body: payload, auth: true }),
 revokePermission: (userId, permissionId) => request(`/users/${userId}/permissions/${permissionId}`, { method: 'DELETE', auth: true })
 ```
+
+### Backend Permission Checks
+
+The backend checks role defaults and explicit grants for these route groups:
+
+- `VIEW_TRANSACTIONS`: transaction list and detail
+- `INITIATE_COLLECTION`: collection initiation
+- `INITIATE_PAYOUT`: internal transfer and payout
+- `VIEW_MERCHANTS` / `MANAGE_MERCHANTS`: merchant list, detail, create, and update
+- `VIEW_REPORTS`: merchant and tenant reports
+- `MANAGE_TEAM`: user create, edit, status, role, and merchant assignment
+- `MANAGE_PERMISSIONS`: permission list, grant, and revoke; these endpoints also require the tenant-admin role
+
+Merchant and transaction handlers enforce tenant scope and assigned-merchant restrictions. The permission catalog contains additional types; this document does not claim every type is enforced on every route.
+
+The team list returns tenant users to tenant-wide callers, filters to a requested merchant plus tenant-level users when `merchantId` is supplied, and restricts merchant-assigned callers to their assigned merchant. Branch managers are denied access to the team list.
 
 ### 6. Backend Data Structure Mapping
 **Fields returned from backend** (via `mapUser` in `src/routes/users.js`):
@@ -97,7 +114,7 @@ revokePermission: (userId, permissionId) => request(`/users/${userId}/permission
 - `lastName`: string (from `last_name`)
 - `email`: string
 - `phoneNumber`: string (from `phone_number`)
-- `role`: string (TENANT_ADMIN, TENANT_MANAGER, TENANT_OPERATOR, TENANT_VIEWER)
+- `role`: string (TENANT_ADMIN, TENANT_MANAGER, TENANT_BRANCH_MANAGER, TENANT_OPERATOR, TENANT_VIEWER)
 - `isActive`: boolean (from `is_active`)
 - `createdAt`: timestamp (from `created_at`)
 - `lastLoginAt`: timestamp (from `last_login_at`)
@@ -158,25 +175,21 @@ revokePermission: (userId, permissionId) => request(`/users/${userId}/permission
 - Merchant names displayed instead of IDs throughout
 
 ### Accessibility
-- All form fields have proper labels
+- Form labels are associated with their controls using matching `htmlFor` and `id` values
 - Buttons have clear text ("Edit", "Activate", "Deactivate", "Grant", "Revoke")
 - Empty states show helpful messages
 - Error and success messages display prominently
 
-## Testing Checklist
+## Verification Status
 
-- [x] Build passes without errors (`npm run build`)
-- [x] All API endpoints properly defined in client
-- [x] Backend schema includes merchant_id and user_permissions table
-- [x] User list loads with merchants data
-- [x] Table displays all team members correctly
-- [x] Edit form opens and closes properly
-- [x] Activate/Deactivate buttons work
-- [x] Merchant assignment section functional
-- [x] Permissions panel visible only to TENANT_ADMIN
-- [x] Permission listing shows merchant names
-- [x] Grant/Revoke permissions functional
-- [x] Merchant dropdown displays displayName correctly
+The API methods and corresponding route handlers are present in the source. Build and interactive behavior have not been verified as part of this review. The following checks remain pending:
+
+- [ ] Build passes without errors (`npm run build`)
+- [ ] User listing, creation, editing, and status changes work end to end
+- [ ] Merchant assignment respects tenant and assigned-merchant scope
+- [ ] Permission grants and revocations update the panel
+- [ ] Permission-gated endpoints allow role defaults and valid grants and reject missing grants
+- [ ] Form labels are associated with their controls
 
 ## Related Files Modified
 
@@ -199,6 +212,6 @@ revokePermission: (userId, permissionId) => request(`/users/${userId}/permission
 
 1. **Backoffice Dashboard**: Similar updates can be applied to the admin dashboard if needed
 2. **Permission Types**: Define standard permission types (e.g., MANAGE_COLLECTIONS, VIEW_REPORTS)
-3. **Permission Enforcement**: Backend services can check permissions in request handling
+3. **Additional Permission Coverage**: The permission catalog includes types beyond the routes currently gated. Add checks where each remaining permission is intended to authorize a concrete action.
 4. **Audit Trail**: Log who granted/revoked permissions and when
 5. **Bulk Operations**: Add ability to manage multiple team members' permissions at once

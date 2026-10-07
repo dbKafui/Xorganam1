@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { getTenantEganowContext, TenantCredentialsError } from './credentialsService.js'
+import { getTenantEganowContext, getMerchantEganowContext, getInstitutionEganowContext, TenantCredentialsError, InstitutionCredentialsError } from './credentialsService.js'
 
 const DEFAULT_EGANOW_BASE_URL = 'https://developer.deveganowapi.com'
 
@@ -77,7 +77,10 @@ function isInvalidEganowBaseUrl(baseUrl) {
 
   try {
     const url = new URL(normalized)
-    return !url.hostname || !['http:', 'https:'].includes(url.protocol)
+    const host = url.hostname.toLowerCase()
+    const allowedHost = host === 'developer.sandbox.egacoreapi.com' || host === 'developer.deveganowapi.com'
+      || host.endsWith('.egacoreapi.com') || host.endsWith('.deveganowapi.com')
+    return !url.hostname || url.protocol !== 'https:' || !allowedHost || (!!url.port && url.port !== '443') || !!url.username || !!url.password || !!url.search || !!url.hash
   } catch {
     return true
   }
@@ -99,15 +102,11 @@ function isGatewayFailure(status) {
 }
 
 export class EganowApiError extends Error {
-  constructor(message, tenantId, statusCode, responseBody) {
-    const bodyDetails = responseBody && typeof responseBody === 'object'
-      ? JSON.stringify(responseBody)
-      : responseBody
-    super(`${message}${bodyDetails ? ` | response=${bodyDetails}` : ''}`)
+  constructor(message, tenantId, statusCode) {
+    super(message)
     this.name = 'EganowApiError'
     this.tenantId = tenantId
     this.statusCode = statusCode
-    this.responseBody = responseBody
   }
 }
 
@@ -135,18 +134,21 @@ function normalizeEganowResponse(data) {
     }
   }
 
-  const rawStatus = data.transactionStatus ?? data.transactionstatus ?? data.messageSuccessfulOrFailed ?? data.status ?? data.message ?? null
+  const rawStatus = data.transactionStatus ?? data.TransactionStatus ?? data.transactionstatus ?? data.messageSuccessfulOrFailed ?? data.status ?? data.message ?? null
   const normalizedStatus = normalizeGatewayStatusValue(rawStatus)
-  const reference = data.eganowReferenceNo || data.reference || data.referenceNo || null
-  const transactionId = data.transactionId || data.transactionReference || data.transaction_id || null
-  const message = data.message || data.messageSuccessfulOrFailed || data.error || null
+  const reference = data.eganowReferenceNo || data.EganowReferenceNo || data.reference || data.referenceNo || null
+  const transactionId = data.transactionId || data.TransactionId || data.transactionReference || data.transaction_id || null
+  const message = data.message || data.messageSuccessfulOrFailed || data.error || data.FailureReason || null
 
   const hasEganowShape = Object.prototype.hasOwnProperty.call(data, 'transactionStatus') ||
+    Object.prototype.hasOwnProperty.call(data, 'TransactionStatus') ||
     Object.prototype.hasOwnProperty.call(data, 'transactionstatus') ||
     Object.prototype.hasOwnProperty.call(data, 'eganowReferenceNo') ||
+    Object.prototype.hasOwnProperty.call(data, 'EganowReferenceNo') ||
     Object.prototype.hasOwnProperty.call(data, 'reference') ||
     Object.prototype.hasOwnProperty.call(data, 'referenceNo') ||
     Object.prototype.hasOwnProperty.call(data, 'transactionId') ||
+    Object.prototype.hasOwnProperty.call(data, 'TransactionId') ||
     Object.prototype.hasOwnProperty.call(data, 'transactionReference') ||
     Object.prototype.hasOwnProperty.call(data, 'transaction_id') ||
     Object.prototype.hasOwnProperty.call(data, 'message')
@@ -157,6 +159,7 @@ function normalizeEganowResponse(data) {
     reference,
     transactionId,
     message,
+    redirectHtml: data.redirectHtml ?? data.data?.redirectHtml ?? null,
     eganowReference: reference
   }
 }
@@ -184,15 +187,11 @@ export async function createEganowClientForTenant(tenantId) {
 
   const token = await requestDeveloperJwtToken(ctx, tenantId, normalizedBaseUrl)
 
-  try {
-    console.log('[eganow] tenant=', tenantId, 'usingTokenAuth=', true, 'hasXAuth=', !!ctx.xAuth)
-  } catch (e) {
-    /* ignore logging errors */
-  }
-
   const client = axios.create({
     baseURL: normalizedBaseUrl,
     timeout: 30_000,
+    maxRedirects: 0,
+    proxy: false,
     headers: {
       Authorization: `Bearer ${token}`,
       'x-Auth': ctx.xAuth,
@@ -200,66 +199,51 @@ export async function createEganowClientForTenant(tenantId) {
     }
   })
 
-  // Optional verbose logging for Eganow HTTP traffic. Enable by setting
-  // environment variable EGANOW_DEBUG=true in the runtime environment.
-  try {
-    const debug = String(process.env.EGANOW_DEBUG || '').toLowerCase() === 'true'
-    if (debug) console.log('[eganow] DEBUG logging enabled for tenant=', tenantId)
-
-    if (debug) {
-      client.interceptors.request.use((req) => {
-        try {
-          const safeHeaders = { ...req.headers }
-          if (safeHeaders.Authorization) safeHeaders.Authorization = 'REDACTED'
-          if (safeHeaders['x-Auth']) safeHeaders['x-Auth'] = 'REDACTED'
-          console.log('[eganow:debug] REQUEST', {
-            tenantId,
-            method: req.method,
-            url: req.baseURL ? (req.baseURL + req.url) : req.url,
-            headers: safeHeaders,
-            data: req.data
-          })
-        } catch (e) {
-          console.warn('[eganow:debug] request log failed', e?.message)
-        }
-        return req
-      })
-
-      client.interceptors.response.use(
-        (res) => {
-          try {
-            console.log('[eganow:debug] RESPONSE', {
-              tenantId,
-              status: res.status,
-              statusText: res.statusText,
-              data: res.data
-            })
-          } catch (e) {
-            console.warn('[eganow:debug] response log failed', e?.message)
-          }
-          return res
-        },
-        (err) => {
-          try {
-            const resp = err.response
-            console.log('[eganow:debug] ERROR RESPONSE', {
-              tenantId,
-              message: err.message,
-              status: resp?.status || null,
-              data: resp?.data || null
-            })
-          } catch (e) {
-            console.warn('[eganow:debug] error response log failed', e?.message)
-          }
-          throw err
-        }
-      )
-    }
-  } catch (e) {
-    /* ignore logging setup errors */
-  }
-
   return { client, tenantId, companyName: ctx.companyName, callbackUrl: ctx.callbackUrl || null }
+}
+
+export async function createEganowClientForMerchant(tenantId, merchantId) {
+  const ctx = await getMerchantEganowContext(tenantId, merchantId)
+  const normalizedBaseUrl = normalizeBaseUrl(ctx.baseUrl || DEFAULT_EGANOW_BASE_URL)
+  if (isInvalidEganowBaseUrl(normalizedBaseUrl)) {
+    throw new TenantCredentialsError('Vendor Eganow base URL is not permitted.', tenantId)
+  }
+  const tokenContext = `merchant:${merchantId}`
+  const token = await requestDeveloperJwtToken(ctx, tokenContext, normalizedBaseUrl, { cacheKey: tokenContext })
+  const client = axios.create({
+    baseURL: normalizedBaseUrl,
+    timeout: 30_000,
+    maxRedirects: 0,
+    proxy: false,
+    headers: { Authorization: `Bearer ${token}`, 'x-Auth': ctx.xAuth, 'Content-Type': 'application/json' }
+  })
+  return { client, tenantId, merchantId, callbackUrl: ctx.callbackUrl, payoutAccountId: ctx.payoutAccountId }
+}
+
+export async function createEganowClientForInstitution(institutionId) {
+  const ctx = await getInstitutionEganowContext(institutionId)
+  const normalizedBaseUrl = normalizeBaseUrl(ctx.baseUrl || DEFAULT_EGANOW_BASE_URL)
+  if (isInvalidEganowBaseUrl(normalizedBaseUrl)) throw new InstitutionCredentialsError('Institution Eganow base URL is invalid.', institutionId)
+  const tokenContext = `institution:${institutionId}`
+  const token = await requestDeveloperJwtToken(ctx, tokenContext, normalizedBaseUrl)
+  const client = axios.create({
+    baseURL: normalizedBaseUrl,
+    timeout: 30_000,
+    maxRedirects: 0,
+    proxy: false,
+    headers: { Authorization: `Bearer ${token}`, 'x-Auth': ctx.xAuth, 'Content-Type': 'application/json' }
+  })
+  return { client, institutionId, institutionName: ctx.institutionName, callbackUrl: ctx.callbackUrl,
+    collectionAccountId: ctx.collectionAccountId, payoutAccountId: ctx.payoutAccountId, networkProvider: ctx.networkProvider }
+}
+
+export async function refreshEganowTokenForInstitution(institutionId) {
+  const ctx = await getInstitutionEganowContext(institutionId)
+  const normalizedBaseUrl = normalizeBaseUrl(ctx.baseUrl || DEFAULT_EGANOW_BASE_URL)
+  if (isInvalidEganowBaseUrl(normalizedBaseUrl)) throw new InstitutionCredentialsError('Institution Eganow base URL is invalid.', institutionId)
+  const token = await requestDeveloperJwtToken(ctx, `institution:${institutionId}`, normalizedBaseUrl,
+    { forceRefresh: true, cacheKey: `institution:${institutionId}` })
+  return { institutionId, token, baseUrl: normalizedBaseUrl }
 }
 
 export async function refreshEganowTokenForTenant(tenantId) {
@@ -305,11 +289,12 @@ function getCachedJwtToken(tenantId) {
 
 async function requestDeveloperJwtToken(ctx, tenantId, baseUrl, options = {}) {
   const { forceRefresh = false } = options
+  const cacheKey = options.cacheKey || tenantId
   if (!forceRefresh) {
-    const cached = getCachedJwtToken(tenantId)
+    const cached = getCachedJwtToken(cacheKey)
     if (cached) return cached
   } else {
-    eganowTokenCache.delete(tenantId)
+    eganowTokenCache.delete(cacheKey)
   }
 
   if (!ctx.apiUsername || !ctx.apiPassword) {
@@ -319,21 +304,13 @@ async function requestDeveloperJwtToken(ctx, tenantId, baseUrl, options = {}) {
     throw new TenantCredentialsError('Tenant Eganow x-Auth is not configured.', tenantId)
   }
 
-  const debug = String(process.env.EGANOW_DEBUG || '').toLowerCase() === 'true'
-  if (debug) {
-    console.log('[eganow:debug] token.request', {
-      tenantId,
-      url: `${baseUrl}/api/auth/token`,
-      authUsername: ctx.apiUsername ? 'configured' : 'missing',
-      hasXAuth: !!ctx.xAuth
-    })
-  }
-
   let response
   try {
     response = await axios.get('/api/auth/token', {
       baseURL: baseUrl,
       timeout: 30_000,
+      maxRedirects: 0,
+      proxy: false,
       auth: {
         username: ctx.apiUsername,
         password: ctx.apiPassword
@@ -344,35 +321,20 @@ async function requestDeveloperJwtToken(ctx, tenantId, baseUrl, options = {}) {
       }
     })
   } catch (err) {
-    const resp = err.response
-    console.error('[eganow:debug] token.request.failed', {
-      tenantId,
-      status: resp?.status || null,
-      data: resp?.data || err.message,
-      message: err.message
-    })
     throw err
   }
 
   const data = response.data
-  if (debug) {
-    console.log('[eganow:debug] token.response', {
-      tenantId,
-      status: response.status,
-      data: response.data
-    })
-  }
   const jwtToken = data?.developerJwtToken
 
   if (!jwtToken || data?.isSuccess === false) {
-    const errorDetails = typeof data === 'object' ? JSON.stringify(data) : data
     throw new TenantCredentialsError(
-      `Failed to obtain Eganow auth token for tenant ${tenantId}: ${errorDetails}`,
+      `Failed to obtain Eganow auth token for tenant ${tenantId}.`,
       tenantId
     )
   }
 
-  eganowTokenCache.set(tenantId, {
+  eganowTokenCache.set(cacheKey, {
     token: jwtToken,
     expiresAt: Date.now() + EGANOW_TOKEN_CACHE_MS
   })
@@ -394,9 +356,6 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
       if (!retryable || attempt === retries) break
 
       const delayMs = 300 * 2 ** attempt
-      console.warn(
-        `[eganow] ${operation} retry ${attempt + 1}/${retries} for tenant ${tenantId} after ${delayMs}ms (status=${status})`
-      )
       await new Promise((resolve) => setTimeout(resolve, delayMs))
     }
   }
@@ -412,9 +371,10 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
 /**
  * Internal transfer: merchant's collection account -> payout account.
  */
-export async function sweepToPayoutAccount(tenantId, { amount, network, narration }) {
-  const { client } = await createEganowClientForTenant(tenantId)
-  const paypartnerCode = normalizePaypartnerCode(network)
+export async function sweepToPayoutAccount(tenantId, { amount, network: _network, narration, merchantId = null }) {
+  const { client } = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : await createEganowClientForTenant(tenantId)
   const narrationValue = narration || 'InternalTransfer'
 
   return withRetry(
@@ -426,10 +386,7 @@ export async function sweepToPayoutAccount(tenantId, { amount, network, narratio
         languageId: 'en'
       }
 
-      console.log('[eganow:sweep] tenant=', tenantId, 'payload=', JSON.stringify(payload))
-      
       const response = await client.post('/api/transactions/collection-to-payout', payload)
-      console.log('[eganow:sweep] response=', JSON.stringify(normalizeEganowResponse(response.data)))
       
       return normalizeEganowResponse(response.data)
     },
@@ -440,23 +397,19 @@ export async function sweepToPayoutAccount(tenantId, { amount, network, narratio
 /**
  * External disbursal: merchant's payout account -> her MoMo number.
  */
-export async function disburseToMobileMoney(tenantId, { reference, amount, currency, accountNoOrCardNoOrMsisdn, network, narration, callback }) {
-  const { client, callbackUrl: tenantCallbackUrl } = await createEganowClientForTenant(tenantId)
+export async function disburseToMobileMoney(tenantId, { reference, amount, currency, accountNoOrCardNoOrMsisdn, network, narration, callback, destinationType = 'MOMO', accountName = 'Recipient', merchantId = null }) {
+  const { client, callbackUrl: tenantCallbackUrl } = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : await createEganowClientForTenant(tenantId)
 
   return withRetry(
     async () => {
-      const normalizedDestination = normalizeMsisdnInput(accountNoOrCardNoOrMsisdn)
+      const isBank = String(destinationType).toUpperCase() === 'BANK'
+      const normalizedDestination = isBank ? String(accountNoOrCardNoOrMsisdn || '').replace(/\s/g, '') : normalizeMsisdnInput(accountNoOrCardNoOrMsisdn)
       let paypartnerCode = normalizePaypartnerCode(network)
-      const inferredPaypartnerCode = inferPaypartnerCodeFromMsisdn(normalizedDestination)
+      const inferredPaypartnerCode = isBank ? null : inferPaypartnerCodeFromMsisdn(normalizedDestination)
       if (inferredPaypartnerCode) {
         if (paypartnerCode && paypartnerCode !== inferredPaypartnerCode) {
-          console.log('[eganow:payout] destination MSISDN paypartner differs from configured network; using inferred paypartner', {
-            tenantId,
-            configuredNetwork: network,
-            configuredPaypartnerCode: paypartnerCode,
-            inferredPaypartnerCode,
-            destination: normalizedDestination
-          })
         }
         paypartnerCode = inferredPaypartnerCode
       }
@@ -469,7 +422,7 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
         paypartnerCode,
         amount,
         accountNoOrCardNoOrMSISDN: normalizedDestination,
-        accountName: 'Recipient',
+        accountName,
         transactionId: reference,
         narration,
         transCurrencyIso: currency,
@@ -487,13 +440,7 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
         throw new TenantCredentialsError('Tenant Eganow callback URL is not configured.', tenantId)
       }
 
-      console.log('[eganow:payout] tenant=', tenantId, 'payload=', JSON.stringify({
-        ...body,
-        accountNoOrCardNoOrMSISDN: body.accountNoOrCardNoOrMSISDN ? '***' + body.accountNoOrCardNoOrMSISDN.slice(-4) : undefined
-      }))
-
       const response = await client.post('/api/transactions/payout', body)
-      console.log('[eganow:payout] response=', JSON.stringify(normalizeEganowResponse(response.data)))
       
       return normalizeEganowResponse(response.data)
     },
@@ -501,8 +448,10 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
   )
 }
 
-export async function queryTransactionStatus(tenantId, reference) {
-  const { client } = await createEganowClientForTenant(tenantId)
+export async function queryTransactionStatus(tenantId, reference, { merchantId = null } = {}) {
+  const { client } = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : await createEganowClientForTenant(tenantId)
 
   return withRetry(
     async () => {
@@ -513,6 +462,32 @@ export async function queryTransactionStatus(tenantId, reference) {
       return normalizeEganowResponse(response.data)
     },
     { tenantId, operation: 'StatusQuery' }
+  )
+}
+
+export async function getPayoutWalletBalance(tenantId, _accountId, merchantId = null) {
+  const merchantContext = merchantId
+    ? await createEganowClientForMerchant(tenantId, merchantId)
+    : null
+  if (merchantContext && _accountId && String(merchantContext.payoutAccountId) !== String(_accountId)) {
+    throw new TenantCredentialsError('The payout account does not belong to this vendor.', tenantId)
+  }
+  const clientContext = merchantContext || await createEganowClientForTenant(tenantId)
+  const { client } = clientContext
+
+  return withRetry(
+    async () => {
+      const response = await client.get('/api/transactions/collection/get-balance', {
+        data: {},
+        headers: { 'Content-Type': 'application/json' }
+      })
+      const balance = Number(response.data?.balance)
+      if (!Number.isFinite(balance) || balance < 0) {
+        throw new EganowApiError('Eganow returned an invalid payout-wallet balance.', tenantId, response.status, response.data)
+      }
+      return balance
+    },
+    { tenantId, operation: 'PayoutWalletBalance' }
   )
 }
 

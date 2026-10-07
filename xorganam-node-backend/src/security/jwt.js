@@ -4,22 +4,29 @@ import { env } from '../config/env.js'
 const EXPIRY = process.env.JWT_EXPIRY || '8h'
 
 /**
- * @param {{ id: string, tenantId: string|null, role: string }} user
+ * @param {{ id: string, tenantId: string|null, role: string, institutionId?: string, institutionStaffId?: string }} user
  */
 export function signToken(user) {
-  return jwt.sign(
-    {
-      sub: user.id,
-      tenantId: user.tenantId,
-      role: user.role
-    },
-    env.jwt.secret,
-    { expiresIn: EXPIRY, issuer: 'xorganam', audience: 'xorganam-clients' }
-  )
+  const payload = {
+    sub: user.id,
+    tenantId: user.tenantId ?? null,
+    role: user.role
+  }
+
+  if (user.institutionId) payload.institutionId = user.institutionId
+  if (user.institutionStaffId) payload.institutionStaffId = user.institutionStaffId
+  if (user.mfa === true) payload.mfa = true
+  if (user.mfaFlow) payload.mfaFlow = user.mfaFlow
+  if (user.principalType) payload.principalType = user.principalType
+
+  return jwt.sign(payload, env.jwt.secret, {
+    expiresIn: user.mfaFlow ? '10m' : EXPIRY,
+    issuer: 'xorganam', audience: 'xorganam-clients'
+  })
 }
 
 /**
- * @returns {{ sub: string, tenantId: string|null, role: string }}
+ * @returns {{ sub: string, tenantId: string|null, role: string, institutionId?: string, institutionStaffId?: string }}
  * @throws if the token is missing, expired, or has an invalid signature
  */
 export function verifyToken(token) {

@@ -1,5 +1,7 @@
 import { verifyToken } from '../security/jwt.js'
 import { query } from '../db/pool.js'
+import { isMfaRequired } from '../services/mfaPolicy.js'
+import { ROLE_PERMISSIONS } from '../constants/permissions.js'
 
 /**
  * Verifies the Bearer token and attaches req.user = { id, tenantId, role }.
@@ -19,10 +21,13 @@ export async function authenticate(req, res, next) {
   } catch {
     return res.status(401).json({ message: 'Invalid or expired session.' })
   }
-
   try {
+    if (payload.mfa !== true && await isMfaRequired('TENANT', payload.sub)) {
+      return res.status(401).json({ message: 'A verified MFA session is required.' })
+    }
     const { rows } = await query(
-      `SELECT id, tenant_id, merchant_id, role, is_active, first_name, last_name, email FROM users WHERE id = $1`,
+      `SELECT u.id, u.tenant_id, u.merchant_id, u.role, u.is_active, u.first_name, u.last_name, u.email, t.status AS tenant_status
+         FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1`,
       [payload.sub]
     )
 
@@ -31,6 +36,9 @@ export async function authenticate(req, res, next) {
     }
 
     const user = rows[0]
+    if (user.tenant_id && user.tenant_status === 'SUSPENDED') {
+      return res.status(403).json({ message: 'Tenant access is suspended.' })
+    }
     req.user = {
       id: user.id,
       tenantId: user.tenant_id,
@@ -43,7 +51,7 @@ export async function authenticate(req, res, next) {
     }
     next()
   } catch (err) {
-    console.error('[auth] failed to load user for token', err)
+    console.error('[auth] failed to load user for token', { code: err?.code || 'DB_ERROR' })
     res.status(500).json({ message: 'Authentication failed.' })
   }
 }
@@ -77,6 +85,23 @@ export function requireRole(minimumRole) {
     }
     next()
   }
+}
+
+export function requireAnyRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
+    if (req.user.isPlatformAdmin || roles.includes(req.user.role)) return next()
+    return res.status(403).json({ message: 'You do not have permission to do this.' })
+  }
+}
+
+export function requireOwnMerchantIfBranchManager(req, res, next) {
+  if (req.user?.role !== 'TENANT_BRANCH_MANAGER') return next()
+  const merchantId = req.params.merchantId || req.query.merchantId || req.body?.merchantId
+  if (!req.user.merchantId || String(merchantId) !== String(req.user.merchantId)) {
+    return res.status(403).json({ message: 'Branch managers can only access their assigned merchant.' })
+  }
+  next()
 }
 
 /**
@@ -125,12 +150,14 @@ export function resolveTenantScope(req, requestedTenantId) {
  * @param resourceId Optional resource ID (e.g., merchant ID)
  * @returns true if the user has the permission, false otherwise
  */
-export async function userHasPermission(userId, permissionType, resourceId = null) {
+export async function userHasPermission(userId, permissionType, resourceId = null, role = null) {
+  if (role === 'PLATFORM_ADMIN' || role === 'TENANT_ADMIN') return true
+  if (ROLE_PERMISSIONS[role]?.includes(permissionType)) return true
   const { rows } = await query(
     `SELECT 1 FROM user_permissions
       WHERE user_id = $1
         AND permission_type = $2
-        AND (resource_id IS NULL OR resource_id = $3)
+        AND (resource_id IS NULL OR ($3::uuid IS NOT NULL AND resource_id = $3))
       LIMIT 1`,
     [userId, permissionType, resourceId]
   )
@@ -149,11 +176,19 @@ export function requirePermission(permissionType) {
     if (req.user.isPlatformAdmin) return next()
 
     // Check if user has the permission
-    const hasPermission = await userHasPermission(req.user.id, permissionType)
-    if (!hasPermission) {
-      return res.status(403).json({ message: `You do not have ${permissionType} permission.` })
+    try {
+      const resourceId = req.params.merchantId || req.query.merchantId || req.body?.merchantId || null
+      if (resourceId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(resourceId))) {
+        return res.status(400).json({ message: 'merchantId must be a valid UUID.' })
+      }
+      const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId, req.user.role)
+      if (!hasPermission) {
+        return res.status(403).json({ message: `You do not have ${permissionType} permission.` })
+      }
+      next()
+    } catch (error) {
+      next(error)
     }
-    next()
   }
 }
 
@@ -173,10 +208,14 @@ export function requireResourcePermission(permissionType, resourceIdParam) {
       return res.status(400).json({ message: `${resourceIdParam} is required.` })
     }
 
-    const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId)
-    if (!hasPermission) {
-      return res.status(403).json({ message: `You do not have ${permissionType} permission for this resource.` })
+    try {
+      const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId, req.user.role)
+      if (!hasPermission) {
+        return res.status(403).json({ message: `You do not have ${permissionType} permission for this resource.` })
+      }
+      next()
+    } catch (error) {
+      next(error)
     }
-    next()
   }
 }

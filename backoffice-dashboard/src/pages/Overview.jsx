@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { reportsApi } from '../api/reports'
+import { api } from '../api/client'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -12,6 +13,7 @@ export default function Overview() {
   const [report, setReport] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [backendHealth, setBackendHealth] = useState('checking')
 
   useEffect(() => {
     reportsApi
@@ -19,6 +21,16 @@ export default function Overview() {
       .then(setReport)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const check = () => api.health()
+      .then(() => { if (active) setBackendHealth('online') })
+      .catch(() => { if (active) setBackendHealth('offline') })
+    check()
+    const timer = window.setInterval(check, 30000)
+    return () => { active = false; window.clearInterval(timer) }
   }, [])
 
   return (
@@ -31,6 +43,9 @@ export default function Overview() {
         <Link to="/tenants" className="btn btn-primary">
           Review tenants
         </Link>
+      </div>
+      <div className={`health-indicator ${backendHealth}`} role="status" aria-live="polite">
+        <span className="health-dot" /> Backend {backendHealth === 'checking' ? 'checking' : backendHealth}
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}

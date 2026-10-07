@@ -37,10 +37,11 @@ export default function OperatorAccount() {
       const formData = new FormData()
       formData.append('kycType', uploadForm.kycType)
       // Append per-file metadata in the same order as files so the server can
-      // accept arrays of documentType/documentNumber and associate them.
+      // accept arrays of documentType/documentNumber and associate them. The
+      // form-level values are defaults when a file has no per-file override.
       for (const entry of uploadForm.entries) {
-        formData.append('documentType', entry.documentType || '')
-        formData.append('documentNumber', entry.documentNumber || '')
+        formData.append('documentType', (entry.documentType || uploadForm.documentType || '').trim())
+        formData.append('documentNumber', (entry.documentNumber || uploadForm.documentNumber || '').trim())
         formData.append('document', entry.file)
       }
 
@@ -111,12 +112,12 @@ export default function OperatorAccount() {
           </div>
           <div className="field">
             <label>Document number</label>
-            <input required value={uploadForm.documentNumber} onChange={(e) => setUploadForm((f) => ({ ...f, documentNumber: e.target.value }))} />
+            <input required maxLength={100} autoComplete="off" value={uploadForm.documentNumber} onChange={(e) => setUploadForm((f) => ({ ...f, documentNumber: e.target.value }))} />
           </div>
         </div>
         <div className="field">
           <label>Document type</label>
-          <input required placeholder="e.g. Certificate of Incorporation" value={uploadForm.documentType} onChange={(e) => setUploadForm((f) => ({ ...f, documentType: e.target.value }))} />
+          <input required maxLength={100} placeholder="e.g. Certificate of Incorporation" value={uploadForm.documentType} onChange={(e) => setUploadForm((f) => ({ ...f, documentType: e.target.value }))} />
         </div>
         <div className="field">
           <label>Files</label>
@@ -135,7 +136,7 @@ export default function OperatorAccount() {
                 <div className="two-col">
                   <div className="field">
                     <label>Document type</label>
-                    <input value={entry.documentType} onChange={(e) => setUploadForm((f) => {
+                    <input maxLength={100} value={entry.documentType} onChange={(e) => setUploadForm((f) => {
                       const next = { ...f }
                       next.entries = next.entries.slice()
                       next.entries[idx] = { ...next.entries[idx], documentType: e.target.value }
@@ -144,7 +145,7 @@ export default function OperatorAccount() {
                   </div>
                   <div className="field">
                     <label>Document number</label>
-                    <input value={entry.documentNumber} onChange={(e) => setUploadForm((f) => {
+                    <input maxLength={100} autoComplete="off" value={entry.documentNumber} onChange={(e) => setUploadForm((f) => {
                       const next = { ...f }
                       next.entries = next.entries.slice()
                       next.entries[idx] = { ...next.entries[idx], documentNumber: e.target.value }

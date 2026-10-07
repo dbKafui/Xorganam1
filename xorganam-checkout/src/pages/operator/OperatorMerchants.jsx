@@ -25,7 +25,7 @@ export default function OperatorMerchants() {
           <h1>Merchants</h1>
           <p>The market women you collect payments on behalf of.</p>
         </div>
-        <Link to="/operator/merchants/new" className="btn btn-primary">Add a merchant</Link>
+        {user?.role !== 'TENANT_BRANCH_MANAGER' && <Link to="/operator/merchants/new" className="btn btn-primary">Add a merchant</Link>}
       </div>
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
@@ -38,7 +38,7 @@ export default function OperatorMerchants() {
         ) : (
           <table className="ledger">
             <thead>
-              <tr><th>Name</th><th>MoMo number</th><th>Network</th><th>Payout mode</th><th>Status</th><th></th></tr>
+              <tr><th>Name</th><th>MoMo number</th><th>Network</th><th>How you get paid</th><th>Account setup</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
               {merchants.map((m) => (
@@ -46,7 +46,8 @@ export default function OperatorMerchants() {
                   <td>{m.displayName}</td>
                   <td className="mono">{m.mobileMoneyNumber}</td>
                   <td>{m.networkProvider}</td>
-                  <td>{m.payoutMode === 'AUTO_SWEEP' ? 'Collect for me' : 'Collection only'}</td>
+                  <td>{m.payoutMode === 'AUTO_SWEEP' ? 'Moves automatically' : 'Manual release'}</td>
+                  <td>{m.accountSetupStatus === 'ACTIVE' ? 'Active' : 'Pending'}</td>
                   <td><span className={`status-pill ${m.isActive ? 'approved' : 'rejected'}`}>{m.isActive ? 'Active' : 'Inactive'}</span></td>
                   <td><Link to={`/operator/merchants/${m.id}`}>Manage →</Link></td>
                 </tr>

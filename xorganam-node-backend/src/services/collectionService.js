@@ -1,16 +1,11 @@
-import crypto from 'node:crypto'
-import { query } from '../db/pool.js'
-import { createEganowClientForTenant, EganowApiError, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
-import { getTenantEganowContext, TenantCredentialsError } from './credentialsService.js'
+import { query, withTransaction } from '../db/pool.js'
+import { createEganowClientForMerchant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
+import { TenantCredentialsError } from './credentialsService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
+import { computeFee } from './feeService.js'
+import { createVendorReference } from './referenceIds.js'
 
 export class CollectionRejectedError extends Error {}
-
-function maskMsisdn(msisdn) {
-  if (!msisdn) return msisdn
-  const digits = String(msisdn).replace(/\D/g, '')
-  return digits.length <= 4 ? digits : `***${digits.slice(-4)}`
-}
 
 function normalizeMsisdn(rawMsisdn) {
   if (!rawMsisdn) return rawMsisdn
@@ -46,6 +41,23 @@ function inferPaypartnerCodeFromMsisdn(msisdn) {
   return null
 }
 
+function validCardNumber(value) {
+  const digits = String(value || '').replace(/[\s-]/g, '')
+  if (!/^\d{12,19}$/.test(digits)) return false
+  let sum = 0
+  let double = false
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let digit = Number(digits[index])
+    if (double) {
+      digit *= 2
+      if (digit > 9) digit -= 9
+    }
+    sum += digit
+    double = !double
+  }
+  return sum % 10 === 0
+}
+
 /**
  * Looks up a merchant by id with no tenant assumption - used by the
  * anonymous checkout flow, which only ever knows a merchantId (the
@@ -55,13 +67,13 @@ function inferPaypartnerCodeFromMsisdn(msisdn) {
  */
 export async function findMerchantForCollection(merchantId) {
   const { rows } = await query(
-    `SELECT m.id, m.tenant_id, m.display_name, m.is_active, m.eganow_collection_account_id,
+    `SELECT m.id, m.tenant_id, m.display_name, m.is_active, m.account_setup_status, m.eganow_collection_account_id,
             m.eganow_payout_account_id, m.network_provider,
             t.status AS tenant_status,
-            c.is_enabled AS eganow_enabled
+            e.is_enabled AS eganow_enabled
        FROM merchants m
        JOIN tenants t ON t.id = m.tenant_id
-       JOIN tenant_eganow_credentials c ON c.tenant_id = t.id
+       JOIN merchant_eganow_credentials e ON e.merchant_id = m.id
       WHERE m.id = $1`,
     [merchantId]
   )
@@ -73,7 +85,7 @@ export async function findMerchantForCollection(merchantId) {
  * @param {{ amount: number, msisdn: string, network?: string, narration?: string, payoutMsisdn?: string }} input
  * @returns {Promise<{ transactionId: string, internalReference: string, status: string, tenantId: string }>}
  */
-export async function initiateCollection(merchantId, { amount, msisdn, network, narration, payoutMsisdn = null, callback = null }) {
+export async function initiateCollection(merchantId, { amount, msisdn, network, narration, collectionMethod = 'MOMO', cardNumber = null, cardholderName = null, expiryDateMonth = null, expiryDateYear = null, cvv = null, payoutMsisdn = null, callback = null, creditPlanId = null, creditInstallmentId = null, orderId = null }) {
   const merchant = await findMerchantForCollection(merchantId)
 
   if (!merchant || !merchant.is_active) {
@@ -82,73 +94,144 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
   if (merchant.tenant_status !== 'ACTIVE') {
     throw new CollectionRejectedError('This merchant is not currently able to accept payments.')
   }
+  if (merchant.account_setup_status && merchant.account_setup_status !== 'ACTIVE') {
+    throw new CollectionRejectedError('Eganow account setup is pending for this merchant. Contact platform support before accepting payments.')
+  }
+  if (!merchant.eganow_collection_account_id || !merchant.eganow_payout_account_id) {
+    throw new CollectionRejectedError('Eganow account setup is pending for this merchant. Contact platform support before accepting payments.')
+  }
   if (!merchant.eganow_enabled) {
     throw new CollectionRejectedError('Payments are not configured for this merchant yet.')
   }
-  if (!amount || amount <= 0) {
-    throw new CollectionRejectedError('Amount must be greater than zero.')
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(Math.round(amount * 100)) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
+    throw new CollectionRejectedError('Amount must be a valid positive amount with at most two decimal places.')
   }
-  if (!msisdn) {
-    throw new CollectionRejectedError('A mobile number is required.')
-  }
+  const collectionFee = await computeFee(merchant.tenant_id, 'COLLECTION', amount)
+  // Fees are recorded for reconciliation; Eganow applies any actual deduction.
+  const gatewayAmount = amount
+  const normalizedCollectionMethod = String(collectionMethod || 'MOMO').toUpperCase()
+  if (!['MOMO', 'CARD'].includes(normalizedCollectionMethod)) throw new CollectionRejectedError('Choose Mobile Money or Card collection.')
+  if (normalizedCollectionMethod === 'MOMO' && !msisdn) throw new CollectionRejectedError('A mobile number is required.')
+  if (normalizedCollectionMethod === 'CARD' && !validCardNumber(cardNumber)) throw new CollectionRejectedError('Enter a valid payment card number.')
+  if (normalizedCollectionMethod === 'CARD' && (!String(cardholderName || '').trim() || !Number.isInteger(Number(expiryDateMonth)) || Number(expiryDateMonth) < 1 || Number(expiryDateMonth) > 12 || !/^\d{2}$/.test(String(expiryDateYear || '')) || !/^\d{3,4}$/.test(String(cvv || '')))) throw new CollectionRejectedError('Enter the cardholder name, expiry date, and valid CVV.')
 
-  // Load tenant-scoped config before inserting the transaction. The Eganow
-  // client will use the tenant DB base URL first, then its developer fallback.
-  let tenantCtx
-  try {
-    tenantCtx = await getTenantEganowContext(merchant.tenant_id)
-  } catch (err) {
-    if (err instanceof TenantCredentialsError) {
-      throw new CollectionRejectedError(`Eganow configuration error: ${err.message}`)
-    }
-    throw err
+  const internalReference = createVendorReference(merchant.display_name, 'COL')
+  const normalizedMsisdn = msisdn ? normalizeMsisdn(msisdn) : null
+  if ((normalizedCollectionMethod === 'MOMO' || normalizedMsisdn) && !/^233[0-9]{9}$/.test(normalizedMsisdn || '')) {
+    throw new CollectionRejectedError('A valid Ghana mobile number is required.')
   }
-
-  const internalReference = `COL-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-  const normalizedMsisdn = normalizeMsisdn(msisdn)
   const normalizedPayoutMsisdn = payoutMsisdn ? normalizeMsisdn(payoutMsisdn) : null
   if (normalizedPayoutMsisdn && !/^233[0-9]{9}$/.test(normalizedPayoutMsisdn)) {
     throw new CollectionRejectedError('A valid payout phone number is required in local or international format.')
   }
 
-  const { rows } = await query(
-    `INSERT INTO transactions
-       (tenant_id, merchant_id, type, status, amount, currency, internal_reference, collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn, notification_sent)
-     VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $6, 'INITIATED', $7, FALSE)
-     RETURNING id`,
-    [merchant.tenant_id, merchant.id, amount, internalReference, normalizedMsisdn, normalizedMsisdn, normalizedPayoutMsisdn]
-  )
-  const transactionId = rows[0].id
+  let transactionId
+  if (creditInstallmentId || creditPlanId || orderId) {
+    transactionId = await withTransaction(async (client) => {
+      let validatedPlanId = null
+      let validatedInstallmentId = null
+      let validatedOrderId = null
+      if (creditInstallmentId || (creditPlanId && !orderId)) {
+        if (!creditInstallmentId || !creditPlanId || orderId) throw new CollectionRejectedError('Credit installment checkout requires a plan and installment without an order.')
+      const { rows: installmentRows } = await client.query(
+        `SELECT p.id AS plan_id, p.tenant_id, p.merchant_id, p.customer_identifier,
+                p.status AS plan_status, i.id AS installment_id, i.status AS installment_status,
+                i.amount_due
+           FROM credit_plans p
+           JOIN credit_plan_installments i ON i.credit_plan_id = p.id
+          WHERE p.id = $1 AND i.id = $2 AND p.tenant_id = $3 AND p.merchant_id = $4
+          FOR UPDATE OF p, i`,
+        [creditPlanId, creditInstallmentId, merchant.tenant_id, merchant.id]
+      )
+      const installment = installmentRows[0]
+      // DEFAULTED is a reporting state only; it does not block repayment.
+      if (!installment || !['ACTIVE', 'OVERDUE', 'DEFAULTED'].includes(installment.plan_status) || !['PENDING', 'OVERDUE'].includes(installment.installment_status)) {
+        throw new CollectionRejectedError('This installment is not available for payment.')
+      }
+      if (installment.customer_identifier !== normalizedMsisdn) {
+        throw new CollectionRejectedError('The mobile number must match the number on this credit plan.')
+      }
+      if (Math.round(Number(amount) * 100) !== Math.round(Number(installment.amount_due) * 100)) {
+        throw new CollectionRejectedError('Installments must be paid in full.')
+      }
+      const { rows: activePayment } = await client.query(
+        `SELECT id FROM transactions
+          WHERE credit_installment_id = $1 AND type = 'COLLECTION' AND status <> 'FAILED'
+          LIMIT 1`, [creditInstallmentId]
+      )
+      if (activePayment.length) throw new CollectionRejectedError('A payment for this installment is already in progress or complete.')
+      validatedPlanId = creditPlanId
+      validatedInstallmentId = creditInstallmentId
+      } else if (creditPlanId) {
+        const { rows } = await client.query(
+          `SELECT p.id AS plan_id, p.tenant_id, p.merchant_id, p.status AS plan_status,
+                  p.down_payment, o.status AS order_status, o.collection_transaction_id
+             FROM credit_plans p JOIN orders o ON o.id = p.order_id
+            WHERE p.id = $1 AND o.id = $2 AND p.tenant_id = $3 AND p.merchant_id = $4
+            FOR UPDATE OF p, o`, [creditPlanId, orderId, merchant.tenant_id, merchant.id]
+        )
+        const plan = rows[0]
+        if (!plan || plan.plan_status !== 'ACTIVE' || plan.order_status !== 'PENDING_PAYMENT' || Number(plan.down_payment) <= 0) {
+          throw new CollectionRejectedError('The credit order down payment is not available.')
+        }
+        if (Math.round(Number(amount) * 100) !== Math.round(Number(plan.down_payment) * 100)) {
+          throw new CollectionRejectedError('The collection amount must match the order down payment.')
+        }
+        if (plan.collection_transaction_id) throw new CollectionRejectedError('A payment has already been started for this order.')
+        validatedPlanId = creditPlanId
+        validatedOrderId = orderId
+      } else {
+        const { rows } = await client.query(
+          `SELECT o.id, o.tenant_id, o.merchant_id, o.status, o.collection_transaction_id,
+                  COALESCE(SUM(oi.subtotal), 0) AS total_amount
+             FROM orders o JOIN order_items oi ON oi.order_id = o.id
+            WHERE o.id = $1 AND o.tenant_id = $2 AND o.merchant_id = $3
+            GROUP BY o.id FOR UPDATE OF o`, [orderId, merchant.tenant_id, merchant.id]
+        )
+        const order = rows[0]
+        if (!order || order.status !== 'PENDING_PAYMENT' || order.collection_transaction_id) {
+          throw new CollectionRejectedError('This order is not available for payment.')
+        }
+        if (Math.round(Number(amount) * 100) !== Math.round(Number(order.total_amount) * 100)) {
+          throw new CollectionRejectedError('The collection amount must match the order total.')
+        }
+        validatedOrderId = orderId
+      }
+
+      const inserted = await client.query(
+        `INSERT INTO transactions
+           (tenant_id, merchant_id, type, status, amount, currency, internal_reference,
+            collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn,
+            notification_sent, credit_plan_id, credit_installment_id, order_id, base_amount,
+            fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+         VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $5, 'INITIATED', $6, FALSE, $7, $8, $9,
+                 $10, $11, $12, $13, $14, $15)
+         RETURNING id`,
+        [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedPayoutMsisdn,
+          validatedPlanId, validatedInstallmentId, validatedOrderId, amount, collectionFee.chargedAmount,
+          collectionFee.chargedPayer, collectionFee.eganowCost, collectionFee.platformMargin, collectionFee.feeConfigVersionId]
+      )
+      return inserted.rows[0].id
+    })
+  } else {
+    const { rows } = await query(
+      `INSERT INTO transactions
+         (tenant_id, merchant_id, type, status, amount, currency, internal_reference, collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn, notification_sent,
+          base_amount, fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+       VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $6, 'INITIATED', $7, FALSE, $8, $9, $10, $11, $12, $13)
+       RETURNING id`,
+      [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedMsisdn, normalizedPayoutMsisdn,
+        amount, collectionFee.chargedAmount, collectionFee.chargedPayer, collectionFee.eganowCost,
+        collectionFee.platformMargin, collectionFee.feeConfigVersionId]
+    )
+    transactionId = rows[0].id
+  }
 
   try {
     let paypartnerCode
-    const inferredPaypartnerCode = inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
+    const inferredPaypartnerCode = normalizedCollectionMethod === 'CARD' ? 'CARDGATEWAY' : inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
 
     if (inferredPaypartnerCode) {
-      if (network) {
-        const explicitPaypartnerCode = normalizePaypartnerCode(network)
-        if (explicitPaypartnerCode && explicitPaypartnerCode !== inferredPaypartnerCode) {
-          console.log('[collection] explicit network differs from MSISDN paypartner; using inferred paypartner', {
-            tenantId: merchant.tenant_id,
-            merchantId: merchant.id,
-            explicitNetwork: network,
-            explicitPaypartnerCode,
-            inferredPaypartnerCode,
-            msisdn: maskMsisdn(normalizedMsisdn)
-          })
-        }
-      }
-      const merchantPaypartnerCode = normalizePaypartnerCode(merchant.network_provider)
-      if (merchantPaypartnerCode && merchantPaypartnerCode !== inferredPaypartnerCode) {
-        console.log('[collection] merchant network provider differs from MSISDN paypartner; using inferred paypartner', {
-          tenantId: merchant.tenant_id,
-          merchantId: merchant.id,
-          merchantNetworkProvider: merchant.network_provider,
-          merchantPaypartnerCode,
-          inferredPaypartnerCode,
-          msisdn: maskMsisdn(normalizedMsisdn)
-        })
-      }
       paypartnerCode = inferredPaypartnerCode
     } else if (network) {
       paypartnerCode = normalizePaypartnerCode(network)
@@ -160,22 +243,19 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       throw new CollectionRejectedError('Payment network is not configured for this merchant. Contact support.')
     }
 
-    // Callback URL priority: explicit callback > tenant config
-    // Do not fall back to any environment-level value — tenant must provide the callback.
-    let callbackUrl = callback || (tenantCtx.callbackUrl || null)
+    const { client, callbackUrl: vendorCallbackUrl } = await createEganowClientForMerchant(merchant.tenant_id, merchant.id)
+    // Vendor credentials own the Eganow callback configuration.
+    let callbackUrl = callback || vendorCallbackUrl || null
     if (!callbackUrl) {
       throw new TenantCredentialsError('Tenant Eganow callback URL is not configured.', merchant.tenant_id)
     }
 
     if (String(callbackUrl).includes('localhost') || String(callbackUrl).includes('127.0.0.1') || String(callbackUrl).includes('::1')) {
-      console.warn('[collection] callback URL is local and may not be reachable by Eganow:', { tenantId: merchant.tenant_id, callbackUrl })
     }
 
-    if (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn)) {
+    if (normalizedCollectionMethod === 'MOMO' && (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn))) {
       throw new CollectionRejectedError('A valid phone number is required in local or international format (e.g., 0244123456 or 233244123456).')
     }
-
-    const { client } = await createEganowClientForTenant(merchant.tenant_id)
 
     // Perform a KYC / name-enquiry lookup before attempting collection.
     // Some Eganow deployments require verification of MSISDN/account
@@ -191,37 +271,23 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       return 'GH0233'
     }
 
-    const countryCode = inferCountryCode(normalizedMsisdn)
+    const countryCode = normalizedMsisdn ? inferCountryCode(normalizedMsisdn) : 'GH0233'
+    let accountName = merchant.display_name
+
+    if (normalizedCollectionMethod === 'MOMO') {
 
     const kycBody = {
       paypartnerCode,
       mobileNumber: normalizedMsisdn,
-      accountNoOrCardNoOrMSISDN: normalizedMsisdn,
       languageId: 'en',
       countryCode
     }
 
-    console.log('[collection] kyc.request', {
-      tenantId: merchant.tenant_id,
-      merchantId: merchant.id,
-      paypartnerCode,
-      mobileNumber: maskMsisdn(normalizedMsisdn),
-      kycEndpoint: `${client.defaults.baseURL}/api/vas/kyc`,
-      requestBody: {
-        paypartnerCode,
-        mobileNumber: maskMsisdn(normalizedMsisdn),
-        accountNoOrCardNoOrMSISDN: maskMsisdn(normalizedMsisdn),
-        languageId: 'en',
-        countryCode
-      }
-    })
-
     let kycResponse
     try {
       kycResponse = await client.post('/api/vas/kyc', kycBody)
-      console.log('[collection] kyc.response.data', kycResponse.data)
-    } catch (kycErr) {
-      console.error('[collection] kyc call failed', { tenantId: merchant.tenant_id, merchantId: merchant.id, err: kycErr.message })
+    } catch {
+      const failureReason = 'Customer verification failed. Verify the payment details or contact support.'
       await query(
         `UPDATE transactions
             SET status = 'FAILED',
@@ -230,10 +296,10 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
                 updated_at = now(),
                 completed_at = now()
           WHERE id = $1`,
-        [transactionId, `KYC lookup failed: ${kycErr.message}`]
+        [transactionId, failureReason]
       )
 
-      return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: 'KYC_FAILED', failureReason: `KYC lookup failed: ${kycErr.message}`, tenantId: merchant.tenant_id }
+      return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: 'KYC_FAILED', failureReason, tenantId: merchant.tenant_id }
     }
 
     // Inspect KYC response for definitive status. If the provider returns
@@ -251,9 +317,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       (kycResponse?.data?.isSuccess === false)
     
     if (kycExplicitFailure) {
-      const raw = typeof kycResponse.data === 'string' ? kycResponse.data : JSON.stringify(kycResponse.data)
       const reason = `KYC failed: ${kycStatus || 'DECLINED'}`
-      console.warn('[collection] kyc failed - aborting collection', { tenantId: merchant.tenant_id, merchantId: merchant.id, reason, raw })
 
       await query(
         `UPDATE transactions
@@ -268,34 +332,37 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
 
       return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: kycStatusStr || 'KYC_FAILED', failureReason: reason, tenantId: merchant.tenant_id }
     } else if (kycStatus && kycStatusStr !== 'successful' && kycStatusStr !== 'success') {
-      console.warn('[collection] kyc returned non-success status but not explicit failure; proceeding with collection', { tenantId: merchant.tenant_id, merchantId: merchant.id, kycStatus })
       // continue to attempt collection
     } else if (!kycStatus && typeof kycResponse.data === 'string') {
-      console.warn('[collection] kyc returned unstructured response; proceeding with collection', { tenantId: merchant.tenant_id, merchantId: merchant.id, raw: kycResponse.data })
       // continue to attempt collection
     }
 
-    const accountName = kycResponse?.data?.accountName || null
+    accountName = kycResponse?.data?.accountName || accountName
 
     // Persist the KYC / name-enquiry result for display in transaction views
     try {
       if (accountName) {
         await query(`UPDATE transactions SET kyc_name = $2 WHERE id = $1`, [transactionId, accountName])
       }
-    } catch (updErr) {
-      console.error('[collection] failed to persist kyc_name', { tenantId: merchant.tenant_id, merchantId: merchant.id, err: updErr.message })
+    } catch {
+      // Name enquiry is supplemental; do not print customer data or provider errors.
+    }
     }
 
     const body = {
       paypartnerCode,
       amount,
-      accountNoOrCardNoOrMSISDN: normalizedMsisdn,
-      countryCode,
-      accountName: accountName || merchant.display_name,
+      accountNoOrCardNoOrMSISDN: normalizedMsisdn || String(cardNumber).replace(/[\s-]/g, ''),
+      accountName: normalizedCollectionMethod === 'CARD' ? String(cardholderName).trim() : accountName || merchant.display_name,
       transactionId: internalReference,
       transCurrencyIso: 'GHS',
       languageId: 'en',
       callback: callbackUrl
+    }
+    if (normalizedCollectionMethod === 'CARD') {
+      body.expiryDateMonth = Number(expiryDateMonth)
+      body.expiryDateYear = Number(expiryDateYear)
+      body.cvv = String(cvv)
     }
     
     // Include narration only if provided (avoid sending undefined/null)
@@ -303,35 +370,10 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       body.narration = narration
     }
 
-    console.log('[collection] request', {
-      tenantId: merchant.tenant_id,
-      merchantId: merchant.id,
-      paypartnerCode,
-      amount,
-      msisdn: maskMsisdn(normalizedMsisdn),
-      callbackUrl,
-      eganowEndpoint: `${client.defaults.baseURL}/api/transactions/collection`,
-      requestBody: {
-        paypartnerCode,
-        amount,
-        accountNoOrCardNoOrMSISDN: maskMsisdn(normalizedMsisdn),
-        transactionId: internalReference,
-        callback: callbackUrl
-      }
-    })
-
-    const response = await client.post('/api/transactions/collection', body)
+    body.amount = gatewayAmount
+    const response = await client.post(normalizedCollectionMethod === 'CARD' ? '/api/transactions/card/collect' : '/api/transactions/collection', body)
 
     const normalized = normalizeEganowResponse(response.data)
-
-    console.log('[collection] response.data', response.data)
-    console.log('[collection] response', {
-      tenantId: merchant.tenant_id,
-      merchantId: merchant.id,
-      eganowStatus: normalized.status,
-      reference: normalized.reference || internalReference,
-      transactionId: normalized.transactionId || null
-    })
 
     const eganowReference = normalized.reference || internalReference
     const eganowTransactionId = normalized.transactionId || null
@@ -339,13 +381,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     const gatewayStatus = normalized.status || 'UNKNOWN_RESPONSE'
 
     if (!normalized.status && !normalized.reference && !normalized.transactionId) {
-      console.warn('[collection] unrecognized Eganow collection response; keeping transaction pending for status polling', {
-        tenantId: merchant.tenant_id,
-        merchantId: merchant.id,
-        transactionId,
-        internalReference,
-        response: response.data
-      })
+      // Keep this transaction pending and let status polling reconcile it.
     }
 
     await query(
@@ -365,12 +401,14 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       internalReference,
       status: 'PENDING',
       paymentGatewayStatus: gatewayStatus,
-      message: normalized.message || response.data?.message || 'Transaction initiated.',
+      redirectHtml: normalized.redirectHtml || response.data?.redirectHtml || response.data?.data?.redirectHtml || null,
+      message: 'Transaction initiated.',
       tenantId: merchant.tenant_id
     }
   } catch (err) {
-    const message = err instanceof EganowApiError ? err.message : `Collection request failed: ${err.message}`
-    console.error(`[collection] Eganow collection failed for tenant ${merchant.tenant_id}, merchant ${merchant.id}:`, err)
+    const message = err instanceof CollectionRejectedError || err instanceof TenantCredentialsError
+      ? err.message
+      : 'Payment service is temporarily unavailable. Check transaction status or contact support.'
 
     await query(
       `UPDATE transactions

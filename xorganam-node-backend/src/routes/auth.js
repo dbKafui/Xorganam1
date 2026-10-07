@@ -3,6 +3,8 @@ import { query } from '../db/pool.js'
 import { verifyPassword } from '../security/password.js'
 import { signToken } from '../security/jwt.js'
 import { authenticate } from '../middleware/auth.js'
+import { isMfaRequired } from '../services/mfaPolicy.js'
+import { asyncHandler } from '../middleware/asyncHandler.js'
 
 export const authRouter = Router()
 
@@ -14,7 +16,8 @@ authRouter.post('/login', async (req, res) => {
   }
 
   const { rows } = await query(
-    `SELECT u.id, u.tenant_id, u.first_name, u.last_name, u.email, u.password_hash, u.role, u.is_active,
+    `SELECT u.id, u.tenant_id, u.merchant_id, u.first_name, u.last_name, u.email, u.password_hash, u.role, u.is_active,
+            u.mfa_enabled,
             t.company_name AS tenant_company_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -38,18 +41,22 @@ authRouter.post('/login', async (req, res) => {
   }
 
   await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id])
-
-  const token = signToken({ id: user.id, tenantId: user.tenant_id, role: user.role })
-
-  res.json({
-    token,
-    user: mapUser(user)
-  })
+  const mfaRequired = await isMfaRequired('TENANT', user.id)
+  if (!mfaRequired) {
+    return res.json({
+      mfaRequired: false,
+      token: signToken({ id: user.id, tenantId: user.tenant_id, role: user.role }),
+      user: mapUser(user)
+    })
+  }
+  const challengeToken = signToken({ id: user.id, tenantId: user.tenant_id, role: user.role,
+    mfaFlow: user.mfa_enabled ? 'CHALLENGE' : 'ENROLL', principalType: 'TENANT' })
+  res.json({ mfaRequired: true, mfaEnrollmentRequired: !user.mfa_enabled, challengeToken, user: mapUser(user) })
 })
 
-authRouter.get('/me', authenticate, async (req, res) => {
+authRouter.get('/me', authenticate, asyncHandler(async (req, res) => {
   const { rows } = await query(
-    `SELECT u.id, u.tenant_id, u.first_name, u.last_name, u.email, u.role, u.is_active,
+    `SELECT u.id, u.tenant_id, u.merchant_id, u.first_name, u.last_name, u.email, u.role, u.is_active,
             t.company_name AS tenant_company_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -59,13 +66,24 @@ authRouter.get('/me', authenticate, async (req, res) => {
 
   if (rows.length === 0) return res.status(401).json({ message: 'Session no longer valid.' })
 
-  res.json(mapUser(rows[0]))
-})
+  const { rows: permissions } = await query(
+    `SELECT permission_type, resource_id FROM user_permissions WHERE user_id = $1`, [req.user.id]
+  )
+
+  res.json({
+    ...mapUser(rows[0]),
+    permissions: permissions.map((permission) => ({
+      permissionType: permission.permission_type,
+      resourceId: permission.resource_id
+    }))
+  })
+}))
 
 function mapUser(row) {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    merchantId: row.merchant_id || null,
     tenantCompanyName: row.tenant_company_name || null,
     firstName: row.first_name,
     lastName: row.last_name,

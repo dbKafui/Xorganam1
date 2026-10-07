@@ -15,6 +15,80 @@ export class TenantCredentialsError extends Error {
   }
 }
 
+export class InstitutionCredentialsError extends Error {
+  constructor(message, institutionId) {
+    super(message)
+    this.name = 'InstitutionCredentialsError'
+    this.institutionId = institutionId
+  }
+}
+
+export async function getMerchantEganowContext(tenantId, merchantId) {
+  const { rows } = await query(
+    `SELECT m.id AS merchant_id, m.tenant_id, m.eganow_collection_account_id,
+            m.eganow_payout_account_id, m.network_provider, t.api_key_salt,
+            t.status AS tenant_status, c.api_username_encrypted,
+            c.api_password_encrypted, c.x_auth_encrypted, c.base_url, c.callback_url,
+            c.is_enabled
+       FROM merchants m
+       JOIN tenants t ON t.id = m.tenant_id
+       JOIN merchant_eganow_credentials c ON c.merchant_id = m.id
+      WHERE m.tenant_id = $1 AND m.id = $2`, [tenantId, merchantId]
+  )
+  const row = rows[0]
+  if (!row || !row.is_enabled || row.tenant_status !== 'ACTIVE' ||
+      !row.eganow_collection_account_id || !row.eganow_payout_account_id) {
+    throw new TenantCredentialsError('Vendor Eganow credentials or account provisioning are not active.', tenantId)
+  }
+  const [apiUsername, apiPassword, xAuth] = await Promise.all([
+    decrypt(row.api_username_encrypted, row.api_key_salt),
+    decrypt(row.api_password_encrypted, row.api_key_salt),
+    decrypt(row.x_auth_encrypted, row.api_key_salt)
+  ])
+  if (!apiUsername || !apiPassword || !xAuth || !row.callback_url) {
+    throw new TenantCredentialsError('Vendor Eganow credentials are incomplete.', tenantId)
+  }
+  return {
+    tenantId: row.tenant_id,
+    merchantId: row.merchant_id,
+    apiUsername,
+    apiPassword,
+    xAuth,
+    baseUrl: row.base_url,
+    callbackUrl: row.callback_url,
+    collectionAccountId: row.eganow_collection_account_id,
+    payoutAccountId: row.eganow_payout_account_id,
+    networkProvider: row.network_provider
+  }
+}
+
+export async function getInstitutionEganowContext(institutionId) {
+  const { rows } = await query(
+    `SELECT i.id AS institution_id, i.name, i.api_key_salt, i.eganow_collection_account_id,
+            i.eganow_payout_account_id, i.eganow_network_provider,
+            c.api_username_encrypted, c.api_password_encrypted, c.x_auth_encrypted,
+            c.eganow_base_url, c.callback_url, c.is_enabled
+       FROM institutions i JOIN institution_eganow_credentials c ON c.institution_id = i.id
+      WHERE i.id = $1 AND i.status = 'ACTIVE'`, [institutionId]
+  )
+  if (!rows.length || !rows[0].is_enabled) throw new InstitutionCredentialsError('Institution Eganow provisioning is not active.', institutionId)
+  const row = rows[0]
+  const [apiUsername, apiPassword, xAuth] = await Promise.all([
+    decrypt(row.api_username_encrypted, row.api_key_salt),
+    decrypt(row.api_password_encrypted, row.api_key_salt),
+    decrypt(row.x_auth_encrypted, row.api_key_salt)
+  ])
+  if (!apiUsername || !apiPassword || !xAuth || !row.eganow_collection_account_id || !row.eganow_payout_account_id || !row.callback_url) {
+    throw new InstitutionCredentialsError('Institution Eganow provisioning is incomplete.', institutionId)
+  }
+  return {
+    institutionId: row.institution_id, institutionName: row.name, apiUsername, apiPassword, xAuth,
+    baseUrl: row.eganow_base_url, callbackUrl: row.callback_url,
+    collectionAccountId: row.eganow_collection_account_id, payoutAccountId: row.eganow_payout_account_id,
+    networkProvider: row.eganow_network_provider
+  }
+}
+
 /**
  * Loads and decrypts everything needed to call Eganow / verify webhooks
  * on behalf of a single tenant. Every field here is tenant-scoped -

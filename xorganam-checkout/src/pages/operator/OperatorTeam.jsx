@@ -6,6 +6,7 @@ import { PERMISSION_TYPES, PERMISSION_LABELS, getPermissionLabel, getPermissionD
 const ROLES = [
   { value: 'TENANT_ADMIN', label: 'Admin — full control, including team management' },
   { value: 'TENANT_MANAGER', label: 'Manager — merchants, transactions, team' },
+  { value: 'TENANT_BRANCH_MANAGER', label: 'Branch manager — assigned branch only' },
   { value: 'TENANT_OPERATOR', label: 'Operator — initiate collections and payouts' },
   { value: 'TENANT_VIEWER', label: 'Viewer — read-only' }
 ]
@@ -23,8 +24,8 @@ const initialForm = {
 }
 
 export default function OperatorTeam() {
-  const { user, hasMinRole } = useOperatorAuth()
-  const canManage = hasMinRole('TENANT_MANAGER')
+  const { user, hasPermission } = useOperatorAuth()
+  const canManage = hasPermission('MANAGE_TEAM', user?.merchantId || null)
 
   const [members, setMembers] = useState([])
   const [merchants, setMerchants] = useState([])
@@ -62,16 +63,13 @@ export default function OperatorTeam() {
   async function loadPermissionsFor(userId) {
     try {
       if (!operatorApi.listUserPermissions) {
-        console.warn('listUserPermissions not available')
+        setError('Permission management is unavailable in this version.')
         setSelectedUserPermissions([])
         return
       }
-      console.log('Loading permissions for user:', userId)
       const perms = await operatorApi.listUserPermissions(userId)
-      console.log('Permissions loaded:', perms)
       setSelectedUserPermissions(perms || [])
     } catch (err) {
-      console.error('Error loading permissions:', err)
       setError(`Failed to load permissions: ${err.message}`)
       setSelectedUserPermissions([])
     }
@@ -98,7 +96,7 @@ export default function OperatorTeam() {
     setError('')
     setNotice('')
     try {
-      await operatorApi.updateUserStatus(member.id, !member.isActive)
+      await operatorApi.updateUserStatus(member.id, !member.isActive, member.merchantId)
       load()
     } catch (err) {
       setError(err.message)
@@ -152,6 +150,7 @@ export default function OperatorTeam() {
     setNotice('')
     try {
       await operatorApi.updateUser(selectedEditUser.id, {
+        merchantId: selectedEditUser.merchantId,
         firstName: editForm.firstName,
         lastName: editForm.lastName,
         phoneNumber: editForm.phoneNumber,
@@ -191,15 +190,17 @@ export default function OperatorTeam() {
             <h3>Edit {selectedEditUser.firstName} {selectedEditUser.lastName}</h3>
             <div className="two-col">
               <div className="field">
-                <label>First name</label>
+                <label htmlFor="edit-first-name">First name</label>
                 <input
+                  id="edit-first-name"
                   value={editForm.firstName}
                   onChange={(e) => setEditForm((f) => ({ ...f, firstName: e.target.value }))}
                 />
               </div>
               <div className="field">
-                <label>Last name</label>
+                <label htmlFor="edit-last-name">Last name</label>
                 <input
+                  id="edit-last-name"
                   value={editForm.lastName}
                   onChange={(e) => setEditForm((f) => ({ ...f, lastName: e.target.value }))}
                 />
@@ -207,15 +208,17 @@ export default function OperatorTeam() {
             </div>
             <div className="two-col">
               <div className="field">
-                <label>Phone number</label>
+                <label htmlFor="edit-phone-number">Phone number</label>
                 <input
+                  id="edit-phone-number"
                   value={editForm.phoneNumber}
                   onChange={(e) => setEditForm((f) => ({ ...f, phoneNumber: e.target.value }))}
                 />
               </div>
               <div className="field">
-                <label>Role</label>
+                <label htmlFor="edit-role">Role</label>
                 <select
+                  id="edit-role"
                   value={editForm.role}
                   onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value }))}
                 >
@@ -285,8 +288,9 @@ export default function OperatorTeam() {
                 <h3>Assign Merchants to Team Members</h3>
                 <div style={{ marginTop: 12 }}>
                   <div className="field" style={{ marginBottom: 12 }}>
-                    <label>Select a team member:</label>
+                    <label htmlFor="merchant-assignment-user">Select a team member:</label>
                     <select
+                      id="merchant-assignment-user"
                       value={merchantAssignmentUser?.id || ''}
                       onChange={(e) => setMerchantAssignmentUser(members.find(m => m.id === e.target.value) || null)}
                     >
@@ -298,13 +302,14 @@ export default function OperatorTeam() {
                   </div>
                   {merchantAssignmentUser && (
                     <div className="field">
-                      <label>Assign merchant for {merchantAssignmentUser.firstName} {merchantAssignmentUser.lastName}:</label>
+                      <label htmlFor="merchant-assignment">Assign merchant for {merchantAssignmentUser.firstName} {merchantAssignmentUser.lastName}:</label>
                       <select
+                        id="merchant-assignment"
                         value={merchantAssignmentUser.merchantId || ''}
                         onChange={(e) => changeMerchant(merchantAssignmentUser, e.target.value || null)}
                       >
-                        <option value="">Tenant-level (no merchant)</option>
-                        {merchants.map((mm) => (
+                        {!user.merchantId && <option value="">Tenant-level (no merchant)</option>}
+                        {merchants.filter((mm) => !user.merchantId || String(mm.id) === String(user.merchantId)).map((mm) => (
                           <option key={mm.id} value={mm.id}>{mm.displayName}</option>
                         ))}
                       </select>
@@ -365,14 +370,11 @@ export default function OperatorTeam() {
                           <button
                             className="btn btn-link btn-sm"
                             onClick={() => {
-                              console.log('Revoking permission:', p.id, 'for user:', selectedUser.id)
                               operatorApi.revokePermission(selectedUser.id, p.id)
                                 .then(() => {
-                                  console.log('Permission revoked successfully')
                                   loadPermissionsFor(selectedUser.id)
                                 })
                                 .catch((e) => {
-                                  console.error('Error revoking permission:', e)
                                   setError(e.message)
                                 })
                             }}
@@ -390,8 +392,9 @@ export default function OperatorTeam() {
                   <h4 style={{ marginTop: 0 }}>Grant Additional Permission</h4>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 12, alignItems: 'flex-end' }}>
                     <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Permission Type</label>
+                      <label htmlFor="permission-type">Permission Type</label>
                       <select
+                        id="permission-type"
                         value={newPermissionType}
                         onChange={(e) => setNewPermissionType(e.target.value)}
                       >
@@ -402,8 +405,9 @@ export default function OperatorTeam() {
                       </select>
                     </div>
                     <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Scope (optional)</label>
+                      <label htmlFor="permission-scope">Scope (optional)</label>
                       <select
+                        id="permission-scope"
                         value={newPermissionResource}
                         onChange={(e) => setNewPermissionResource(e.target.value)}
                       >
@@ -420,20 +424,17 @@ export default function OperatorTeam() {
                           setError('Please select a permission type')
                           return
                         }
-                        console.log('Granting permission:', newPermissionType, 'resource:', newPermissionResource, 'to user:', selectedUser.id)
                         operatorApi.grantPermission(selectedUser.id, {
                           permissionType: newPermissionType,
                           resourceId: newPermissionResource || null
                         })
-                          .then((result) => {
-                            console.log('Permission granted successfully:', result)
+                          .then(() => {
                             setNotice(`Permission "${getPermissionLabel(newPermissionType)}" granted`)
                             setNewPermissionType('')
                             setNewPermissionResource('')
                             loadPermissionsFor(selectedUser.id)
                           })
                           .catch((e) => {
-                            console.error('Error granting permission:', e)
                             setError(e.message)
                           })
                       }}
@@ -458,32 +459,32 @@ export default function OperatorTeam() {
           <h2>Add a team member</h2>
           <div className="two-col">
             <div className="field">
-              <label>First name</label>
-              <input required value={form.firstName} onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))} />
+              <label htmlFor="new-first-name">First name</label>
+              <input id="new-first-name" required value={form.firstName} onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))} />
             </div>
             <div className="field">
-              <label>Last name</label>
-              <input required value={form.lastName} onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))} />
-            </div>
-          </div>
-          <div className="two-col">
-            <div className="field">
-              <label>Email</label>
-              <input required type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
-            </div>
-            <div className="field">
-              <label>Phone number</label>
-              <input value={form.phoneNumber} onChange={(e) => setForm((f) => ({ ...f, phoneNumber: e.target.value }))} placeholder="0551234567" />
+              <label htmlFor="new-last-name">Last name</label>
+              <input id="new-last-name" required value={form.lastName} onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))} />
             </div>
           </div>
           <div className="two-col">
             <div className="field">
-              <label>Temporary password</label>
-              <input required type="password" minLength={10} value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} />
+              <label htmlFor="new-email">Email</label>
+              <input id="new-email" required type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
             </div>
             <div className="field">
-              <label>Role</label>
-              <select value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>
+              <label htmlFor="new-phone-number">Phone number</label>
+              <input id="new-phone-number" value={form.phoneNumber} onChange={(e) => setForm((f) => ({ ...f, phoneNumber: e.target.value }))} placeholder="0551234567" />
+            </div>
+          </div>
+          <div className="two-col">
+            <div className="field">
+              <label htmlFor="new-password">Temporary password</label>
+              <input id="new-password" required type="password" minLength={10} value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} />
+            </div>
+            <div className="field">
+              <label htmlFor="new-role">Role</label>
+              <select id="new-role" value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>
                 {ROLES.map((r) => (
                   <option key={r.value} value={r.value}>{r.label}</option>
                 ))}
@@ -492,10 +493,10 @@ export default function OperatorTeam() {
           </div>
           <div className="two-col">
             <div className="field">
-              <label>Assign to merchant</label>
-              <select value={form.merchantId || ''} onChange={(e) => setForm((f) => ({ ...f, merchantId: e.target.value || '' }))}>
-                <option value="">Tenant-level (no merchant)</option>
-                {merchants.map((mm) => (
+              <label htmlFor="new-merchant">Assign to merchant</label>
+              <select id="new-merchant" required={form.role === 'TENANT_BRANCH_MANAGER'} value={form.merchantId || ''} onChange={(e) => setForm((f) => ({ ...f, merchantId: e.target.value || '' }))}>
+                {!user.merchantId && <option value="">Tenant-level (no merchant)</option>}
+                {merchants.filter((mm) => !user.merchantId || String(mm.id) === String(user.merchantId)).map((mm) => (
                   <option key={mm.id} value={mm.id}>{mm.displayName}</option>
                 ))}
               </select>

@@ -33,25 +33,20 @@ async function refreshAllEganowTokens() {
       return { refreshed: 0, tenants: [] }
     }
 
-    const refreshedTenants = []
+    let refreshedCount = 0
     for (const row of rows) {
       try {
         await refreshEganowTokenForTenant(row.id)
-        refreshedTenants.push(row.id)
+        refreshedCount += 1
       } catch (err) {
-        console.warn('[eganow-token-worker] failed to refresh token', {
-          tenantId: row.id,
-          error: err.message
-        })
+        // Tenant identifiers and provider errors can disclose integration details in shared logs.
+        console.warn('[eganow-token-worker] token refresh failed', { code: err?.code || 'TOKEN_REFRESH_ERROR' })
       }
     }
 
-    console.log('[eganow-token-worker] refreshed tokens', {
-      count: refreshedTenants.length,
-      tenants: refreshedTenants
-    })
+    console.log('[eganow-token-worker] token refresh pass completed', { count: refreshedCount })
 
-    return { refreshed: refreshedTenants.length, tenants: refreshedTenants }
+    return { refreshed: refreshedCount }
   } finally {
     refreshInFlight = false
   }
@@ -64,7 +59,7 @@ export function startEganowTokenRefreshWorker() {
 
   const runRefresh = () => {
     refreshAllEganowTokens().catch((err) => {
-      console.error('[eganow-token-worker] refresh failed', err)
+      console.error('[eganow-token-worker] refresh pass failed', { code: err?.code || 'TOKEN_REFRESH_ERROR' })
     })
   }
 

@@ -29,7 +29,7 @@ export default function OperatorRegister() {
     setSaving(true)
     try {
       await register(form)
-      navigate('/operator/dashboard', { replace: true })
+      navigate('/operator/login', { replace: true, state: { registered: true } })
     } catch (err) {
       setError(err.message)
     } finally {
@@ -47,8 +47,7 @@ export default function OperatorRegister() {
       <div className="pay-card" style={{ width: 440 }}>
         <h1>Create your operator account</h1>
         <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: -10, marginBottom: 18 }}>
-          You'll be logged in immediately. Add your merchants (market women) and submit KYC once
-          you're in — payments stay disabled until an admin reviews your documents.
+          After registration, sign in and enroll an authenticator app before accessing your account.
         </p>
 
         <form onSubmit={handleSubmit}>

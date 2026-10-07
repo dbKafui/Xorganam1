@@ -1,8 +1,11 @@
 import { Worker } from 'bullmq'
 import { getRedisConnection, COLLECTION_STATUS_POLL_QUEUE, enqueueCollectForMeJob } from '../queue/queue.js'
-import { query } from '../db/pool.js'
+import { query, withTransaction } from '../db/pool.js'
 import { queryTransactionStatus, EganowApiError, isGatewayPending, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { sendMerchantSms } from '../services/notificationService.js'
+import { refreshSplitParentStatus } from '../services/splitPaymentService.js'
+import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
+import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10)
 const POLL_DELAY_MS = parseInt(process.env.COLLECTION_STATUS_POLL_DELAY_MS || '5000', 10)
@@ -14,7 +17,7 @@ function sleep(ms) {
 
 async function loadTransactionContext(transactionId, tenantId, merchantId) {
   const { rows } = await query(
-    `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.status, t.amount, t.currency, t.internal_reference,
+    `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.payout_leg, t.status, t.amount, t.currency, t.internal_reference,
             t.eganow_reference, t.eganow_transaction_id, t.payout_msisdn,
             m.payout_mode, m.mobile_money_number
        FROM transactions t
@@ -61,6 +64,10 @@ async function markGenericFailed(transactionId, reason, gatewayStatus = null) {
       WHERE id = $1`,
     [transactionId, reason, gatewayStatus]
   )
+  await query(
+    `UPDATE institution_transactions SET status = 'FAILED', updated_at = now()
+      WHERE counterparty_transaction_id = $1`, [transactionId]
+  )
 }
 
 async function findRootCollectionId(transactionId) {
@@ -81,25 +88,19 @@ async function findRootCollectionId(transactionId) {
 }
 
 async function markInternalTransferSuccessful(txn, gatewayStatus) {
-  await query(
-    `UPDATE transactions
-        SET status = 'SWEPT_INTERNAL',
-            payment_gateway_status = $2,
-            completed_at = now(),
-            updated_at = now()
-      WHERE id = $1`,
-    [txn.id, gatewayStatus]
-  )
-
-  if (txn.parent_transaction_id) {
-    await query(
-      `UPDATE transactions
-          SET status = 'SWEPT_INTERNAL',
-              updated_at = now()
-        WHERE id = $1 AND status IN ('RECEIVED', 'PENDING')`,
-      [txn.parent_transaction_id]
+  await withTransaction(async (client) => {
+    await client.query(
+      `UPDATE transactions SET status = 'SWEPT_INTERNAL', payment_gateway_status = $2,
+              completed_at = now(), updated_at = now() WHERE id = $1`, [txn.id, gatewayStatus]
     )
-  }
+    if (txn.parent_transaction_id) {
+      await client.query(
+        `UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now()
+          WHERE id = $1 AND status IN ('RECEIVED', 'PENDING')`, [txn.parent_transaction_id]
+      )
+      await markCreditInstallmentCollected(client, txn.parent_transaction_id)
+    }
+  })
 }
 
 async function markPayoutSuccessful(txn, gatewayStatus) {
@@ -112,44 +113,50 @@ async function markPayoutSuccessful(txn, gatewayStatus) {
       WHERE id = $1`,
     [txn.id, gatewayStatus]
   )
+  await query(
+    `UPDATE institution_transactions SET status = 'RECEIVED', eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
+      WHERE counterparty_transaction_id = $1`, [txn.id, txn.eganow_reference || null]
+  )
 
   const rootCollectionId = await findRootCollectionId(txn.id)
   if (rootCollectionId) {
-    await query(
-      `UPDATE transactions
-          SET status = 'PAID_OUT',
-              updated_at = now()
-        WHERE id = $1`,
-      [rootCollectionId]
-    )
+    if (txn.payout_leg === 'VENDOR' || txn.payout_leg === 'INSTITUTION') {
+      await refreshSplitParentStatus(rootCollectionId)
+    } else {
+      await query(
+        `UPDATE transactions
+            SET status = 'PAID_OUT',
+                updated_at = now()
+          WHERE id = $1`,
+        [rootCollectionId]
+      )
+    }
   }
 
-  await sendMerchantSms(
-    txn.tenant_id,
-    txn.payout_msisdn || txn.mobile_money_number,
-    `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`
-  )
+  if (txn.payout_leg !== 'INSTITUTION') {
+    await sendMerchantSms(
+      txn.tenant_id,
+      txn.payout_msisdn || txn.mobile_money_number,
+      `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`
+    )
+  }
 }
 
 async function processCollectionStatusPollJob(job) {
   const { tenantId, merchantId, transactionId } = job.data
   if (!tenantId || !merchantId || !transactionId) {
-    throw new Error(`Malformed status poll job data: ${JSON.stringify(job.data)}`)
+    throw new Error('Malformed status poll job data.')
   }
 
   for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt += 1) {
     const txn = await loadTransactionContext(transactionId, tenantId, merchantId)
     if (!txn) {
-      console.warn(`[status-poll] transaction not found for job ${job.id} txn=${transactionId}`)
       return { skipped: true }
     }
 
     if (txn.status !== 'PENDING') {
-      console.log(`[status-poll] transaction ${transactionId} no longer PENDING; skipping (status=${txn.status})`)
       return { skipped: true, status: txn.status }
     }
-
-    console.log(`[status-poll] attempt ${attempt}/${MAX_POLL_ATTEMPTS} for txn=${transactionId} internal_reference=${txn.internal_reference} eganow_reference=${txn.eganow_reference}`)
 
     let result
     try {
@@ -157,10 +164,9 @@ async function processCollectionStatusPollJob(job) {
       // status API expects the original transactionId we sent in the collection
       // request.
       const referenceToQuery = txn.internal_reference || txn.eganow_reference
-      result = await queryTransactionStatus(tenantId, referenceToQuery)
+      result = await queryTransactionStatus(tenantId, referenceToQuery, { merchantId })
     } catch (err) {
       if (err instanceof EganowApiError) {
-        console.warn(`[status-poll] status query failed for txn=${transactionId} attempt=${attempt}:`, err.message)
         if (attempt < MAX_POLL_ATTEMPTS) {
           await sleep(POLL_DELAY_MS)
           continue
@@ -170,24 +176,12 @@ async function processCollectionStatusPollJob(job) {
       throw err
     }
 
-    console.log('[status-poll] status query result', {
-      tenantId,
-      merchantId,
-      transactionId,
-      internalReference: txn.internal_reference,
-      upstreamStatus: result.status,
-      reference: result.reference,
-      upstreamTransactionId: result.transactionId,
-      raw: result.raw
-    })
-
     if (isGatewayPending(result.status)) {
       if (attempt < MAX_POLL_ATTEMPTS) {
         await sleep(POLL_DELAY_MS)
         continue
       }
 
-      console.log(`[status-poll] transaction ${transactionId} still pending after ${MAX_POLL_ATTEMPTS} attempts`)
       return { pending: true }
     }
 
@@ -203,49 +197,54 @@ async function processCollectionStatusPollJob(job) {
         await markCollectionFailed(transactionId, message, result.status)
       } else {
         await markGenericFailed(transactionId, message, result.status)
+        if (txn.type === 'PAYOUT' && ['VENDOR', 'INSTITUTION'].includes(txn.payout_leg)) {
+          const { rows: retryRows } = await query(
+            `UPDATE transactions SET payout_retry_count = payout_retry_count + 1, updated_at = now()
+              WHERE id = $1 RETURNING payout_retry_count`, [transactionId]
+          )
+          const rootCollectionId = await findRootCollectionId(transactionId)
+          const retryCount = Number(retryRows[0]?.payout_retry_count || 0)
+          if (rootCollectionId && retryCount < 5) {
+            await enqueueCollectForMeJob({ tenantId, merchantId, transactionId: rootCollectionId, retryToken: `split-retry-${txn.id}-${retryCount}` })
+          } else if (rootCollectionId) {
+            await refreshSplitParentStatus(rootCollectionId, true)
+          }
+        }
       }
-      console.log(`[status-poll] transaction ${transactionId} marked FAILED`)
       return { status: 'FAILED' }
     }
 
     if (isGatewaySuccess(result.status)) {
       if (txn.type === 'INTERNAL_TRANSFER') {
         await markInternalTransferSuccessful(txn, result.status)
-        console.log(`[status-poll] internal transfer ${transactionId} marked SWEPT_INTERNAL`)
         const rootCollectionId = await findRootCollectionId(txn.id)
         if (rootCollectionId) {
           await enqueueCollectForMeJob({ tenantId, merchantId, transactionId: rootCollectionId })
-          console.log(`[status-poll] requeued collect-for-me after internal transfer success for collection=${rootCollectionId}`)
         }
         return { status: 'SWEPT_INTERNAL' }
       }
 
       if (txn.type === 'PAYOUT') {
         await markPayoutSuccessful(txn, result.status)
-        console.log(`[status-poll] payout ${transactionId} marked PAID_OUT`)
         return { status: 'PAID_OUT' }
       }
 
       // Gateway success confirms the collection. The payout lifecycle is
       // tracked separately as SWEPT_INTERNAL / PAID_OUT.
-      await query(
-        `UPDATE transactions
-         SET status = 'RECEIVED',
-             payment_gateway_status = $2,
-             completed_at = now(),
-             updated_at = now()
-         WHERE id = $1`,
-        [transactionId, result.status]
-      )
-
-      console.log(`[status-poll] transaction ${transactionId} marked RECEIVED`) 
+      await withTransaction(async (tx) => {
+        await tx.query(
+          `UPDATE transactions
+           SET status = 'RECEIVED', payment_gateway_status = $2,
+               completed_at = now(), updated_at = now()
+           WHERE id = $1`, [transactionId, result.status]
+        )
+        await markStorefrontOrderPaid(tx, transactionId)
+      })
 
       if (txn.payout_mode === 'AUTO_SWEEP') {
         await enqueueCollectForMeJob({ tenantId, merchantId, transactionId })
-        console.log(`[status-poll] queued collect-for-me job for txn=${transactionId}`)
       } else {
         await sendMerchantSms(tenantId, txn.mobile_money_number, `Payment of GHS ${Number(txn.amount).toFixed(2)} received. Ref: ${txn.internal_reference}.`)
-        console.log(`[status-poll] notified merchant ${txn.mobile_money_number} for txn=${transactionId}`)
       }
 
       return { status: 'RECEIVED', queuedAutoSweep: txn.payout_mode === 'AUTO_SWEEP' }
@@ -257,7 +256,6 @@ async function processCollectionStatusPollJob(job) {
       continue
     }
 
-    console.log(`[status-poll] transaction ${transactionId} returned unexpected status=${result.status}; giving up`)
     return { status: result.status }
   }
 }
@@ -268,7 +266,7 @@ export const collectionStatusPollWorker = new Worker(
     try {
       return await processCollectionStatusPollJob(job)
     } catch (err) {
-      console.error(`[status-poll] job ${job.id} failed (tenant=${job.data?.tenantId}, merchant=${job.data?.merchantId}):`, err.message)
+      console.error('[status-poll] job failed', { code: err?.code || 'WORKER_ERROR' })
       throw err
     }
   },
@@ -280,23 +278,22 @@ export const collectionStatusPollWorker = new Worker(
 
 collectionStatusPollWorker.on('failed', (job, err) => {
   if (job.attemptsMade >= job.opts.attempts) {
-    console.error(`[status-poll] job ${job.id} permanently failed after ${job.attemptsMade} attempts (tenant=${job.data?.tenantId}).`,
-      err.message)
+    console.error('[status-poll] job exhausted retries', { attempts: job.attemptsMade, code: err?.code || 'WORKER_ERROR' })
   }
 })
 
 collectionStatusPollWorker.on('error', (err) => {
-  console.error('[status-poll] worker-level error (connection/infra, not job-specific):', err)
+  console.error('[status-poll] worker connection error', { code: err?.code || 'WORKER_ERROR' })
 })
 
 console.log(`[status-poll] worker started, concurrency=${WORKER_CONCURRENCY}`)
 
 process.on('unhandledRejection', (reason) => {
-  console.error('[status-poll] unhandledRejection', reason)
+  console.error('[status-poll] unhandled rejection', { name: reason?.name || typeof reason, code: reason?.code || 'UNEXPECTED' })
 })
 
 process.on('uncaughtException', (err) => {
-  console.error('[status-poll] uncaughtException', err)
+  console.error('[status-poll] uncaught exception', { name: err?.name || 'Error', code: err?.code || 'UNEXPECTED' })
 })
 
 process.on('SIGTERM', async () => {

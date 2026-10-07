@@ -1,10 +1,14 @@
 import { Worker } from 'bullmq'
-import crypto from 'node:crypto'
 import { getRedisConnection, COLLECT_FOR_ME_QUEUE, enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { query, withTransaction } from '../db/pool.js'
 import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
 import { TenantCredentialsError } from '../services/credentialsService.js'
 import { sendMerchantSms } from '../services/notificationService.js'
+import { loadVendorPackagePayoutRule, processSplitPayout } from '../services/splitPaymentService.js'
+import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
+import { reconcileTransaction } from '../services/reconciliationService.js'
+import { computeFee } from '../services/feeService.js'
+import { createVendorReference } from '../services/referenceIds.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '10', 10)
 
@@ -20,25 +24,26 @@ async function processCollectForMeJob(job) {
   if (!tenantId || !merchantId || !transactionId) {
     // A malformed job is a bug in the enqueuer, not a transient failure -
     // fail permanently rather than retrying something that can never succeed.
-    throw new Error(`Malformed job payload: ${JSON.stringify(job.data)}`)
+    throw new Error('Malformed collect-for-me job payload.')
   }
 
   const context = await loadJobContext(tenantId, merchantId, transactionId)
 
   if (!context) {
-    console.warn(`[collect-for-me] job ${job.id} references missing tenant/merchant/transaction - dropping.`)
+    console.warn('[collect-for-me] job references missing records; dropping')
     return { skipped: true }
   }
 
   const { merchant, collectionTxn } = context
 
   if (collectionTxn.status === 'PAID_OUT') {
-    console.log(`[collect-for-me] transaction ${transactionId} already paid out - skipping (idempotent).`)
+    // Avoid transaction IDs in routine worker logs; job state remains available in the queue.
+    console.log('[collect-for-me] already paid out; skipping idempotently')
     return { skipped: true, reason: 'not-in-received-state' }
   }
 
   if (!['RECEIVED', 'SWEPT_INTERNAL'].includes(collectionTxn.status)) {
-    console.log(`[collect-for-me] transaction ${transactionId} at status ${collectionTxn.status} - skipping until collection is received.`)
+    console.log('[collect-for-me] not ready for payout; skipping until collection is received')
     return { skipped: true, reason: 'not-ready' }
   }
 
@@ -49,6 +54,7 @@ async function processCollectForMeJob(job) {
     transferTxn = transferTxn || await createChildTransaction({
       tenantId,
       merchantId,
+      merchantName: merchant.display_name,
       parentTransactionId: collectionTxn.id,
       type: 'INTERNAL_TRANSFER',
       amount: collectionTxn.amount,
@@ -58,6 +64,7 @@ async function processCollectForMeJob(job) {
     if (transferTxn.status !== 'SWEPT_INTERNAL') {
       try {
         const transferResult = await sweepToPayoutAccount(tenantId, {
+          merchantId,
           amount: collectionTxn.amount,
           network: merchant.network_provider,
           narration: merchant.display_name || `Internal transfer for ${collectionTxn.internal_reference}`
@@ -99,18 +106,54 @@ async function processCollectForMeJob(job) {
     }
   }
 
+  if (context.splitRule) {
+    const splitResult = await processSplitPayout({
+      tenantId,
+      merchantId,
+      collectionTxn,
+      merchant,
+      rule: context.splitRule,
+      finalAttempt: Number(job.attemptsMade || 0) >= Math.max(0, Number(job.opts?.attempts || 1) - 1)
+    })
+    if (!splitResult.skipped) {
+      if (splitResult.status === 'PAID_OUT' && Number(splitResult.vendorAmount) > 0) {
+        await sendMerchantSms(
+          tenantId,
+          collectionTxn.payout_msisdn || merchant.mobile_money_number,
+          `GHS ${Number(splitResult.vendorAmount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${collectionTxn.internal_reference}.`
+        )
+      }
+      return splitResult
+    }
+    if (context.splitRule.mode === 'PERIODIC' && context.splitRule.vendor_payout_mode === 'PERIODIC') {
+      // Keep funds in the Eganow payout wallet until the vendor's configured
+      // periodic payout run. Falling through here would pay the vendor the
+      // full amount immediately and leave the scheduled split unfunded.
+      return { deferred: true, status: 'SWEPT_INTERNAL', reason: 'scheduled-payout' }
+    }
+  }
+
   // ---- Step 2: External Disbursal - payout account -> merchant's MoMo -
-  transferTxn = transferTxn || await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER')
+  transferTxn = transferTxn || await findChildTransaction(collectionTxn.id, 'INTERNAL_TRANSFER', 'NONE')
   const payoutDestination = collectionTxn.payout_msisdn || merchant.mobile_money_number
+  const payoutBaseAmount = Number(collectionTxn.base_amount ?? collectionTxn.amount)
+  let vendorAmount = payoutBaseAmount
+  const payoutFee = await computeFee(tenantId, 'PAYOUT', Math.max(0, vendorAmount))
+  vendorAmount = Math.round(vendorAmount * 100) / 100
+  if (vendorAmount <= 0) throw new Error('No positive amount is available for the vendor payout.')
   const payoutParentId = transferTxn?.id || collectionTxn.id
-  const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT') || await createChildTransaction({
+  const payoutTxn = await findChildTransaction(payoutParentId, 'PAYOUT', 'NONE') || await createChildTransaction({
     tenantId,
     merchantId,
+    merchantName: merchant.display_name,
     parentTransactionId: payoutParentId,
     type: 'PAYOUT',
-    amount: collectionTxn.amount,
+    payoutLeg: 'NONE',
+    amount: vendorAmount,
     currency: collectionTxn.currency,
-    payoutMsisdn: payoutDestination
+    payoutMsisdn: payoutDestination,
+    baseAmount: payoutBaseAmount,
+    fee: payoutFee
   })
   await query('UPDATE transactions SET payout_msisdn = COALESCE(payout_msisdn, $2), updated_at = now() WHERE id = $1', [
     payoutTxn.id,
@@ -124,8 +167,9 @@ async function processCollectForMeJob(job) {
 
   try {
     const payoutResult = await disburseToMobileMoney(tenantId, {
+      merchantId,
       reference: payoutTxn.internal_reference,
-      amount: collectionTxn.amount,
+      amount: payoutTxn.amount,
       currency: collectionTxn.currency,
       accountNoOrCardNoOrMsisdn: payoutDestination,
       network: merchant.network_provider,
@@ -157,11 +201,20 @@ async function processCollectForMeJob(job) {
     })
     await markTransactionResult(collectionTxn.id, { success: true, status: 'PAID_OUT' })
   } catch (err) {
-    await markTransactionResult(payoutTxn.id, { success: false, status: 'FAILED', failureReason: err.message })
-    // Note: collectionTxn stays at SWEPT_INTERNAL, not FAILED - the money
-    // really did leave the collection account. That needs a human to
-    // reconcile/retry the payout leg specifically, not a fresh sweep.
-    throw taggedError(err, tenantId, 'Payout')
+    // A lost response is ambiguous: Eganow may have paid the customer. Confirm
+    // through the authenticated status endpoint before making this terminal.
+    try {
+      const reconciled = await reconcileTransaction(payoutTxn.id, tenantId)
+      if (reconciled && ['PAID_OUT', 'FAILED'].includes(reconciled.status)) {
+        if (reconciled.status === 'PAID_OUT') await markTransactionResult(collectionTxn.id, { success: true, status: 'PAID_OUT' })
+        return { reconciled: true, status: reconciled.status, payoutTransactionId: payoutTxn.id }
+      }
+    } catch (reconcileError) {
+      console.error('[collect-for-me] payout outcome remains unconfirmed', { code: reconcileError?.code || 'RECONCILIATION_ERROR' })
+    }
+    await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: payoutTxn.id })
+    console.warn('[collect-for-me] payout left pending for reconciliation')
+    return { pending: true, stage: 'payout-reconciliation', payoutTransactionId: payoutTxn.id }
   }
 
   // ---- Step 3: notify the merchant ------------------------------------
@@ -192,10 +245,39 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
     `SELECT
         m.id, m.display_name, m.eganow_collection_account_id, m.eganow_payout_account_id,
         m.mobile_money_number, m.network_provider,
-        t.id AS txn_id, t.status AS txn_status, t.amount, t.currency, t.internal_reference, t.payout_msisdn
+        t.id AS txn_id, t.tenant_id AS txn_tenant_id, t.status AS txn_status, t.amount, t.base_amount, t.fee_charged_amount,
+        t.fee_charged_payer, t.currency, t.internal_reference, t.payout_msisdn,
+        sr.id AS split_rule_id, sr.mode AS split_rule_mode, sr.type AS split_rule_type,
+        sr.amount AS split_rule_amount, sr.leg_execution_order,
+        i.id AS split_institution_id, i.settlement_msisdn, i.settlement_account_name,
+        COALESCE(smc.vendor_payout_mode, 'PERIODIC') AS vendor_payout_mode,
+        COALESCE(smc.priority_deduction_selected, FALSE) AS priority_deduction_selected
      FROM merchants m
      JOIN transactions t
        ON t.tenant_id = m.tenant_id AND t.merchant_id = m.id AND t.id = $3
+     LEFT JOIN LATERAL (
+       SELECT r.*
+         FROM split_rules r
+        WHERE r.tenant_id = t.tenant_id
+          AND r.active
+          AND r.effective_from <= now()
+          AND (r.effective_to IS NULL OR r.effective_to > now())
+          AND (r.scope_level = 'MERCHANT_OVERRIDE' AND r.merchant_id = t.merchant_id
+               OR r.scope_level = 'TENANT_DEFAULT' AND r.merchant_id IS NULL)
+          AND EXISTS (SELECT 1 FROM tenant_institution_links l
+                       WHERE l.tenant_id = r.tenant_id AND l.institution_id = r.institution_id
+                         AND l.status = 'ACTIVE' AND l.verification_status = 'APPROVED')
+          AND EXISTS (SELECT 1 FROM tenant_merchant_settlement_config opted
+                       WHERE opted.tenant_id = t.tenant_id AND opted.merchant_id = t.merchant_id
+                         AND opted.institution_id = r.institution_id)
+        ORDER BY CASE WHEN r.merchant_id = t.merchant_id THEN 0 ELSE 1 END, r.created_at DESC
+        LIMIT 1
+     ) sr ON TRUE
+     LEFT JOIN institutions i ON i.id = sr.institution_id
+     LEFT JOIN tenant_merchant_settlement_config smc
+       ON smc.tenant_id = t.tenant_id
+      AND smc.merchant_id = t.merchant_id
+      AND smc.institution_id = sr.institution_id
      WHERE m.tenant_id = $1 AND m.id = $2`,
     [tenantId, merchantId, transactionId]
   )
@@ -203,6 +285,7 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
   if (rows.length === 0) return null
 
   const row = rows[0]
+  const packageRule = row.split_rule_id ? null : await loadVendorPackagePayoutRule({ tenantId, merchantId, triggerMode: 'AUTO' })
   return {
     merchant: {
       id: row.id,
@@ -214,26 +297,48 @@ async function loadJobContext(tenantId, merchantId, transactionId) {
     },
     collectionTxn: {
       id: row.txn_id,
+      tenant_id: row.txn_tenant_id,
+      merchant_id: row.id,
       status: row.txn_status,
       amount: row.amount,
+      base_amount: row.base_amount,
+      fee_charged_amount: row.fee_charged_amount,
+      fee_charged_payer: row.fee_charged_payer,
       currency: row.currency,
       internal_reference: row.internal_reference,
       payout_msisdn: row.payout_msisdn
-    }
+    },
+    splitRule: row.split_rule_id
+      ? {
+          id: row.split_rule_id,
+          mode: row.split_rule_mode,
+          type: row.split_rule_type,
+          amount: row.split_rule_amount,
+          leg_execution_order: row.leg_execution_order,
+          institution_id: row.split_institution_id,
+          settlement_msisdn: row.settlement_msisdn,
+          settlement_account_name: row.settlement_account_name,
+          vendor_payout_mode: row.vendor_payout_mode,
+          priority_deduction_selected: row.priority_deduction_selected
+        }
+      : packageRule
   }
 }
 
-async function createChildTransaction({ tenantId, merchantId, parentTransactionId, type, amount, currency, payoutMsisdn = null }) {
-  const internalReference = `${type === 'INTERNAL_TRANSFER' ? 'IT' : 'PO'}-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+async function createChildTransaction({ tenantId, merchantId, merchantName, parentTransactionId, type, payoutLeg = 'NONE', amount, currency, payoutMsisdn = null, baseAmount = null, fee = null }) {
+  const internalReference = createVendorReference(merchantName, type === 'INTERNAL_TRANSFER' ? 'IT' : 'PO')
 
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `INSERT INTO transactions
-         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference, payout_msisdn)
-       VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8)
-       ON CONFLICT ON CONSTRAINT uq_transactions_parent_type DO NOTHING
-       RETURNING id, internal_reference, status`,
-      [tenantId, merchantId, parentTransactionId, type, amount, currency, internalReference, payoutMsisdn]
+         (tenant_id, merchant_id, parent_transaction_id, type, payout_leg, status, amount, currency, internal_reference, payout_msisdn,
+          base_amount, fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
+       VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
+       RETURNING id, internal_reference, status, amount`,
+      [tenantId, merchantId, parentTransactionId, type, payoutLeg, amount, currency, internalReference, payoutMsisdn,
+        baseAmount, fee?.chargedAmount ?? null, fee?.chargedPayer ?? null, fee?.eganowCost ?? null,
+        fee?.platformMargin ?? null, fee?.feeConfigVersionId ?? null]
     )
 
     if (rows.length > 0) {
@@ -241,39 +346,59 @@ async function createChildTransaction({ tenantId, merchantId, parentTransactionI
     }
 
     const { rows: existingRows } = await client.query(
-      `SELECT id, internal_reference, status
+      `SELECT id, internal_reference, status, amount
          FROM transactions
-        WHERE parent_transaction_id = $1 AND type = $2
+        WHERE parent_transaction_id = $1 AND type = $2 AND payout_leg = $3
         LIMIT 1`,
-      [parentTransactionId, type]
+      [parentTransactionId, type, payoutLeg]
     )
 
     return existingRows[0]
   })
 }
 
-async function findChildTransaction(parentTransactionId, type) {
+async function findChildTransaction(parentTransactionId, type, payoutLeg = 'NONE') {
   const { rows } = await query(
-    `SELECT id, internal_reference, status
+    `SELECT id, internal_reference, status, amount
        FROM transactions
-      WHERE parent_transaction_id = $1 AND type = $2
+      WHERE parent_transaction_id = $1 AND type = $2 AND payout_leg = $3
       ORDER BY created_at ASC
       LIMIT 1`,
-    [parentTransactionId, type]
+    [parentTransactionId, type, payoutLeg]
   )
   return rows[0] || null
 }
 
 async function markTransactionResult(transactionId, { success, status, paymentGatewayStatus, eganowReference, eganowTransactionId, failureReason }) {
-  await query(
+  const update = async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE transactions
+          SET status = $2,
+              eganow_reference = COALESCE($3, eganow_reference),
+              eganow_transaction_id = COALESCE($4, eganow_transaction_id),
+              failure_reason = $5,
+              payment_gateway_status = COALESCE($7, payment_gateway_status),
+              completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING id, type, parent_transaction_id`,
+      [transactionId, status, eganowReference || null, eganowTransactionId || null, failureReason || null, success, paymentGatewayStatus || null]
+    )
+    const transaction = rows[0]
+    if (status === 'SWEPT_INTERNAL' && transaction?.type === 'INTERNAL_TRANSFER' && transaction.parent_transaction_id) {
+      await tx.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [transaction.parent_transaction_id])
+      await markCreditInstallmentCollected(tx, transaction.parent_transaction_id)
+    } else if (status === 'SWEPT_INTERNAL' && transaction?.type === 'COLLECTION') {
+      await markCreditInstallmentCollected(tx, transaction.id)
+    }
+  }
+  if (status === 'SWEPT_INTERNAL') await withTransaction(update)
+  else await query(
     `UPDATE transactions
-        SET status = $2,
-            eganow_reference = COALESCE($3, eganow_reference),
-            eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-            failure_reason = $5,
+        SET status = $2, eganow_reference = COALESCE($3, eganow_reference),
+            eganow_transaction_id = COALESCE($4, eganow_transaction_id), failure_reason = $5,
             payment_gateway_status = COALESCE($7, payment_gateway_status),
-            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
-            updated_at = now()
+            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END, updated_at = now()
       WHERE id = $1`,
     [transactionId, status, eganowReference || null, eganowTransactionId || null, failureReason || null, success, paymentGatewayStatus || null]
   )
@@ -285,14 +410,11 @@ export const collectForMeWorker = new Worker(
     try {
       return await processCollectForMeJob(job)
     } catch (err) {
-      // Log with full tenant context, then re-throw so BullMQ records the
-      // job as failed and applies its configured retry/backoff. Never
+      // Avoid customer, tenant, transaction, and provider details in shared logs.
+      // Re-throw so BullMQ records the job failure and applies retry/backoff. Never
       // swallow here - swallowing would silently strand a merchant's
       // money mid-pipeline with no retry and no record of failure.
-      console.error(
-        `[collect-for-me] job ${job.id} failed (tenant=${job.data?.tenantId}, merchant=${job.data?.merchantId}, attempt=${job.attemptsMade}):`,
-        err.message
-      )
+      console.error('[collect-for-me] job failed', { attempt: job.attemptsMade, code: err?.code || 'WORKER_ERROR' })
       throw err
     }
   },
@@ -304,10 +426,7 @@ export const collectForMeWorker = new Worker(
 
 collectForMeWorker.on('failed', (job, err) => {
   if (job.attemptsMade >= job.opts.attempts) {
-    console.error(
-      `[collect-for-me] job ${job.id} permanently failed after ${job.attemptsMade} attempts (tenant=${job.data?.tenantId}). Needs manual reconciliation.`,
-      err.message
-    )
+    console.error('[collect-for-me] job exhausted retries; manual reconciliation may be required', { attempts: job.attemptsMade, code: err?.code || 'WORKER_ERROR' })
     // In production: alert ops / write to a dead-letter table keyed by
     // tenant_id so one tenant's persistent failures are triageable
     // without scanning every other tenant's jobs.
@@ -319,7 +438,7 @@ collectForMeWorker.on('failed', (job, err) => {
 // down every tenant's in-flight jobs at once rather than just the one
 // that errored.
 collectForMeWorker.on('error', (err) => {
-  console.error('[collect-for-me] worker-level error (connection/infra, not job-specific):', err)
+  console.error('[collect-for-me] worker infrastructure error', { code: err?.code || 'WORKER_ERROR' })
 })
 
 console.log(`[collect-for-me] worker started, concurrency=${WORKER_CONCURRENCY}`)
@@ -330,11 +449,11 @@ console.log(`[collect-for-me] worker started, concurrency=${WORKER_CONCURRENCY}`
 // triggered it. BullMQ's own job try/catch above should catch everything
 // job-related; these two are for anything outside that boundary.
 process.on('unhandledRejection', (reason) => {
-  console.error('[collect-for-me] unhandledRejection', reason)
+  console.error('[collect-for-me] unhandled rejection', { code: reason?.code || 'UNEXPECTED' })
 })
 
 process.on('uncaughtException', (err) => {
-  console.error('[collect-for-me] uncaughtException', err)
+  console.error('[collect-for-me] uncaught exception', { code: err?.code || 'UNEXPECTED' })
 })
 
 process.on('SIGTERM', async () => {

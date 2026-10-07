@@ -1,5 +1,4 @@
 import axios from 'axios'
-import { env } from '../config/env.js'
 
 /**
  * Thin client for HashiCorp Vault's Transit secrets engine. This is the
@@ -21,6 +20,7 @@ function requireVaultConfig() {
 
 const transitMount = process.env.VAULT_TRANSIT_MOUNT || 'transit'
 const transitKeyName = process.env.VAULT_TRANSIT_KEY || 'master-key'
+const kvMount = process.env.VAULT_KV_MOUNT || 'secret'
 
 let cachedToken = null
 let cachedTokenExpiresAt = 0
@@ -109,4 +109,44 @@ export async function rewrapDek(wrappedDek, contextBase64) {
 
 export async function rotateMasterKey() {
   await vaultRequest(`${transitMount}/keys/${transitKeyName}/rotate`, {})
+}
+
+function secretPath(reference) {
+  const path = String(reference || '').trim()
+  if (!path || path.startsWith('/') || path.split('/').some((part) => !/^[A-Za-z0-9_-]+$/.test(part))) {
+    throw new Error('Invalid Vault secret reference.')
+  }
+  return path
+}
+
+async function vaultKvRequest(method, reference, body) {
+  const addr = requireVaultConfig()
+  const token = await getVaultToken(addr)
+  const path = secretPath(reference)
+  try {
+    const response = await axios({
+      method,
+      url: `${addr}/v1/${kvMount}/data/${path}`,
+      headers: { 'X-Vault-Token': token },
+      data: body,
+      timeout: 5000
+    })
+    return response.data
+  } catch (error) {
+    const status = error.response?.status
+    if (status === 403) cachedToken = null
+    throw new Error(`Vault KV request failed (${method} ${kvMount}/data/${path}): ${status || error.message}`)
+  }
+}
+
+/** Store small integration secrets in a Vault KV v2 mount. */
+export async function writeSecret(reference, values) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('Vault secret data must be an object.')
+  await vaultKvRequest('POST', reference, { data: values })
+}
+
+/** Read small integration secrets from a Vault KV v2 mount. */
+export async function readSecret(reference) {
+  const response = await vaultKvRequest('GET', reference)
+  return response?.data?.data || null
 }

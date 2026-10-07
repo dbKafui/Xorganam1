@@ -13,7 +13,8 @@ export const pool = new Pool({
 pool.on('error', (err) => {
   // A background/idle client error must never crash the process - it's
   // just a dead connection the pool will replace on next checkout.
-  console.error('[pg pool] unexpected idle client error', err)
+  // Driver errors may include SQL or connection details; emit only a stable code.
+  console.error('[pg pool] unexpected idle client error', { code: err?.code || 'DB_ERROR' })
 })
 
 /**

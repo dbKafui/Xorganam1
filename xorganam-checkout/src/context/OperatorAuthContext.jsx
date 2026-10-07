@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback } from 'react'
 import { operatorAuth } from '../api/client'
+import { hasPermission as checkPermission } from '../constants/permissions'
 
 const OperatorAuthContext = createContext(null)
 
@@ -36,16 +37,26 @@ export function OperatorAuthProvider({ children }) {
     if (result.user.isPlatformAdmin) {
       throw new Error('This is a platform admin account. Please use the Backoffice dashboard instead.')
     }
+    if (!result.mfaRequired && result.token) {
+      operatorAuth.saveSession(result)
+      setUser(result.user)
+      operatorAuth.me().then(setUser).catch(() => {})
+    }
+    return result
+  }, [])
+
+  const completeMfa = useCallback(async (challengeToken, code) => {
+    const result = await operatorAuth.verifyMfa(challengeToken, code)
     operatorAuth.saveSession(result)
     setUser(result.user)
+    operatorAuth.me().then(setUser).catch(() => {})
     return result.user
   }, [])
 
+  const setupMfa = useCallback((challengeToken) => operatorAuth.setupMfa(challengeToken), [])
+
   const register = useCallback(async (payload) => {
-    const result = await operatorAuth.register(payload)
-    operatorAuth.saveSession(result)
-    setUser(result.user)
-    return result.user
+    return operatorAuth.register(payload)
   }, [])
 
   const logout = useCallback(() => {
@@ -58,8 +69,13 @@ export function OperatorAuthProvider({ children }) {
     [user]
   )
 
+  const hasPermission = useCallback(
+    (permissionType, resourceId = null) => !!user && checkPermission(user.role, user.permissions || [], permissionType, resourceId),
+    [user]
+  )
+
   return (
-    <OperatorAuthContext.Provider value={{ user, ready, login, register, logout, hasMinRole }}>
+    <OperatorAuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, register, logout, hasMinRole, hasPermission }}>
       {children}
     </OperatorAuthContext.Provider>
   )

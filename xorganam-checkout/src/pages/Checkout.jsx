@@ -27,6 +27,9 @@ export default function Checkout() {
 
   const [amount, setAmount] = useState('')
   const [msisdn, setMsisdn] = useState('')
+  const [collectionMethod, setCollectionMethod] = useState('MOMO')
+  const [card, setCard] = useState({ number: '', name: '', month: '', year: '', cvv: '' })
+  const [redirectHtml, setRedirectHtml] = useState('')
   const [formError, setFormError] = useState('')
 
   // idle -> submitting -> success | failed
@@ -61,27 +64,30 @@ export default function Checkout() {
       setFormError('Enter an amount greater than 0.')
       return
     }
-    if (!MSISDN_PATTERN.test(msisdn)) {
+    if (collectionMethod === 'MOMO' && !MSISDN_PATTERN.test(msisdn)) {
       setFormError('Enter a valid mobile number in local or international format, e.g. 0551234567 or 233551234567.')
       return
     }
 
     setStage('submitting')
     try {
-      const normalizedMsisdn = normalizeMsisdn(msisdn)
-      if (!normalizedMsisdn || normalizedMsisdn.length !== 12) {
+      const normalizedMsisdn = collectionMethod === 'MOMO' ? normalizeMsisdn(msisdn) : ''
+      if (collectionMethod === 'MOMO' && (!normalizedMsisdn || normalizedMsisdn.length !== 12)) {
         setFormError('Enter a valid mobile number in local or international format.')
         setStage('idle')
         return
       }
 
-      const result = await publicApi.collect({ merchantId, amount: numericAmount, msisdn: normalizedMsisdn })
+      const result = await publicApi.collect({ merchantId, amount: numericAmount, msisdn: normalizedMsisdn || undefined, collectionMethod, ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {}) })
       setReference(result.reference)
       setPaymentGatewayStatus(result.paymentGatewayStatus || result.status || '')
       
       if (result.status === 'FAILED') {
         setStatusMessage(result.message || `Payment could not be started: ${result.failureReason || 'Unknown error'}`)
         setStage('failed')
+      } else if (String(result.paymentGatewayStatus).toUpperCase() === 'AUTHENTICATION_IN_PROGRESS' && result.redirectHtml) {
+        try { setRedirectHtml(decodeURIComponent(escape(atob(result.redirectHtml)))) } catch { setRedirectHtml(atob(result.redirectHtml)) }
+        setStage('auth')
       } else {
         setStatusMessage(result.message || 'Payment prompt sent. Waiting for approval on your phone…')
         setStage('pending')
@@ -210,6 +216,7 @@ export default function Checkout() {
                 </div>
               )}
 
+              <div className="field"><label htmlFor="collection-method">Payment method</label><select id="collection-method" value={collectionMethod} onChange={(e) => setCollectionMethod(e.target.value)}><option value="MOMO">Mobile Money</option><option value="CARD">Visa / Mastercard</option></select></div>
               <div className="field">
                 <label htmlFor="amount">Amount</label>
                 <div className="prefix-input">
@@ -227,7 +234,15 @@ export default function Checkout() {
                 </div>
               </div>
 
-              <div className="field">
+              {collectionMethod === 'CARD' && <div className="two-col">
+                <div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={card.number} onChange={(e) => setCard((v) => ({ ...v, number: e.target.value }))} /></div>
+                <div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={card.name} onChange={(e) => setCard((v) => ({ ...v, name: e.target.value }))} /></div>
+                <div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" autoComplete="cc-exp-month" value={card.month} onChange={(e) => setCard((v) => ({ ...v, month: e.target.value }))} /></div>
+                <div className="field"><label>Expiry year</label><input required inputMode="numeric" autoComplete="cc-exp-year" placeholder="2030" value={card.year} onChange={(e) => setCard((v) => ({ ...v, year: e.target.value }))} /></div>
+                <div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={card.cvv} onChange={(e) => setCard((v) => ({ ...v, cvv: e.target.value }))} /></div>
+              </div>}
+
+              {collectionMethod === 'MOMO' && <div className="field">
                 <label htmlFor="msisdn">Mobile money number</label>
                 <input
                   id="msisdn"
@@ -237,14 +252,16 @@ export default function Checkout() {
                   value={msisdn}
                   onChange={(e) => setMsisdn(e.target.value)}
                 />
-              </div>
+              </div>}
 
-              <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0' }}>Payment via {merchant?.networkProvider || 'mobile money'}</p>
+              {collectionMethod === 'MOMO' && <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0' }}>Payment via {merchant?.networkProvider || 'mobile money'}</p>}
 
               <button type="submit" className="pay-btn">Pay now</button>
             </form>
           </>
         )}
+
+        {stage === 'auth' && <section><h2>Verify card payment</h2><iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={redirectHtml} style={{ width: '100%', minHeight: 520, border: 0 }} /><button className="secondary-btn" onClick={() => setStage('pending')}>I completed verification</button></section>}
 
         {stage === 'submitting' && (
           <div className="status-banner pending">
@@ -308,6 +325,7 @@ export default function Checkout() {
       <p className="link-row" style={{ marginTop: 6 }}>
         Are you a business? <Link to="/operator/register">Accept payments with XORGANAM</Link>
       </p>
+      <p className="link-row" style={{ marginTop: 8 }}><Link to="/credit-schedule">View a credit schedule</Link></p>
     </div>
   )
 }

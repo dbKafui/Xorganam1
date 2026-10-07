@@ -2,20 +2,23 @@ import { useEffect, useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { operatorApi } from '../../api/client'
 import { maskAccount } from '../../lib/mask'
+import { useOperatorAuth } from '../../context/OperatorAuthContext'
 
 function money(n) {
   return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 export default function OperatorTransactionDetail() {
+  const { user } = useOperatorAuth()
   const { transactionId } = useParams()
   const [txn, setTxn] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [transferAmount, setTransferAmount] = useState('')
-  const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '' })
+  const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '', destinationType: 'MOMO', bankCode: '', accountName: '' })
   const [busy, setBusy] = useState(false)
   const [reconciling, setReconciling] = useState(false)
+  const [disputeReason, setDisputeReason] = useState('')
 
   const load = useCallback(() => {
     operatorApi.transactionDetail(transactionId).then(setTxn).catch((err) => setError(err.message))
@@ -31,8 +34,9 @@ export default function OperatorTransactionDetail() {
 
   const hasTransfer = txn.childTransactions.some((c) => c.type === 'INTERNAL_TRANSFER')
   const hasPayout = txn.childTransactions.some((c) => c.type === 'PAYOUT')
-  const canManuallyProcess = txn.type === 'COLLECTION' && txn.status === 'RECEIVED'
-  const canPayout = txn.type === 'COLLECTION' && txn.status === 'SWEPT_INTERNAL'
+  const branchManualAllowed = user?.role !== 'TENANT_BRANCH_MANAGER' || txn.allowManualControl
+  const canManuallyProcess = branchManualAllowed && txn.type === 'COLLECTION' && txn.status === 'RECEIVED'
+  const canPayout = branchManualAllowed && txn.type === 'COLLECTION' && txn.status === 'SWEPT_INTERNAL'
 
   async function handleReconcile() {
     setError('')
@@ -55,7 +59,7 @@ export default function OperatorTransactionDetail() {
     setNotice('')
     setBusy(true)
     try {
-      await operatorApi.internalTransfer({ sourceTransactionId: txn.id, amount: Number(transferAmount) || undefined })
+      await operatorApi.internalTransfer({ sourceTransactionId: txn.id, merchantId: txn.merchantId, amount: Number(transferAmount) || undefined })
       setNotice('Internal transfer initiated.')
       load()
     } catch (err) {
@@ -73,8 +77,12 @@ export default function OperatorTransactionDetail() {
     try {
       await operatorApi.payout({
         sourceTransactionId: txn.id,
+        merchantId: txn.merchantId,
         amount: Number(payoutForm.amount) || undefined,
-        accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined
+        accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined,
+        destinationType: payoutForm.destinationType,
+        bankCode: payoutForm.destinationType === 'BANK' ? payoutForm.bankCode : undefined,
+        accountName: payoutForm.accountName || undefined
       })
       setNotice('Payout initiated.')
       load()
@@ -83,6 +91,18 @@ export default function OperatorTransactionDetail() {
     } finally {
       setBusy(false)
     }
+  }
+
+  async function raiseDispute(e) {
+    e.preventDefault()
+    setError('')
+    setNotice('')
+    setBusy(true)
+    try {
+      await operatorApi.raiseDispute({ merchantId: txn.merchantId, transactionId: txn.id, reason: disputeReason.trim() })
+      setNotice('Your payout concern was sent to the institution for review.')
+      setDisputeReason('')
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
 
   return (
@@ -104,6 +124,23 @@ export default function OperatorTransactionDetail() {
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
+
+      {txn.status === 'SWEPT_INTERNAL' && (txn.vendorLegStatus === 'PENDING' || txn.institutionLegStatus === 'PENDING') && (
+        <div className="status-banner" role="status">Your payout is still processing. This can take a moment; no action is needed.</div>
+      )}
+      {(txn.status === 'PARTIALLY_SETTLED' || txn.vendorLegStatus === 'FAILED' || txn.institutionLegStatus === 'FAILED') && (
+        <div className="card">
+          <h2>Part of this payment went through, part did not</h2>
+          <p>Your share: {txn.vendorLegStatus || 'Not available'}{txn.vendorFailureReason ? ` — ${txn.vendorFailureReason}` : ''}</p>
+          <p>Institution share: {txn.institutionLegStatus || 'Not available'}{txn.institutionFailureReason ? ` — ${txn.institutionFailureReason}` : ''}</p>
+          <form onSubmit={raiseDispute}>
+            <div className="field"><label htmlFor="dispute-reason">Something wrong with this payout?</label>
+              <textarea id="dispute-reason" required value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Tell us what you noticed." />
+            </div>
+            <button className="btn btn-primary" disabled={busy}>{busy ? 'Sending…' : 'Raise a dispute'}</button>
+          </form>
+        </div>
+      )}
 
       <div className="metrics-row">
         <div className="metric"><div className="label">Amount</div><div className="value">{money(txn.amount)} {txn.currency}</div></div>
@@ -166,9 +203,10 @@ export default function OperatorTransactionDetail() {
               <input type="number" step="0.01" placeholder={txn.amount} value={payoutForm.amount} onChange={(e) => setPayoutForm((f) => ({ ...f, amount: e.target.value }))} />
             </div>
             <div className="field">
-              <label>Destination (defaults to merchant's MoMo number)</label>
-              <input value={payoutForm.accountNoOrMsisdn} onChange={(e) => setPayoutForm((f) => ({ ...f, accountNoOrMsisdn: e.target.value }))} placeholder="Leave blank to use the merchant's number on file" />
+              <label>Destination type</label><select value={payoutForm.destinationType} onChange={(e) => setPayoutForm((f) => ({ ...f, destinationType: e.target.value }))}><option value="MOMO">Mobile Money</option><option value="BANK">Bank account</option></select>
             </div>
+            <div className="field"><label>{payoutForm.destinationType === 'BANK' ? 'Bank account number' : 'Mobile number'}</label><input required={payoutForm.destinationType === 'BANK'} value={payoutForm.accountNoOrMsisdn} onChange={(e) => setPayoutForm((f) => ({ ...f, accountNoOrMsisdn: e.target.value }))} placeholder={payoutForm.destinationType === 'MOMO' ? "Leave blank to use merchant's number" : 'Bank account number'} /></div>
+            {payoutForm.destinationType === 'BANK' && <><div className="field"><label>Bank</label><select required value={payoutForm.bankCode} onChange={(e) => setPayoutForm((f) => ({ ...f, bankCode: e.target.value }))}><option value="">Choose bank</option>{[['GCBGH','GCB Bank'],['SOCIETE','Societe Generale'],['ARBAPEX','ARB Apex'],['OMNIBSIC','OmniBSIC'],['FIRSTATGH','First Atlantic'],['FBNGH','First Bank'],['BANKOFAFRICA','Bank of Africa'],['FIDELITY','Fidelity Bank'],['FNBGH','First National Bank'],['CBG','Consolidated Bank Ghana'],['ACCESSGH','Access Bank'],['UNAFBKGH','UBA'],['GTBANKGH','Guaranty Trust Bank'],['PBL','Prudential Bank'],['CAL','CAL Bank'],['ECOBANKGH','Ecobank Ghana'],['ZENITHGH','Zenith Bank'],['REPUBLIC','Republic Bank'],['UMB','Universal Merchant Bank'],['ADB','Agricultural Development Bank'],['NIB','National Investment Bank'],['ABSA','Absa Bank Ghana'],['STANCHART','Standard Chartered'],['STANBICGH','Stanbic Bank']].map(([code,label]) => <option key={code} value={code}>{label}</option>)}</select></div><div className="field"><label>Account holder name</label><input required value={payoutForm.accountName} onChange={(e) => setPayoutForm((f) => ({ ...f, accountName: e.target.value }))} /></div></>}
           </div>
           <button className="btn btn-primary" disabled={busy}>Start payout</button>
         </form>
