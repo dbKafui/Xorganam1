@@ -45,12 +45,12 @@ export function OperatorAuthProvider({ children }) {
     return result
   }, [])
 
-  const completeMfa = useCallback(async (challengeToken, code) => {
-    const result = await operatorAuth.verifyMfa(challengeToken, code)
+  const completeMfa = useCallback(async (challengeToken, verification) => {
+    const result = await operatorAuth.verifyMfa(challengeToken, verification)
     operatorAuth.saveSession(result)
     setUser(result.user)
     operatorAuth.me().then(setUser).catch(() => {})
-    return result.user
+    return result
   }, [])
 
   const setupMfa = useCallback((challengeToken) => operatorAuth.setupMfa(challengeToken), [])
@@ -59,9 +59,20 @@ export function OperatorAuthProvider({ children }) {
     return operatorAuth.register(payload)
   }, [])
 
-  const logout = useCallback(() => {
-    operatorAuth.clearSession()
-    setUser(null)
+  const requestEmailVerification = useCallback(
+    (email) => operatorAuth.requestEmailVerification(email),
+    []
+  )
+
+  const logout = useCallback(async () => {
+    try {
+      if (operatorAuth.hasToken()) await operatorAuth.logout()
+    } catch {
+      // Clear local access even if remote revocation is unavailable.
+    } finally {
+      operatorAuth.clearSession()
+      setUser(null)
+    }
   }, [])
 
   const hasMinRole = useCallback(
@@ -75,7 +86,7 @@ export function OperatorAuthProvider({ children }) {
   )
 
   return (
-    <OperatorAuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, register, logout, hasMinRole, hasPermission }}>
+    <OperatorAuthContext.Provider value={{ user, ready, login, setupMfa, completeMfa, register, requestEmailVerification, logout, hasMinRole, hasPermission }}>
       {children}
     </OperatorAuthContext.Provider>
   )

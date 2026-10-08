@@ -28,8 +28,11 @@ export default function OperatorRegister() {
     setError('')
     setSaving(true)
     try {
-      await register(form)
-      navigate('/operator/login', { replace: true, state: { registered: true } })
+      const result = await register(form)
+      navigate('/operator/login', {
+        replace: true,
+        state: { registered: true, email: form.email, verificationEmailSent: result.verificationEmailSent }
+      })
     } catch (err) {
       setError(err.message)
     } finally {
@@ -47,7 +50,7 @@ export default function OperatorRegister() {
       <div className="pay-card" style={{ width: 440 }}>
         <h1>Create your operator account</h1>
         <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: -10, marginBottom: 18 }}>
-          After registration, sign in and enroll an authenticator app before accessing your account.
+          Verify your login email, then sign in and enroll an authenticator app before accessing your account.
         </p>
 
         <form onSubmit={handleSubmit}>

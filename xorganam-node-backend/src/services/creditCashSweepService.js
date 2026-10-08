@@ -1,6 +1,8 @@
 import { query, withTransaction } from '../db/pool.js'
 import { disburseToMobileMoney, getPayoutWalletBalance, isGatewayFailure, isGatewaySuccess, queryTransactionStatus } from './eganowClient.js'
 import { createVendorReference } from './referenceIds.js'
+import { updateTransactionStatus } from './transactionStateService.js'
+import { updateInstitutionSweepStatus } from './institutionSweepStateService.js'
 
 async function createCashSweepGroups() {
   return withTransaction(async (tx) => {
@@ -73,13 +75,26 @@ async function processCashSweep(parentId) {
   }
   if (leg?.status === 'PAID_OUT') return completeCashSweep(parentId, leg.id)
   if (leg?.status === 'FAILED') {
-    await query(`UPDATE institution_sweep_ledger SET status = 'PARTIALLY_SETTLED', institution_leg_status = 'FAILED', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])
+    await updateInstitutionSweepStatus(query, {
+      id: sweep.id,
+      currentStatus: sweep.sweep_status,
+      nextStatus: 'PARTIALLY_SETTLED',
+      fields: {
+        institution_leg_status: 'FAILED',
+        failure_reason: 'The institution leg failed and requires manual review.'
+      }
+    })
     return { failed: true, manualReviewRequired: true }
   }
 
   const balance = await getPayoutWalletBalance(sweep.tenant_id, null, sweep.merchant_id)
   if (Number(balance) < Number(sweep.institution_amount)) {
-    await query(`UPDATE institution_sweep_ledger SET status = 'ACCRUED_UNSWEPT', failure_reason = 'Insufficient payout-wallet balance.', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])
+    await updateInstitutionSweepStatus(query, {
+      id: sweep.id,
+      currentStatus: sweep.sweep_status,
+      nextStatus: 'ACCRUED_UNSWEPT',
+      fields: { failure_reason: 'Insufficient payout-wallet balance.' }
+    })
     return { accruedUnswept: true }
   }
 
@@ -104,7 +119,12 @@ async function processCashSweep(parentId) {
     const status = await queryTransactionStatus(sweep.tenant_id, leg.internal_reference, { merchantId: sweep.merchant_id })
     if (isGatewaySuccess(status.status)) return markCashLegPaid(parentId, leg.id, status.status)
     if (isGatewayFailure(status.status)) return markCashLegFailed(parentId, leg.id, status.status)
-    await query(`UPDATE institution_sweep_ledger SET status = 'PENDING', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])
+    await updateInstitutionSweepStatus(query, {
+      id: sweep.id,
+      currentStatus: sweep.sweep_status,
+      nextStatus: 'PENDING',
+      fields: {}
+    })
     return { pending: true }
   }
 
@@ -121,38 +141,80 @@ async function processCashSweep(parentId) {
             eganow_transaction_id = COALESCE($3, eganow_transaction_id), payment_gateway_status = $4, updated_at = now()
       WHERE id = $1`, [leg.id, result.reference || null, result.transactionId || null, result.status || 'PENDING']
   )
-  await query(`UPDATE institution_sweep_ledger SET status = 'PENDING', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])
+  await updateInstitutionSweepStatus(query, {
+    id: sweep.id,
+    currentStatus: sweep.sweep_status,
+    nextStatus: 'PENDING',
+    fields: {}
+  })
   return { pending: true }
 }
 
 async function markCashLegPaid(parentId, legId, status, result = {}) {
-  await query(
-    `UPDATE transactions SET status = 'PAID_OUT', payment_gateway_status = $2,
-            eganow_reference = COALESCE($3, eganow_reference),
-            eganow_transaction_id = COALESCE($4, eganow_transaction_id), completed_at = now(), updated_at = now()
-      WHERE id = $1`, [legId, status, result.reference || null, result.transactionId || null]
-  )
+  await updateTransactionStatus(query, {
+    id: legId,
+    type: 'PAYOUT',
+    currentStatus: 'PENDING',
+    nextStatus: 'PAID_OUT',
+    fields: {
+      payment_gateway_status: status,
+      eganow_reference: result.reference || null,
+      eganow_transaction_id: result.transactionId || null,
+      completed_at: new Date()
+    }
+  })
   return completeCashSweep(parentId, legId)
 }
 
 async function markCashLegFailed(parentId, legId, status, result = {}) {
-  await query(
-    `UPDATE transactions SET status = 'FAILED', payment_gateway_status = $2,
-            eganow_reference = COALESCE($3, eganow_reference),
-            eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-            failure_reason = 'Eganow rejected the institution cash split payout.', completed_at = now(), updated_at = now()
-      WHERE id = $1`, [legId, status, result.reference || null, result.transactionId || null]
-  )
-  await query(`UPDATE transactions SET status = 'PARTIALLY_SETTLED', updated_at = now() WHERE id = $1`, [parentId])
-  await query(`UPDATE institution_sweep_ledger SET status = 'PARTIALLY_SETTLED', institution_leg_status = 'FAILED', failure_reason = 'Eganow rejected the institution cash split payout.', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])
+  await updateTransactionStatus(query, {
+    id: legId,
+    type: 'PAYOUT',
+    currentStatus: 'PENDING',
+    nextStatus: 'FAILED',
+    fields: {
+      payment_gateway_status: status,
+      eganow_reference: result.reference || null,
+      eganow_transaction_id: result.transactionId || null,
+      failure_reason: 'Eganow rejected the institution cash split payout.',
+      completed_at: new Date()
+    }
+  })
+  await updateTransactionStatus(query, {
+    id: parentId,
+    type: 'COLLECTION',
+    currentStatus: 'SWEPT_INTERNAL',
+    nextStatus: 'PARTIALLY_SETTLED',
+    fields: {}
+  })
+  await updateInstitutionSweepStatus(query, {
+    id: parentId,
+    currentStatus: 'PENDING',
+    nextStatus: 'PARTIALLY_SETTLED',
+    fields: {
+      institution_leg_status: 'FAILED',
+      failure_reason: 'Eganow rejected the institution cash split payout.'
+    }
+  })
   return { failed: true, manualReviewRequired: true }
 }
 
 async function completeCashSweep(parentId, legId) {
   return withTransaction(async (tx) => {
     await tx.query('SELECT id FROM transactions WHERE id = $1 FOR UPDATE', [parentId])
-    await tx.query(`UPDATE transactions SET status = 'PAID_OUT', completed_at = now(), updated_at = now() WHERE id = $1`, [parentId])
-    await tx.query(`UPDATE institution_sweep_ledger SET status = 'SETTLED', institution_leg_status = 'PAID_OUT', updated_at = now() WHERE sweep_transaction_id = $1`, [parentId])
+    await updateTransactionStatus(tx, {
+      id: parentId,
+      type: 'COLLECTION',
+      currentStatus: 'SWEPT_INTERNAL',
+      nextStatus: 'PAID_OUT',
+      fields: { completed_at: new Date() }
+    })
+    await updateInstitutionSweepStatus(tx, {
+      id: parentId,
+      currentStatus: 'PENDING',
+      nextStatus: 'SETTLED',
+      fields: { institution_leg_status: 'PAID_OUT' }
+    })
     await applyInstitutionSplitRepayments(tx, parentId)
     await tx.query(
       `UPDATE periodic_accrual_ledger SET status = 'SWEPT', swept_at = now()

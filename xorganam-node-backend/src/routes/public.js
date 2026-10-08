@@ -4,6 +4,7 @@ import { query, withTransaction } from '../db/pool.js'
 import { hashPassword } from '../security/password.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
+import { requestEmailVerification } from '../services/emailVerificationService.js'
 
 export const publicRouter = Router()
 
@@ -54,9 +55,14 @@ publicRouter.post(
       return { tenant, user: userResult.rows[0] }
     })
 
+    const verification = await requestEmailVerification(normalizedEmail)
+
     res.status(201).json({
       signInRequired: true,
-      message: 'Registration complete. Sign in to set up required multi-factor authentication.',
+      verificationEmailSent: verification.delivered,
+      message: verification.delivered
+        ? 'Account created. Verify your email address before signing in.'
+        : 'Account created, but the verification email could not be sent. Request another email after delivery is restored.',
       user: {
         id: result.user.id,
         tenantId: result.tenant.id,
@@ -120,6 +126,7 @@ publicRouter.post(
         expiryDateYear,
         cvv,
         narration: 'Customer checkout payment',
+        idempotencyKey: req.get('Idempotency-Key') || null,
         // Public checkout must use the callback configured by the merchant's tenant.
       })
 
@@ -129,14 +136,13 @@ publicRouter.post(
         paymentGatewayStatus: result.paymentGatewayStatus || result.status,
         redirectHtml: result.redirectHtml || null,
         failureReason: result.status === 'FAILED' ? result.failureReason || null : null,
-        message:
-          result.status === 'FAILED'
-            ? result.failureReason || 'Payment could not be started.'
-            : String(collectionMethod).toUpperCase() === 'CARD' ? 'Complete the card verification to finish payment.' : 'Check your phone to approve the payment prompt.'
+        message: result.message || (result.status === 'FAILED'
+          ? result.failureReason || 'Payment could not be started.'
+          : String(collectionMethod).toUpperCase() === 'CARD' ? 'Complete the card verification to finish payment.' : 'Check your phone to approve the payment prompt.')
       })
     } catch (err) {
       if (err instanceof CollectionRejectedError) {
-        return res.status(400).json({ status: 'Rejected', message: err.message })
+        return res.status(err.status).json({ status: 'Rejected', message: err.message })
       }
       throw err
     }
@@ -162,7 +168,7 @@ publicRouter.get(
       status: txn.status,
       paymentGatewayStatus: txn.payment_gateway_status,
       amount: txn.amount,
-      failureReason: txn.status === 'FAILED' ? txn.failure_reason : null
+      failureReason: txn.failure_reason || null
     })
   })
 )

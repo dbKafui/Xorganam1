@@ -11,6 +11,8 @@ import { initiateInstitutionCollection, initiateInstitutionPayout, queryInstitut
 import { InstitutionCredentialsError } from '../services/credentialsService.js'
 import { reconcileInstitutionTransaction } from '../services/institutionFinancialLedger.js'
 import { dispatchInstitutionNotification } from '../services/institutionNotificationService.js'
+import { writeInstitutionAudit } from '../services/institutionAuditService.js'
+import { updateInstitutionFinancialTransactionStatus, updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
 
 export const institutionFinanceRouter = Router()
 export const tenantInstitutionFinanceRouter = Router()
@@ -663,14 +665,32 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
     if (Number(item.amount_cents) > Number(limits[0]?.supervisor_approval_limit_cents || 0)) return res.status(403).json({ message: 'This transaction exceeds your approval limit and requires institution admin review.' })
   }
   if (decision === 'REJECTED') {
-    const { rows } = await query(
-      `UPDATE institution_financial_transactions SET status = 'REJECTED', approved_by_staff_id = $3, approved_at = now(),
-          rejection_note = $4, updated_at = now()
-        WHERE id = $1 AND institution_id = $2 AND status = 'PENDING_APPROVAL' RETURNING *`,
-      [item.id, req.institutionAuth.institutionId, req.institutionAuth.id, String(rejectionNote || 'Rejected by reviewer.').slice(0, 1000)]
-    )
-    if (!rows.length) return res.status(409).json({ message: 'Transaction was already reviewed.' })
-    return res.json(rows[0])
+    const result = await withTransaction(async (tx) => {
+      const { rows } = await updateInstitutionFinancialTransactionStatus(tx, {
+        id: item.id,
+        institutionId: req.institutionAuth.institutionId,
+        currentStatus: 'PENDING_APPROVAL',
+        nextStatus: 'REJECTED',
+        fields: {
+          approved_by_staff_id: req.institutionAuth.id,
+          approved_at: new Date(),
+          rejection_note: String(rejectionNote || 'Rejected by reviewer.').slice(0, 1000)
+        }
+      })
+      await writeInstitutionAudit(tx, {
+        institutionId: req.institutionAuth.institutionId,
+        actorStaffId: req.institutionAuth.id,
+        action: 'INSTITUTION_TRANSACTION_REJECTED',
+        note: {
+          transactionId: item.id,
+          fromStatus: 'PENDING_APPROVAL',
+          toStatus: 'REJECTED',
+          reason: String(rejectionNote || 'Rejected by reviewer.').slice(0, 1000)
+        }
+      })
+      return rows[0]
+    })
+    return res.json(result)
   }
   if (item.transaction_type === 'LOAN_REPAYMENT') {
     return res.status(409).json({ message: 'Loan recovery is allocated from vendor payout funds and cannot be collected from the customer phone.' })
@@ -739,12 +759,31 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
       )
       if (count[0].count >= Number(item.withdrawals_per_month)) return { error: 'Monthly withdrawal limit has been reached.' }
     }
-    const { rows: started } = await tx.query(
-      `UPDATE institution_financial_transactions SET status = 'PENDING_GATEWAY', approved_by_staff_id = $3,
-          approved_at = now(), fee_cents = $4, penalty_cents = $5, payout_amount_cents = $6, updated_at = now()
-        WHERE id = $1 AND institution_id = $2 AND status = 'PENDING_APPROVAL' RETURNING *`,
-      [item.id, req.institutionAuth.institutionId, req.institutionAuth.id, fee, penalty, payout ? gatewayAmount : null]
-    )
+    const { rows: started } = await updateInstitutionFinancialTransactionStatus(tx, {
+      id: item.id,
+      institutionId: req.institutionAuth.institutionId,
+      currentStatus: 'PENDING_APPROVAL',
+      nextStatus: 'PENDING_GATEWAY',
+      fields: {
+        approved_by_staff_id: req.institutionAuth.id,
+        approved_at: new Date(),
+        fee_cents: fee,
+        penalty_cents: penalty,
+        payout_amount_cents: payout ? gatewayAmount : null
+      }
+    })
+    await writeInstitutionAudit(tx, {
+      institutionId: req.institutionAuth.institutionId,
+      actorStaffId: req.institutionAuth.id,
+      action: 'INSTITUTION_TRANSACTION_APPROVED',
+      note: {
+        transactionId: item.id,
+        fromStatus: 'PENDING_APPROVAL',
+        toStatus: 'PENDING_GATEWAY',
+        transactionType: item.transaction_type,
+        amountCents: Number(item.amount_cents)
+      }
+    })
     return started.length ? { transaction: started[0] } : { error: 'Transaction was already reviewed.' }
   })
   if (startResult.error) return res.status(409).json({ message: startResult.error })
@@ -766,10 +805,46 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
   } catch (error) {
     const definitive = isDefinitiveEganowRejection(error)
     if (definitive) {
-      await query(`UPDATE institution_financial_transactions SET status = 'FAILED', payment_gateway_status = 'REJECTED', failure_reason = $2, updated_at = now() WHERE id = $1 AND status = 'PENDING_GATEWAY'`, [item.id, 'Eganow rejected this payment request.'])
-      await query(`UPDATE institution_transactions SET status = 'FAILED', updated_at = now() WHERE internal_reference = $1`, [item.external_reference])
+      await updateInstitutionFinancialTransactionStatus(query, {
+        id: item.id,
+        institutionId: req.institutionAuth.institutionId,
+        currentStatus: 'PENDING_GATEWAY',
+        nextStatus: 'FAILED',
+        fields: {
+          payment_gateway_status: 'REJECTED',
+          failure_reason: 'Eganow rejected this payment request.'
+        }
+      })
+      const institutionTransactionRow = (await query(
+        `SELECT id, status FROM institution_transactions WHERE internal_reference = $1 AND institution_id = $2`,
+        [item.external_reference, req.institutionAuth.institutionId]
+      )).rows[0]
+      if (institutionTransactionRow) {
+        await updateInstitutionTransactionStatus(query, {
+          id: institutionTransactionRow.id,
+          institutionId: req.institutionAuth.institutionId,
+          currentStatus: institutionTransactionRow.status,
+          nextStatus: 'FAILED',
+          fields: {}
+        })
+      }
+      await writeInstitutionAudit(query, {
+        institutionId: req.institutionAuth.institutionId,
+        actorStaffId: req.institutionAuth.id,
+        action: 'INSTITUTION_TRANSACTION_GATEWAY_REJECTED',
+        note: { transactionId: item.id, fromStatus: 'PENDING_GATEWAY', toStatus: 'FAILED', reason: 'Eganow rejected this payment request.' }
+      })
     }
-    else await query(`UPDATE institution_financial_transactions SET payment_gateway_status = 'UNKNOWN', failure_reason = 'Provider result is uncertain. Reconcile before retrying.', updated_at = now() WHERE id = $1 AND status = 'PENDING_GATEWAY'`, [item.id])
+    else await updateInstitutionFinancialTransactionStatus(query, {
+      id: item.id,
+      institutionId: req.institutionAuth.institutionId,
+      currentStatus: 'PENDING_GATEWAY',
+      nextStatus: 'PENDING_GATEWAY',
+      fields: {
+        payment_gateway_status: 'UNKNOWN',
+        failure_reason: 'Provider result is uncertain. Reconcile before retrying.'
+      }
+    })
     return res.status(definitive ? 502 : 202).json({ id: item.id, status: definitive ? 'FAILED' : 'PENDING_GATEWAY', message: definitive ? 'Eganow rejected the payment request.' : 'Eganow response was uncertain. Check status before retrying.' })
   }
 }))
@@ -1120,8 +1195,28 @@ tenantInstitutionFinanceRouter.post('/transactions', asyncHandler(async (req, re
     res.status(result.pending ? 202 : 201).json(result.transaction || { id: transaction.id, status: 'PENDING_GATEWAY' })
   } catch (error) {
     const definitive = isDefinitiveEganowRejection(error)
-    if (definitive) await query(`UPDATE institution_financial_transactions SET status = 'FAILED', fee_cents = $2, payment_gateway_status = 'REJECTED', failure_reason = 'Eganow rejected the collection request.', updated_at = now() WHERE id = $1`, [transaction.id, fee])
-    else await query(`UPDATE institution_financial_transactions SET fee_cents = $2, payment_gateway_status = 'UNKNOWN', failure_reason = 'Provider result is uncertain. Reconcile before retrying.', updated_at = now() WHERE id = $1`, [transaction.id, fee])
+    if (definitive) await updateInstitutionFinancialTransactionStatus(query, {
+      id: transaction.id,
+      institutionId: transaction.institution_id,
+      currentStatus: 'PENDING_GATEWAY',
+      nextStatus: 'FAILED',
+      fields: {
+        fee_cents: fee,
+        payment_gateway_status: 'REJECTED',
+        failure_reason: 'Eganow rejected the collection request.'
+      }
+    })
+    else await updateInstitutionFinancialTransactionStatus(query, {
+      id: transaction.id,
+      institutionId: transaction.institution_id,
+      currentStatus: 'PENDING_GATEWAY',
+      nextStatus: 'PENDING_GATEWAY',
+      fields: {
+        fee_cents: fee,
+        payment_gateway_status: 'UNKNOWN',
+        failure_reason: 'Provider result is uncertain. Reconcile before retrying.'
+      }
+    })
     res.status(definitive ? 502 : 202).json({ id: transaction.id, status: definitive ? 'FAILED' : 'PENDING_GATEWAY', message: definitive ? 'Eganow rejected the collection request.' : 'Eganow response is uncertain; check status before retrying.' })
   }
 }))

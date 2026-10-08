@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { publicApi } from '../api/client'
+import { createIdempotencyKey } from '../lib/idempotency'
 
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '')
@@ -18,6 +19,9 @@ export default function HostedInstallmentPayment() {
   const [paying, setPaying] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const idempotencyStorageKey = `xorganam_hosted_installment_key:${installmentToken}`
+  const idempotencyKey = useRef(sessionStorage.getItem(idempotencyStorageKey))
+  const [attemptStarted, setAttemptStarted] = useState(false)
 
   useEffect(() => {
     publicApi.getCreditInstallment(installmentToken)
@@ -34,9 +38,19 @@ export default function HostedInstallmentPayment() {
     if (!msisdn) return setError('Enter a valid mobile number.')
     setPaying(true)
     try {
-      const result = await publicApi.payCreditInstallment(installmentToken, { msisdn })
+      if (!idempotencyKey.current) idempotencyKey.current = getOrCreateIdempotencyKey(idempotencyStorageKey)
+      const result = await publicApi.payCreditInstallment(installmentToken, { msisdn }, idempotencyKey.current)
       setNotice(result.message || 'Approve the payment prompt on your phone.')
-    } catch (requestError) { setError(requestError.message) } finally { setPaying(false) }
+      setAttemptStarted(true)
+      if (result.status === 'FAILED') {
+        idempotencyKey.current = null
+        clearIdempotencyKey(idempotencyStorageKey)
+        setAttemptStarted(false)
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+      if (requestError.status === 409) setAttemptStarted(true)
+    } finally { setPaying(false) }
   }
 
   return <div className="page">
@@ -56,9 +70,9 @@ export default function HostedInstallmentPayment() {
         {notice && <div className="status-banner success" role="status">{notice}</div>}
         <form onSubmit={submit}>
           <div className="field"><label htmlFor="installment-phone">Mobile number for payment</label>
-            <input id="installment-phone" inputMode="tel" autoComplete="tel" required value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="0551234567" />
+            <input id="installment-phone" inputMode="tel" autoComplete="tel" required disabled={attemptStarted} value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="0551234567" />
           </div>
-          <button className="pay-btn" disabled={paying}>{paying ? 'Sending prompt…' : 'Pay installment'}</button>
+          <button className="pay-btn" disabled={paying || attemptStarted}>{paying ? 'Sending prompt…' : attemptStarted ? 'Payment started' : 'Pay installment'}</button>
         </form>
       </>}
     </section>

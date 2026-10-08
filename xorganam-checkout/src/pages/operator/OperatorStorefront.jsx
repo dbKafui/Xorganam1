@@ -165,11 +165,24 @@ export default function OperatorStorefront() {
 
   async function saveDefaults(event) {
     event.preventDefault(); setBusy(true); setError(''); setNotice('')
+    const downPaymentPercent = Number(defaults.downPaymentPercent)
+    const installmentCount = Number(defaults.installmentCount)
+    const markupAmount = Number(defaults.markupAmount)
+    const lateFeeAmount = Number(defaults.lateFeeAmount)
+    const lateFeeGraceDays = Number(defaults.lateFeeGraceDays)
+    const missedInstallmentThreshold = Number(defaults.missedInstallmentThreshold)
+    const firstDueDays = Number(defaults.firstDueDays)
+    if (!Number.isFinite(downPaymentPercent) || downPaymentPercent < 0 || downPaymentPercent > 99.99) return setError('Down payment must be between 0% and 99.99%.')
+    if (!Number.isInteger(installmentCount) || installmentCount < 1 || installmentCount > 120) return setError('Installment count must be a whole number from 1 to 120.')
+    if (!Number.isFinite(markupAmount) || markupAmount < 0 || markupAmount > 1_000_000) return setError('Markup must be between GHS 0 and GHS 1,000,000.')
+    if (!Number.isFinite(lateFeeAmount) || lateFeeAmount < 0 || lateFeeAmount > 1_000_000) return setError('Late fee must be between GHS 0 and GHS 1,000,000.')
+    if (!Number.isInteger(lateFeeGraceDays) || lateFeeGraceDays < 0 || lateFeeGraceDays > 365) return setError('Late fee grace days must be between 0 and 365.')
+    if (!Number.isInteger(missedInstallmentThreshold) || missedInstallmentThreshold < 1 || missedInstallmentThreshold > 120) return setError('Missed installment threshold must be a whole number from 1 to 120.')
+    if (!Number.isInteger(firstDueDays) || firstDueDays < 1 || firstDueDays > 365) return setError('First installment due date must be between 1 and 365 days.')
     try {
       await operatorApi.saveCreditDefaults({ tenantId: user.tenantId, enabled: defaults.enabled,
-        downPaymentPercent: Number(defaults.downPaymentPercent), installmentCount: Number(defaults.installmentCount), installmentFrequency: defaults.installmentFrequency,
-        markupAmount: Number(defaults.markupAmount), lateFeeAmount: Number(defaults.lateFeeAmount), lateFeeGraceDays: Number(defaults.lateFeeGraceDays),
-        missedInstallmentThreshold: Number(defaults.missedInstallmentThreshold), firstDueDays: Number(defaults.firstDueDays) })
+        downPaymentPercent, installmentCount, installmentFrequency: defaults.installmentFrequency,
+        markupAmount, lateFeeAmount, lateFeeGraceDays, missedInstallmentThreshold, firstDueDays })
       setNotice('Credit checkout defaults saved.')
     } catch (requestError) { setError(requestError.message) }
     finally { setBusy(false) }

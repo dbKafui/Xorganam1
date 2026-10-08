@@ -1,0 +1,16 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^git status --short && echo '--- TEST FILES ---' && find test -maxdepth 1 -type f -name '\\*\\.test\\.js' -print \\| sort && echo '--- PACKAGE SCRIPTS ---' && node -p \"JSON\\.stringify\\(require\\('\\./package\\.json'\\)\\.scripts,null,2\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /Users/eyramcarter/Documents/GitHub/Xorganam1/xorganam-node-backend && node --test --test-concurrency=1 \\./test/creditStateService\\.test\\.js \\./test/transactionStateIntegrity\\.test\\.js \\./test/creditPolicyIntegrity\\.test\\.js \\./test/reportReconciliation\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --test --test-concurrency=1 \\./test/creditStateService\\.test\\.js \\./test/transactionStateIntegrity\\.test\\.js \\./test/creditPolicyIntegrity\\.test\\.js \\./test/reportReconciliation\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

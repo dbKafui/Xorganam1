@@ -86,8 +86,9 @@ export async function resetPassword({ token, newPassword }) {
     const userId = rows[0].user_id
     const passwordHash = await hashPassword(newPassword)
     await client.query(
-      `UPDATE password_reset_tokens SET used_at = now() WHERE id = $1`,
-      [rows[0].id]
+      `UPDATE password_reset_tokens SET used_at = now()
+        WHERE user_id = $1 AND used_at IS NULL`,
+      [userId]
     )
     await client.query(
       `UPDATE users
@@ -105,7 +106,7 @@ export async function resetPassword({ token, newPassword }) {
     await client.query(
       `INSERT INTO platform_audit_log
          (actor_user_id, tenant_id, action, resource_type, resource_id, details)
-       VALUES ($1, $2, 'PASSWORD_RESET_COMPLETED', 'user', $3, jsonb_build_object('tokenUsed', true, tokenId', $4))`,
+       VALUES ($1, $2, 'PASSWORD_RESET_COMPLETED', 'user', $3, jsonb_build_object('tokenUsed', true, 'tokenId', $4))`,
       [userId, rows[0].tenant_id, userId, rows[0].id]
     )
     return { reset: true, userId }

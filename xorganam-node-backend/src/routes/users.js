@@ -4,6 +4,7 @@ import { hashPassword } from '../security/password.js'
 import { authenticate, requireRole, requirePermission, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { isValidPermissionType } from '../constants/permissions.js'
+import { requestEmailVerification } from '../services/emailVerificationService.js'
 
 export const usersRouter = Router()
 
@@ -40,27 +41,27 @@ usersRouter.get(
     
     if (req.user.isPlatformAdmin && req.query.tenantId) {
       const sql = merchantId
-        ? `SELECT id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at
+           ? `SELECT id, tenant_id, merchant_id, first_name, last_name, email, email_verified_at, phone_number, role, is_active, created_at, last_login_at
              FROM users WHERE tenant_id = $1 AND merchant_id = $2 ORDER BY last_name`
-        : `SELECT id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at
+           : `SELECT id, tenant_id, merchant_id, first_name, last_name, email, email_verified_at, phone_number, role, is_active, created_at, last_login_at
              FROM users WHERE tenant_id = $1 ORDER BY last_name`
       ;({ rows } = await query(sql, merchantId ? [req.query.tenantId, merchantId] : [req.query.tenantId]))
     } else if (req.user.isPlatformAdmin) {
       ;({ rows } = await query(
-        `SELECT id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at
+        `SELECT id, tenant_id, merchant_id, first_name, last_name, email, email_verified_at, phone_number, role, is_active, created_at, last_login_at
            FROM users ORDER BY last_name`
       ))
     } else if (req.user.merchantId) {
       ;({ rows } = await query(
-        `SELECT id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at
+        `SELECT id, tenant_id, merchant_id, first_name, last_name, email, email_verified_at, phone_number, role, is_active, created_at, last_login_at
            FROM users WHERE tenant_id = $1 AND merchant_id = $2 ORDER BY last_name`,
         [req.user.tenantId, req.user.merchantId]
       ))
     } else {
       const sql = merchantId
-        ? `SELECT id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at
+           ? `SELECT id, tenant_id, merchant_id, first_name, last_name, email, email_verified_at, phone_number, role, is_active, created_at, last_login_at
              FROM users WHERE tenant_id = $1 AND (merchant_id = $2 OR merchant_id IS NULL) ORDER BY last_name`
-        : `SELECT id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at
+           : `SELECT id, tenant_id, merchant_id, first_name, last_name, email, email_verified_at, phone_number, role, is_active, created_at, last_login_at
              FROM users WHERE tenant_id = $1 ORDER BY last_name`
       ;({ rows } = await query(sql, merchantId ? [req.user.tenantId, merchantId] : [req.user.tenantId]))
     }
@@ -126,7 +127,8 @@ usersRouter.post(
       [tenantId, merchantId || null, firstName, lastName, normalizedEmail, phoneNumber || null, passwordHash, role]
     )
 
-    res.status(201).json(mapUser(rows[0]))
+    const verification = await requestEmailVerification(normalizedEmail)
+    res.status(201).json({ ...mapUser(rows[0]), emailVerificationSent: verification.delivered })
   })
 )
 
@@ -427,6 +429,7 @@ function mapUser(row) {
     firstName: row.first_name,
     lastName: row.last_name,
     email: row.email,
+    emailVerifiedAt: row.email_verified_at || null,
     phoneNumber: row.phone_number,
     role: row.role,
     isActive: row.is_active,

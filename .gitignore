@@ -1,2 +1,6 @@
 *.[zZ][iI][pP]
 *.[mM][dD]
+.env
+.env.*
+!.env.docker
+

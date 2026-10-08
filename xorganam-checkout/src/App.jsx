@@ -26,6 +26,7 @@ import Storefront from './pages/Storefront'
 import Marketplace from './pages/Marketplace'
 import CustomerOrders from './pages/CustomerOrders'
 import OperatorStorefront from './pages/operator/OperatorStorefront'
+import VerifyEmail from './pages/operator/VerifyEmail'
 
 export default function App() {
   useEffect(() => {
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="/credit-schedule" element={<CreditCustomerPlans />} />
           <Route path="/operator/register" element={<OperatorRegister />} />
           <Route path="/operator/login" element={<OperatorLogin />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
 
           <Route
             path="/operator"

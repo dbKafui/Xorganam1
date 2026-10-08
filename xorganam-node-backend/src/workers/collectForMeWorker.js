@@ -9,6 +9,7 @@ import { markCreditInstallmentCollected } from '../services/creditInstallmentSet
 import { reconcileTransaction } from '../services/reconciliationService.js'
 import { computeFee } from '../services/feeService.js'
 import { createVendorReference } from '../services/referenceIds.js'
+import { updateTransactionStatus } from '../services/transactionStateService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '10', 10)
 
@@ -386,7 +387,14 @@ async function markTransactionResult(transactionId, { success, status, paymentGa
     )
     const transaction = rows[0]
     if (status === 'SWEPT_INTERNAL' && transaction?.type === 'INTERNAL_TRANSFER' && transaction.parent_transaction_id) {
-      await tx.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [transaction.parent_transaction_id])
+      const { rows: parentRows } = await tx.query('SELECT status FROM transactions WHERE id = $1', [transaction.parent_transaction_id])
+      await updateTransactionStatus(tx, {
+        id: transaction.parent_transaction_id,
+        type: 'COLLECTION',
+        currentStatus: parentRows[0]?.status || 'RECEIVED',
+        nextStatus: 'SWEPT_INTERNAL',
+        fields: {}
+      })
       await markCreditInstallmentCollected(tx, transaction.parent_transaction_id)
     } else if (status === 'SWEPT_INTERNAL' && transaction?.type === 'COLLECTION') {
       await markCreditInstallmentCollected(tx, transaction.id)

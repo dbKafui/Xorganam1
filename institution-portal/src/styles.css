@@ -196,6 +196,8 @@ td small { color: #96a09c; font-size: 9px; margin-top: 3px; }
 .login-card form { display: grid; gap: 15px; }
 .login-card .form-field input { height: 43px; font-size: 12px; }
 .login-card .button { height: 43px; margin-top: 7px; }
+.mfa-recovery-codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin: 16px 0; padding: 14px 14px 14px 34px; border: 1px solid #dce7e1; border-radius: 8px; background: #f6faf7; font-size: 11px; }
+.mfa-recovery-codes li { overflow-wrap: anywhere; }
 .login-security { margin-top: 23px; padding-top: 13px; border-top: 1px solid #edf0ee; color: #8e9b95; font-size: 9px; line-height: 1.6; }
 .secure-icon { color: #4d9a72; font-size: 8px; margin-right: 5px; }
 .login-register-link { margin: 18px 0 0; color: #7a8982; font-size: 10px; text-align: center; }

@@ -15,8 +15,8 @@ async function main() {
   const passwordHash = await hashPassword(password)
 
   await query(
-    `INSERT INTO users (tenant_id, first_name, last_name, email, password_hash, role, is_active)
-     VALUES (NULL, 'Platform', 'Administrator', $1, $2, 'PLATFORM_ADMIN', TRUE)`,
+    `INSERT INTO users (tenant_id, first_name, last_name, email, password_hash, role, is_active, email_verified_at)
+     VALUES (NULL, 'Platform', 'Administrator', $1, $2, 'PLATFORM_ADMIN', TRUE, now())`,
     [email, passwordHash]
   )
 

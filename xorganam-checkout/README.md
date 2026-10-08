@@ -35,11 +35,11 @@ responses. Build one image and serve it on both configured hosts.
 ## Payment page
 
 `GET /public/merchants/:id` confirms the merchant can accept payments and shows her name.
-`POST /public/collect` starts the real Eganow collection. **Note on status**: the backend's
-`transaction_status` enum is `RECEIVED | SWEPT_INTERNAL | PAID_OUT | FAILED` - there's no
-"awaiting customer approval" state to poll for, so this page shows the result of the collection
-call itself (started vs. rejected) rather than faking a wait for the customer's phone. It cannot
-confirm the customer actually approved the prompt - only that Eganow accepted the request.
+`POST /public/collect` starts the real Eganow collection with a cryptographically random
+`Idempotency-Key`. The app reuses that key if the response is uncertain. A pending transaction
+must be checked or reconciled before a new payment is started; do not create a new key to retry an
+unknown provider outcome. The status reflects Eganow's reported result and cannot prove the
+customer approved a prompt that remains pending.
 
 ## Operator portal
 

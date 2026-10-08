@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { publicApi } from '../api/client'
+import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../lib/idempotency'
+import { classifyPaymentStatus } from '../lib/statusOutcome'
+import PaymentStatusDetails from '../components/PaymentStatusDetails.jsx'
 
 const MSISDN_PATTERN = /^(?:0[0-9]{9}|233[0-9]{9})$/
 const MAX_PAYMENT_AMOUNT = 1_000_000
@@ -15,6 +18,30 @@ function normalizeMsisdn(rawMsisdn) {
   return digits
 }
 
+function isValidCardNumber(value) {
+  const digits = String(value).replace(/\D/g, '')
+  if (digits.length < 12 || digits.length > 19) return false
+  let sum = 0
+  let parity = digits.length % 2
+  for (let index = 0; index < digits.length; index += 1) {
+    let digit = Number(digits[index])
+    if (index % 2 === parity) {
+      digit *= 2
+      if (digit > 9) digit -= 9
+    }
+    sum += digit
+  }
+  return sum % 10 === 0
+}
+
+function isValidExpiry(month, year) {
+  const monthNumber = Number(month)
+  const yearNumber = Number(String(year).slice(-2))
+  if (!Number.isInteger(monthNumber) || monthNumber < 1 || monthNumber > 12 || !Number.isInteger(yearNumber)) return false
+  const expiryDate = new Date(2000 + yearNumber, monthNumber, 0, 23, 59, 59)
+  return expiryDate >= new Date()
+}
+
 function getMerchantIdFromUrl() {
   const params = new URLSearchParams(window.location.search)
   return params.get('merchant') || params.get('merchantId') || ''
@@ -22,6 +49,7 @@ function getMerchantIdFromUrl() {
 
 export default function Checkout() {
   const merchantId = getMerchantIdFromUrl()
+  const idempotencyStorageKey = `xorganam_collection_key:${merchantId}`
 
   const [merchant, setMerchant] = useState(null)
   const [merchantError, setMerchantError] = useState('')
@@ -40,6 +68,7 @@ export default function Checkout() {
   const [statusMessage, setStatusMessage] = useState('')
   const [paymentGatewayStatus, setPaymentGatewayStatus] = useState('')
   const pollingTimerRef = useRef(null)
+  const idempotencyKeyRef = useRef(sessionStorage.getItem(idempotencyStorageKey))
 
   useEffect(() => {
     if (!merchantId) {
@@ -74,9 +103,23 @@ export default function Checkout() {
       setFormError('Enter a valid mobile number in local or international format, e.g. 0551234567 or 233551234567.')
       return
     }
-    if (collectionMethod === 'CARD' && (!card.number || !card.name || !card.month || !card.year || !card.cvv)) {
-      setFormError('Complete all card details before continuing.')
-      return
+    if (collectionMethod === 'CARD') {
+      if (!isValidCardNumber(card.number)) {
+        setFormError('Enter a valid card number with 12 to 19 digits.')
+        return
+      }
+      if (card.name.trim().length < 2) {
+        setFormError('Enter the name shown on the card.')
+        return
+      }
+      if (!isValidExpiry(card.month, card.year)) {
+        setFormError('Enter a valid future expiry date.')
+        return
+      }
+      if (!/^\d{3,4}$/.test(card.cvv)) {
+        setFormError('Enter a valid 3 or 4 digit card security code.')
+        return
+      }
     }
 
     setStage('submitting')
@@ -88,11 +131,14 @@ export default function Checkout() {
         return
       }
 
-      const result = await publicApi.collect({ merchantId, amount: numericAmount, msisdn: normalizedMsisdn || undefined, collectionMethod, ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {}) })
+      if (!idempotencyKeyRef.current) idempotencyKeyRef.current = getOrCreateIdempotencyKey(idempotencyStorageKey)
+      const result = await publicApi.collect({ merchantId, amount: numericAmount, msisdn: normalizedMsisdn || undefined, collectionMethod, ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {}) }, idempotencyKeyRef.current)
       setReference(result.reference)
       setPaymentGatewayStatus(result.paymentGatewayStatus || result.status || '')
       
       if (result.status === 'FAILED') {
+        idempotencyKeyRef.current = null
+        clearIdempotencyKey(idempotencyStorageKey)
         setStatusMessage(result.message || `Payment could not be started: ${result.failureReason || 'Unknown error'}`)
         setStage('failed')
       } else if (String(result.paymentGatewayStatus).toUpperCase() === 'AUTHENTICATION_IN_PROGRESS' && result.redirectHtml) {
@@ -104,6 +150,10 @@ export default function Checkout() {
       }
     } catch (err) {
       setFormError(err.message)
+      if (err.status >= 400 && err.status < 500 && err.status !== 409) {
+        idempotencyKeyRef.current = null
+        clearIdempotencyKey(idempotencyStorageKey)
+      }
       setStage('idle')
     }
   }
@@ -124,40 +174,41 @@ export default function Checkout() {
         if (cancelled) return
 
         const status = String(result.status || '').toUpperCase()
+        const outcome = classifyPaymentStatus({ status, failureReason: result.failureReason })
         setPaymentGatewayStatus(result.paymentGatewayStatus || result.status || '')
 
-        if (status === 'PENDING') {
+        if (outcome.state === 'pending') {
           attempts += 1
           const secondsLeft = Math.max(0, (MAX_ATTEMPTS - attempts) * 3)
           if (attempts >= MAX_ATTEMPTS) {
             setStatusMessage(`Payment is processing. Check back in a few minutes, or refresh the page to check status.`)
             return
           }
-          const attemptsLeft = MAX_ATTEMPTS - attempts
           setStatusMessage(`Payment prompt sent. Waiting for approval on your phone. Checking again in ${secondsLeft}s…`)
           pollingTimerRef.current = window.setTimeout(pollStatus, POLL_INTERVAL)
           return
         }
 
-        if (status === 'RECEIVED' || status === 'PAID_OUT' || status === 'SWEPT_INTERNAL') {
-          setStatusMessage(result.failureReason ? result.failureReason : 'Payment completed successfully!')
+        if (outcome.state === 'success') {
+          setStatusMessage(outcome.message)
           setStage('success')
           return
         }
 
-        if (status === 'FAILED') {
-          setStatusMessage(result.failureReason || 'Payment was declined or cancelled.')
+        if (outcome.state === 'partial') {
+          setStatusMessage(`${outcome.message} Please contact support or use the reconciliation page before retrying.`)
           setStage('failed')
           return
         }
 
-        setStatusMessage(`Payment status: ${result.status || 'unknown'}. Please wait…`)
-        attempts += 1
-        if (attempts < MAX_ATTEMPTS) {
-          pollingTimerRef.current = window.setTimeout(pollStatus, POLL_INTERVAL)
-        } else {
-          setStatusMessage(`Payment is processing. Refresh the page to check status.`)
+        if (outcome.state === 'manual-reconciliation') {
+          setStatusMessage(`${outcome.title}: ${outcome.message}`)
+          setStage('failed')
+          return
         }
+
+        setStatusMessage(outcome.message)
+        setStage('failed')
       } catch (err) {
         if (cancelled) return
         setStatusMessage(err.message || 'Unable to check payment status.')
@@ -187,6 +238,8 @@ export default function Checkout() {
     setReference('')
     setStatusMessage('')
     setPaymentGatewayStatus('')
+    idempotencyKeyRef.current = null
+    clearIdempotencyKey(idempotencyStorageKey)
   }
 
   return (
@@ -239,7 +292,6 @@ export default function Checkout() {
                     placeholder="0.00"
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
-                    autoFocus
                   />
                 </div>
               </div>
@@ -292,7 +344,7 @@ export default function Checkout() {
               <div className="receipt-row"><span>Gateway status</span><span className="mono">{paymentGatewayStatus || 'PENDING'}</span></div>
             </div>
             <p className="payment-security-note"><span>✓</span> For your security, do not share the payment reference or card details with anyone.</p>
-            <button className="secondary-btn" onClick={reset}>Start another payment</button>
+            <p className="payment-security-note">Do not start another payment while this one is pending. Wait for the status to update before retrying.</p>
           </>
         )}
 
@@ -315,10 +367,7 @@ export default function Checkout() {
         {stage === 'failed' && (
           <>
             <div className="payment-stepper" aria-label="Payment progress"><span className="complete">1</span><i /><span className="error-step">2</span><i /><span>3</span></div>
-            <div className="status-banner error" role="alert">
-              <span className="status-icon">⚠</span>
-              <span><strong>Payment could not continue</strong><small>{statusMessage || 'Payment could not be started.'}</small></span>
-            </div>
+            <PaymentStatusDetails status={paymentGatewayStatus || 'FAILED'} failureReason={statusMessage} />
             {reference && (
               <div className="receipt">
                 <div className="receipt-row"><span>Reference</span><span className="mono">{reference}</span></div>

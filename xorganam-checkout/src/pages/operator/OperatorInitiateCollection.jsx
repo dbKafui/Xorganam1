@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi } from '../../api/client'
+import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../../lib/idempotency'
 
 const PAYPARTNER_OPTIONS = [
   { value: '', label: 'Auto-detect from merchant profile' },
@@ -27,6 +28,7 @@ export default function OperatorInitiateCollection() {
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
+  const idempotencyKeyRef = useRef(null)
 
   useEffect(() => {
     if (!user?.tenantId) return
@@ -49,6 +51,8 @@ export default function OperatorInitiateCollection() {
       if (form.collectionMethod === 'MOMO' && (!normalizedMsisdn || normalizedMsisdn.length !== 12)) {
         throw new Error('Enter a valid mobile number in local or international format.')
       }
+      const storageKey = `xorganam_operator_collection_key:${user.tenantId}`
+      if (!idempotencyKeyRef.current) idempotencyKeyRef.current = getOrCreateIdempotencyKey(storageKey)
       const response = await operatorApi.collectForTenant(user.tenantId, {
         merchantId: form.merchantId,
         amount: Number(form.amount),
@@ -57,13 +61,29 @@ export default function OperatorInitiateCollection() {
         ...(form.collectionMethod === 'CARD' ? { cardNumber: form.cardNumber, cardholderName: form.cardholderName, expiryDateMonth: Number(form.expiryDateMonth), expiryDateYear: form.expiryDateYear.slice(-2), cvv: form.cvv } : {}),
         network: form.network || undefined,
         narration: form.narration || undefined
-      })
+      }, idempotencyKeyRef.current)
       setResult(response)
+      if (response.status === 'FAILED') {
+        idempotencyKeyRef.current = null
+        clearIdempotencyKey(`xorganam_operator_collection_key:${user.tenantId}`)
+      }
     } catch (err) {
       setError(err.message)
+      if (err.status >= 400 && err.status < 500 && err.status !== 409) {
+        idempotencyKeyRef.current = null
+        clearIdempotencyKey(`xorganam_operator_collection_key:${user.tenantId}`)
+      }
     } finally {
       setBusy(false)
     }
+  }
+
+  function startAnotherCollection() {
+    idempotencyKeyRef.current = null
+    clearIdempotencyKey(`xorganam_operator_collection_key:${user.tenantId}`)
+    setResult(null)
+    setError('')
+    setForm({ merchantId: '', amount: '', msisdn: '', network: '', narration: '', collectionMethod: 'MOMO', cardNumber: '', cardholderName: '', expiryDateMonth: '', expiryDateYear: '', cvv: '' })
   }
 
   return (
@@ -91,6 +111,7 @@ export default function OperatorInitiateCollection() {
               {result.message && (
                 <div>Gateway message: <span className="mono">{result.message}</span></div>
               )}
+              {result.status !== 'PENDING' && <button type="button" className="btn btn-secondary" onClick={startAnotherCollection}>Start another collection</button>}
               {result.redirectHtml && <iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={(() => { try { return decodeURIComponent(escape(atob(result.redirectHtml))) } catch { return atob(result.redirectHtml) } })()} style={{ width: '100%', minHeight: 500, border: 0 }} />}
               <div>
                 <Link to={`/operator/transactions/${result.id}`}>View it →</Link>
@@ -141,7 +162,7 @@ export default function OperatorInitiateCollection() {
         </div>}
         {form.collectionMethod === 'CARD' && <div className="two-col"><div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={form.cardNumber} onChange={(e) => setForm((f) => ({ ...f, cardNumber: e.target.value }))} /></div><div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={form.cardholderName} onChange={(e) => setForm((f) => ({ ...f, cardholderName: e.target.value }))} /></div><div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" value={form.expiryDateMonth} onChange={(e) => setForm((f) => ({ ...f, expiryDateMonth: e.target.value }))} /></div><div className="field"><label>Expiry year</label><input required inputMode="numeric" placeholder="2030" value={form.expiryDateYear} onChange={(e) => setForm((f) => ({ ...f, expiryDateYear: e.target.value }))} /></div><div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={form.cvv} onChange={(e) => setForm((f) => ({ ...f, cvv: e.target.value }))} /></div></div>}
 
-        <button className="btn btn-primary" disabled={busy || !form.merchantId}>{busy ? 'Starting…' : 'Start collection'}</button>
+        <button className="btn btn-primary" disabled={busy || !form.merchantId || Boolean(result)}>{busy ? 'Starting…' : 'Start collection'}</button>
       </form>
     </div>
   )

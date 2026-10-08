@@ -12,10 +12,12 @@ export default function Login() {
   const [challenge, setChallenge] = useState('')
   const [secret, setSecret] = useState('')
   const [code, setCode] = useState('')
+  const [recoveryMode, setRecoveryMode] = useState(false)
+  const [recoveryCodes, setRecoveryCodes] = useState([])
 
   useEffect(() => {
-    if (staff) navigate('/dashboard', { replace: true })
-  }, [staff, navigate])
+    if (staff && !challenge && recoveryCodes.length === 0) navigate('/dashboard', { replace: true })
+  }, [staff, challenge, recoveryCodes.length, navigate])
 
   if (staff) return <Navigate to="/dashboard" replace />
 
@@ -36,9 +38,17 @@ export default function Login() {
 
   async function submitMfa(event) {
     event.preventDefault(); setError(''); setSubmitting(true)
-    try { await completeMfa(challenge, code); navigate('/dashboard', { replace: true }) }
+    try {
+      const result = await completeMfa(challenge, recoveryMode ? { recoveryCode: code } : { code })
+      if (result.recoveryCodes?.length) setRecoveryCodes(result.recoveryCodes)
+      else navigate('/dashboard', { replace: true })
+    }
     catch (requestError) { setError(requestError.message) }
     finally { setSubmitting(false) }
+  }
+
+  function finishRecoveryCodeSetup() {
+    navigate('/dashboard', { replace: true })
   }
 
   return (
@@ -59,12 +69,18 @@ export default function Login() {
           <h2>Sign in to your institution</h2>
           <p className="subtle">Use your institution staff account to continue.</p>
           {error && <div className="notice notice-error" role="alert"><strong>Sign in failed</strong><span>{error}</span></div>}
-          {challenge ? <form onSubmit={submitMfa}>
+          {recoveryCodes.length > 0 ? <section>
+            <h3>Save your recovery codes</h3>
+            <p className="subtle">Each code works once. Store them somewhere private; they will not be shown again.</p>
+            <ol className="mfa-recovery-codes">{recoveryCodes.map((recoveryCode) => <li className="mono" key={recoveryCode}>{recoveryCode}</li>)}</ol>
+            <button type="button" className="button button-primary button-wide" onClick={finishRecoveryCodeSetup}>I have saved these codes</button>
+          </section> : challenge ? <form onSubmit={submitMfa}>
             <p className="subtle">Complete authenticator verification to continue.</p>
             {secret && <div className="notice"><strong>Authenticator setup key</strong><span>{secret}</span></div>}
             {error && <div className="notice notice-error" role="alert"><strong>Verification failed</strong><span>{error}</span></div>}
-            <label className="form-field"><span>Six digit authenticator code</span><input required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={(event) => setCode(event.target.value)} /></label>
+            <label className="form-field"><span>{recoveryMode ? 'Recovery code' : 'Six digit authenticator code'}</span><input required inputMode={recoveryMode ? 'text' : 'numeric'} autoComplete="one-time-code" pattern={recoveryMode ? undefined : '[0-9]{6}'} maxLength={recoveryMode ? 29 : 6} value={code} onChange={(event) => setCode(recoveryMode ? event.target.value.toUpperCase() : event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
             <button className="button button-primary button-wide" disabled={submitting}>{submitting ? 'Verifying...' : 'Verify and continue'} <span>→</span></button>
+            {!secret && <button type="button" className="button button-secondary button-wide" disabled={submitting} onClick={() => { setRecoveryMode((current) => !current); setCode(''); setError('') }}>{recoveryMode ? 'Use authenticator app instead' : 'Use a recovery code'}</button>}
           </form> : <form onSubmit={submit}>
             <label className="form-field"><span>Email address</span><input type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@institution.com" /></label>
             <label className="form-field"><span>Password</span><input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" /></label>

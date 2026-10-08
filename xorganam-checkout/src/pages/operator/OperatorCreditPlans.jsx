@@ -52,14 +52,27 @@ export default function OperatorCreditPlans() {
     event.preventDefault()
     setError('')
     setNotice('')
+    const totalValue = Number(form.totalValue)
+    const downPayment = Number(form.downPayment || 0)
+    const installmentCount = Number(form.installmentCount)
+    const markupAmount = Number(form.markupAmount || 0)
+    const lateFeeAmount = Number(form.lateFeeAmount || 0)
+    const lateFeeGraceDays = Number(form.lateFeeGraceDays || 0)
+    const missedInstallmentThreshold = Number(form.missedInstallmentThreshold || 3)
+    if (!Number.isFinite(totalValue) || totalValue <= 0 || totalValue > 1_000_000) return setError('Enter a total sale value between GHS 0.01 and GHS 1,000,000.')
+    if (!Number.isFinite(downPayment) || downPayment < 0 || downPayment >= totalValue) return setError('Down payment must be zero or greater than zero, but less than the total sale value.')
+    if (!Number.isInteger(installmentCount) || installmentCount < 1 || installmentCount > 120) return setError('Installment count must be a whole number from 1 to 120.')
+    if (!Number.isFinite(markupAmount) || markupAmount < 0 || markupAmount > 1_000_000) return setError('Markup must be between GHS 0 and GHS 1,000,000.')
+    if (!Number.isFinite(lateFeeAmount) || lateFeeAmount < 0 || lateFeeAmount > 1_000_000) return setError('Late fee must be between GHS 0 and GHS 1,000,000.')
+    if (!Number.isInteger(lateFeeGraceDays) || lateFeeGraceDays < 0 || lateFeeGraceDays > 365) return setError('Late fee grace days must be between 0 and 365.')
+    if (!Number.isInteger(missedInstallmentThreshold) || missedInstallmentThreshold < 1 || missedInstallmentThreshold > 120) return setError('Missed installment threshold must be a whole number from 1 to 120.')
+    if (!form.firstDueDate) return setError('Choose the first installment due date.')
     setBusy(true)
     try {
       const created = await operatorApi.createCreditPlan({
         tenantId: user.tenantId, merchantId, ...form,
-        totalValue: Number(form.totalValue), downPayment: Number(form.downPayment || 0),
-        installmentCount: Number(form.installmentCount), markupAmount: Number(form.markupAmount || 0),
-        lateFeeAmount: Number(form.lateFeeAmount || 0), lateFeeGraceDays: Number(form.lateFeeGraceDays || 0),
-        missedInstallmentThreshold: Number(form.missedInstallmentThreshold || 3)
+        totalValue, downPayment, installmentCount, markupAmount,
+        lateFeeAmount, lateFeeGraceDays, missedInstallmentThreshold
       })
       setForm(initialForm())
       setNotice(`Credit plan created with ${created.installments} scheduled installments.`)

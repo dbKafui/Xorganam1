@@ -1,3 +1,5 @@
+import crypto from 'node:crypto'
+import { env } from '../config/env.js'
 import { query, withTransaction } from '../db/pool.js'
 
 function normalizeMsisdn(value) {
@@ -36,6 +38,32 @@ function nextDueDate(firstDate, frequency, offset) {
 
 export class StorefrontOrderError extends Error {
   constructor(message, status = 400) { super(message); this.status = status }
+}
+
+export const PREVENTED_ORDER_CANCELLATION_STATUS = {
+  PENDING_PAYMENT: false,
+  PLACED: false,
+  FULFILLED: true,
+  CANCELLED: true
+}
+
+export function assertStorefrontOrderCancellationAllowed(status) {
+  return !PREVENTED_ORDER_CANCELLATION_STATUS[status]
+}
+
+export function orderFingerprint({ slug, itemMap, customerIdentifier, customerName, fulfillmentType, address, merchantId, paymentMethod, collectionMethod }) {
+  const payload = JSON.stringify({
+    slug,
+    items: [...itemMap.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    customerIdentifier,
+    customerName,
+    fulfillmentType,
+    address,
+    merchantId: merchantId || null,
+    paymentMethod,
+    collectionMethod: String(collectionMethod || 'MOMO').toUpperCase()
+  })
+  return crypto.createHmac('sha256', env.jwt.secret).update(payload).digest('hex')
 }
 
 async function createCreditPlan(tx, { tenantId, merchantId, orderId, customer, customerName, totalCents, defaults }) {
@@ -88,6 +116,21 @@ export async function createStorefrontOrder(slug, input) {
   const address = String(input.fulfillmentAddress || '').trim()
   if (fulfillmentType === 'DELIVERY' && (!address || address.length > 1000)) throw new StorefrontOrderError('Enter a delivery address of at most 1000 characters.')
   if (fulfillmentType === 'PICKUP' && address) throw new StorefrontOrderError('A delivery address is only accepted for delivery.')
+  const idempotencyKey = input.idempotencyKey
+  if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) {
+    throw new StorefrontOrderError('Idempotency-Key must be 8 to 128 characters using letters, numbers, period, underscore, colon, or hyphen.')
+  }
+  const fingerprint = idempotencyKey ? orderFingerprint({
+    slug,
+    itemMap,
+    customerIdentifier,
+    customerName: String(input.customerName || '').trim().slice(0, 160),
+    fulfillmentType,
+    address,
+    merchantId: input.merchantId || null,
+    paymentMethod,
+    collectionMethod: input.collectionMethod
+  }) : null
 
   const prepared = await withTransaction(async (tx) => {
     const { rows: storeRows } = await tx.query(
@@ -98,6 +141,39 @@ export async function createStorefrontOrder(slug, input) {
     const store = storeRows[0]
     if (!store || store.tenant_status !== 'ACTIVE') throw new StorefrontOrderError('This storefront is unavailable.', 404)
     if (input.marketplaceOrder && !store.marketplace_opt_in) throw new StorefrontOrderError('This vendor is not listed in the marketplace.', 404)
+
+    if (idempotencyKey) {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`store-order:${store.tenant_id}:${idempotencyKey}`])
+      const { rows: existingRows } = await tx.query(
+        `SELECT id, tenant_id, merchant_id, status, payment_expires_at, collection_transaction_id,
+          credit_plan_id, idempotency_fingerprint
+           FROM orders WHERE tenant_id = $1 AND idempotency_key = $2 FOR UPDATE`,
+        [store.tenant_id, idempotencyKey]
+      )
+      const existingOrder = existingRows[0]
+      if (existingOrder) {
+        if (existingOrder.idempotency_fingerprint !== fingerprint) {
+          throw new StorefrontOrderError('This idempotency key was already used for a different order.', 409)
+        }
+        const { rows: totalRows } = await tx.query(
+          'SELECT COALESCE(SUM(subtotal), 0) AS total_amount FROM order_items WHERE order_id = $1',
+          [existingOrder.id]
+        )
+        let reusedCredit = null
+        if (existingOrder.credit_plan_id) {
+          const { rows: creditRows } = await tx.query('SELECT down_payment FROM credit_plans WHERE id = $1', [existingOrder.credit_plan_id])
+          reusedCredit = { planId: existingOrder.credit_plan_id, downPayment: Number(creditRows[0]?.down_payment) || 0 }
+        }
+        return {
+          order: existingOrder,
+          totalAmount: Number(totalRows[0]?.total_amount || 0),
+          paymentMethod: reusedCredit ? 'CREDIT' : 'EGANOW',
+          customerIdentifier,
+          credit: reusedCredit,
+          existingOrder: true
+        }
+      }
+    }
 
     let merchantId = input.merchantId || null
     if (fulfillmentType === 'DELIVERY') {
@@ -159,11 +235,11 @@ export async function createStorefrontOrder(slug, input) {
     const { rows: orderRows } = await tx.query(
       `INSERT INTO orders
          (tenant_id, merchant_id, customer_identifier, customer_name, fulfillment_type,
-          fulfillment_address, status, payment_expires_at)
-       VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7,
-               now() + make_interval(mins => $8))
+          fulfillment_address, status, payment_expires_at, idempotency_key, idempotency_fingerprint)
+             VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7,
+               now() + make_interval(mins => $8), $9, $10)
        RETURNING id, tenant_id, merchant_id, status, payment_expires_at`,
-      [store.tenant_id, merchantId, customerIdentifier, String(input.customerName || '').trim().slice(0, 160), fulfillmentType, address, initialStatus, expiryMinutes]
+            [store.tenant_id, merchantId, customerIdentifier, String(input.customerName || '').trim().slice(0, 160), fulfillmentType, address, initialStatus, expiryMinutes, idempotencyKey, fingerprint]
     )
     const order = orderRows[0]
     for (const line of lines) {
@@ -193,12 +269,19 @@ export async function createStorefrontOrder(slug, input) {
 export async function cancelAndRestockOrder(tx, orderId, { onlyPending = false, reason = null } = {}) {
   const statuses = onlyPending ? ['PENDING_PAYMENT'] : ['PENDING_PAYMENT', 'PLACED']
   const { rows } = await tx.query(
-    `UPDATE orders SET status = 'CANCELLED', updated_at = now()
-      WHERE id = $1 AND status = ANY($2::order_status[])
-      RETURNING id, tenant_id, merchant_id, credit_plan_id`, [orderId, statuses]
+    `SELECT id, tenant_id, merchant_id, credit_plan_id, status
+       FROM orders
+      WHERE id = $1 FOR UPDATE`, [orderId]
   )
   const order = rows[0]
-  if (!order) return false
+  if (!order || !assertStorefrontOrderCancellationAllowed(order.status)) return false
+  if (!statuses.includes(order.status)) return false
+  const updated = await tx.query(
+    `UPDATE orders SET status = 'CANCELLED', updated_at = now()
+      WHERE id = $1 AND status = $2
+      RETURNING id, tenant_id, merchant_id, credit_plan_id`, [orderId, order.status]
+  )
+  if (!updated.rows.length) return false
   const { rows: items } = await tx.query(
     `SELECT product_id, quantity FROM order_items WHERE order_id = $1`, [orderId]
   )

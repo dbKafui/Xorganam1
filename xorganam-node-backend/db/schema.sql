@@ -77,6 +77,7 @@ CREATE TABLE users (
     first_name         VARCHAR(100) NOT NULL,
     last_name          VARCHAR(100) NOT NULL,
     email              VARCHAR(255) NOT NULL UNIQUE,
+    email_verified_at  TIMESTAMPTZ,
     phone_number       VARCHAR(20),
     password_hash      VARCHAR(255) NOT NULL,
     role               user_role NOT NULL,
@@ -84,6 +85,12 @@ CREATE TABLE users (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login_at      TIMESTAMPTZ,
+    mfa_enabled        BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_secret_encrypted TEXT,
+    mfa_pending_secret_encrypted TEXT,
+    token_version      INTEGER NOT NULL DEFAULT 0,
+    last_password_change_at TIMESTAMPTZ,
+    password_reset_required BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT chk_users_tenant_role CHECK (
         (role = 'PLATFORM_ADMIN' AND tenant_id IS NULL) OR
         (role != 'PLATFORM_ADMIN' AND tenant_id IS NOT NULL)
@@ -103,7 +110,9 @@ CREATE TABLE tenant_eganow_credentials (
     eganow_client_secret_encrypted  TEXT,
     eganow_access_token_encrypted   TEXT,
     eganow_refresh_token_encrypted  TEXT,
-    access_token_expires_at         TIMESTAMPTZ,
+    amount                  NUMERIC(18, 2) NOT NULL,
+    idempotency_key         VARCHAR(128),
+    idempotency_fingerprint CHAR(64),
     webhook_secret_encrypted        TEXT,
     eganow_base_url                 VARCHAR(255),
     eganow_callback_url             VARCHAR(255),
@@ -221,6 +230,8 @@ CREATE TABLE transactions (
     fees                    NUMERIC(18, 2) NOT NULL DEFAULT 0,
     currency                VARCHAR(10) NOT NULL DEFAULT 'GHS',
     internal_reference      VARCHAR(100) NOT NULL,
+    idempotency_key         VARCHAR(128),
+    idempotency_fingerprint CHAR(64),
     eganow_reference        VARCHAR(150),
     eganow_transaction_id   VARCHAR(150),
     payment_gateway_status  VARCHAR(100),
@@ -237,6 +248,13 @@ CREATE TABLE transactions (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at            TIMESTAMPTZ,
     CONSTRAINT uq_transactions_internal_reference UNIQUE (internal_reference),
+    CONSTRAINT transactions_idempotency_pair_chk CHECK (
+        (idempotency_key IS NULL AND idempotency_fingerprint IS NULL) OR
+        (idempotency_key IS NOT NULL AND idempotency_fingerprint IS NOT NULL)
+    ),
+    CONSTRAINT transactions_idempotency_fingerprint_chk CHECK (
+        idempotency_fingerprint IS NULL OR idempotency_fingerprint ~ '^[a-f0-9]{64}$'
+    ),
     CONSTRAINT uq_transactions_parent_type UNIQUE (parent_transaction_id, type),
     CONSTRAINT fk_transactions_merchant_tenant
         FOREIGN KEY (tenant_id, merchant_id)
@@ -250,6 +268,8 @@ CREATE INDEX idx_transactions_tenant_merchant_created ON transactions (tenant_id
 CREATE INDEX idx_transactions_tenant_created ON transactions (tenant_id, created_at DESC);
 CREATE INDEX idx_transactions_status ON transactions (status) WHERE status IN ('PENDING', 'RECEIVED', 'SWEPT_INTERNAL');
 CREATE INDEX idx_transactions_eganow_reference ON transactions (eganow_reference);
+CREATE UNIQUE INDEX uq_transactions_merchant_idempotency_key
+    ON transactions (merchant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX idx_transactions_parent ON transactions (parent_transaction_id);
 
 -- ---------------------------------------------------------------------

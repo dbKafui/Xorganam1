@@ -34,18 +34,24 @@ export function InstitutionAuthProvider({ children }) {
     return result
   }, [])
 
-  const completeMfa = useCallback(async (challengeToken, code) => {
-    const result = await institutionAuth.verifyMfa(challengeToken, code)
+  const completeMfa = useCallback(async (challengeToken, verification) => {
+    const result = await institutionAuth.verifyMfa(challengeToken, verification)
     institutionAuth.saveSession(result)
     setStaff(result.staff)
-    return result.staff
+    return result
   }, [])
 
   const setupMfa = useCallback((challengeToken) => institutionAuth.setupMfa(challengeToken), [])
 
-  const logout = useCallback(() => {
-    institutionAuth.clearSession()
-    setStaff(null)
+  const logout = useCallback(async () => {
+    try {
+      if (institutionAuth.hasToken()) await institutionAuth.logout()
+    } catch {
+      // Clear local access even if remote revocation is unavailable.
+    } finally {
+      institutionAuth.clearSession()
+      setStaff(null)
+    }
   }, [])
 
   const value = { staff, ready, login, setupMfa, completeMfa, logout }

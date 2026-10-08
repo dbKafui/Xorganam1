@@ -56,6 +56,10 @@ export default function OperatorTransactionDetail() {
   async function startTransfer(e) {
     e.preventDefault()
     const amount = Number(transferAmount) || undefined
+    if (transferAmount && (!Number.isFinite(amount) || amount <= 0)) {
+      setError('Transfer amount must be greater than zero.')
+      return
+    }
     if (amount && amount > Number(txn.amount)) {
       setError('Transfer amount cannot exceed the collection amount.')
       return
@@ -81,8 +85,20 @@ export default function OperatorTransactionDetail() {
     const destination = payoutForm.destinationType === 'BANK'
       ? `${payoutForm.bankCode} account ending in ${payoutForm.accountNoOrMsisdn.slice(-4) || 'unknown'}`
       : payoutForm.accountNoOrMsisdn || 'merchant mobile number'
+    if (payoutForm.amount && (!Number.isFinite(amount) || amount <= 0)) {
+      setError('Payout amount must be greater than zero.')
+      return
+    }
     if (amount && amount > Number(txn.amount)) {
       setError('Payout amount cannot exceed the collection amount.')
+      return
+    }
+    if (payoutForm.destinationType === 'BANK' && (!payoutForm.accountNoOrMsisdn || !payoutForm.bankCode || !payoutForm.accountName.trim())) {
+      setError('Choose a bank and enter the account number and account holder name.')
+      return
+    }
+    if (payoutForm.destinationType === 'MOMO' && payoutForm.accountNoOrMsisdn && !/^(?:0[0-9]{9}|233[0-9]{9})$/.test(payoutForm.accountNoOrMsisdn)) {
+      setError('Enter a valid Ghana mobile number for the payout destination.')
       return
     }
     if (!window.confirm(`Start a payout for ${amount ? money(amount) : 'the full collection'} to ${destination}?`)) return
@@ -139,6 +155,13 @@ export default function OperatorTransactionDetail() {
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
+
+      {txn.failureReason && (
+        <div className="status-banner error" role="alert">
+          <span className="status-icon">⚠</span>
+          <span><strong>Financial verification blocked.</strong> {txn.failureReason}</span>
+        </div>
+      )}
 
       {txn.status === 'SWEPT_INTERNAL' && (txn.vendorLegStatus === 'PENDING' || txn.institutionLegStatus === 'PENDING') && (
         <div className="status-banner" role="status">Your payout is still processing. This can take a moment; no action is needed.</div>

@@ -76,13 +76,17 @@ export async function validateSessionToken(token) {
     ? 'institution_staff_id = $2'
     : 'user_id = $2'
   const { rows } = await query(
-    `SELECT id, user_id, institution_staff_id, token_version, expires_at, revoked_at
+    `WITH touch_stale_session AS (
+       UPDATE sessions SET last_seen_at = now()
+        WHERE id = $1 AND ${principalCondition} AND token_version = $3
+          AND revoked_at IS NULL AND expires_at > now()
+          AND last_seen_at < now() - interval '5 minutes'
+        RETURNING id
+     )
+     SELECT id, user_id, institution_staff_id, token_version, expires_at, revoked_at
        FROM sessions
-      WHERE id = $1
-        AND ${principalCondition}
-        AND token_version = $3
-        AND revoked_at IS NULL
-        AND expires_at > now()`,
+      WHERE id = $1 AND ${principalCondition} AND token_version = $3
+        AND revoked_at IS NULL AND expires_at > now()`,
     [payload.sessionId, payload.sub, payload.tokenVersion]
   )
   if (!rows.length) throw new Error('Session token is invalid or revoked.')
@@ -133,7 +137,7 @@ export async function revokeCurrentSession(sessionId, principalId, principalType
 
   const principalColumn = principalType === 'INSTITUTION' ? 'institution_staff_id' : 'user_id'
   const actorColumn = principalType === 'INSTITUTION' ? 'actor_institution_staff_id' : 'actor_user_id'
-  await withTransaction(async (client) => {
+  return withTransaction(async (client) => {
     const { rowCount } = await client.query(
       `UPDATE sessions
          SET revoked_at = now()
@@ -176,12 +180,16 @@ export async function invalidateSessionById(sessionId, actorUserId, reason) {
   })
 }
 
-export async function listSessionsForUser(userId) {
+export async function listSessionsForUser(userId, principalType = 'TENANT') {
+  if (!UUID_PATTERN.test(String(userId || '')) || !['TENANT', 'INSTITUTION'].includes(principalType)) {
+    throw new Error('A valid session principal is required.')
+  }
+  const principalColumn = principalType === 'INSTITUTION' ? 'institution_staff_id' : 'user_id'
   const { rows } = await query(
     `SELECT id, token_version, created_at, last_seen_at, expires_at, revoked_at,
             user_agent, ip_address
      FROM sessions
-     WHERE user_id = $1 OR institution_staff_id = $1
+     WHERE ${principalColumn} = $1 AND revoked_at IS NULL AND expires_at > now()
      ORDER BY created_at DESC`,
     [userId]
   )

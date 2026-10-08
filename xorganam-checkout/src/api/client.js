@@ -5,10 +5,11 @@ const CREDIT_CUSTOMER_TOKEN_KEY = 'xorganam_credit_customer_token'
 const CREDIT_CUSTOMER_PHONE_KEY = 'xorganam_credit_customer_phone'
 
 export class ApiError extends Error {
-  constructor(message, status, details) {
+  constructor(message, status, details, code = null) {
     super(message)
     this.status = status
     this.details = details
+    this.code = code
   }
 }
 
@@ -21,7 +22,7 @@ function getToken() {
   return sessionStorage.getItem(TOKEN_KEY)
 }
 
-async function request(path, { method = 'GET', body, params, auth = false, isForm = false, token: explicitToken } = {}) {
+async function request(path, { method = 'GET', body, params, auth = false, isForm = false, token: explicitToken, idempotencyKey = null } = {}) {
   let url = `${BASE_URL}${path}`
 
   if (params) {
@@ -32,6 +33,7 @@ async function request(path, { method = 'GET', body, params, auth = false, isFor
   }
 
   const headers = {}
+  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
   if (auth) {
     const token = explicitToken || getToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
@@ -48,7 +50,7 @@ async function request(path, { method = 'GET', body, params, auth = false, isFor
   const payload = contentType.includes('application/json') ? await response.json().catch(() => null) : null
 
   if (!response.ok) {
-    throw new ApiError(payload?.message || `Request failed (${response.status}).`, response.status, payload?.errors)
+    throw new ApiError(payload?.message || `Request failed (${response.status}).`, response.status, payload?.errors, payload?.code)
   }
 
   return payload
@@ -60,10 +62,10 @@ async function request(path, { method = 'GET', body, params, auth = false, isFor
 // =====================================================================
 export const publicApi = {
   getMerchant: (merchantId) => request(`/public/merchants/${merchantId}`),
-  collect: (payload) => request('/public/collect', { method: 'POST', body: payload }),
+  collect: (payload, idempotencyKey) => request('/public/collect', { method: 'POST', body: payload, idempotencyKey }),
   getStatus: (reference) => request(`/public/collect/${reference}/status`),
   getCreditInstallment: (token) => request(`/public/credit-installments/${encodeURIComponent(token)}`),
-  payCreditInstallment: (token, payload) => request(`/public/credit-installments/${encodeURIComponent(token)}/collect`, { method: 'POST', body: payload }),
+  payCreditInstallment: (token, payload, idempotencyKey) => request(`/public/credit-installments/${encodeURIComponent(token)}/collect`, { method: 'POST', body: payload, idempotencyKey }),
   requestCreditCustomerCode: (phoneNumber) => request('/public/credit-customer/request-code', { method: 'POST', body: { phoneNumber } }),
   verifyCreditCustomerCode: (phoneNumber, code) => request('/public/credit-customer/verify-code', { method: 'POST', body: { phoneNumber, code } }),
   getStorefront: (slug) => request(`/public/storefronts/${encodeURIComponent(slug)}`),
@@ -71,8 +73,8 @@ export const publicApi = {
   searchMarketplace: (params = {}) => request('/public/marketplace/products', { params }),
   getMarketplaceCategoryProducts: (categoryId, params = {}) => request(`/public/marketplace/categories/${encodeURIComponent(categoryId)}/products`, { params }),
   getProductReviews: (productId) => request(`/public/marketplace/products/${encodeURIComponent(productId)}/reviews`),
-  createStorefrontOrder: (slug, payload) => request(`/public/storefronts/${encodeURIComponent(slug)}/orders`, { method: 'POST', body: payload }),
-  createMarketplaceOrder: (slug, payload) => request(`/public/marketplace/storefronts/${encodeURIComponent(slug)}/orders`, { method: 'POST', body: payload })
+  createStorefrontOrder: (slug, payload, idempotencyKey) => request(`/public/storefronts/${encodeURIComponent(slug)}/orders`, { method: 'POST', body: payload, idempotencyKey }),
+  createMarketplaceOrder: (slug, payload, idempotencyKey) => request(`/public/marketplace/storefronts/${encodeURIComponent(slug)}/orders`, { method: 'POST', body: payload, idempotencyKey })
 }
 
 export const creditCustomerApi = {
@@ -87,7 +89,7 @@ export const creditCustomerApi = {
     sessionStorage.removeItem(CREDIT_CUSTOMER_PHONE_KEY)
   },
   listPlans: () => request('/credit-customer/plans', { auth: true, token: sessionStorage.getItem(CREDIT_CUSTOMER_TOKEN_KEY) }),
-  payInstallment: (planId, installmentId) => request(`/credit-customer/plans/${encodeURIComponent(planId)}/installments/${encodeURIComponent(installmentId)}/collect`, { method: 'POST', auth: true, token: sessionStorage.getItem(CREDIT_CUSTOMER_TOKEN_KEY) })
+  payInstallment: (planId, installmentId, idempotencyKey) => request(`/credit-customer/plans/${encodeURIComponent(planId)}/installments/${encodeURIComponent(installmentId)}/collect`, { method: 'POST', auth: true, token: sessionStorage.getItem(CREDIT_CUSTOMER_TOKEN_KEY), idempotencyKey })
 }
 
 export const storefrontCustomerApi = {
@@ -102,8 +104,14 @@ export const storefrontCustomerApi = {
 export const operatorAuth = {
   register: (payload) => request('/public/tenants/register', { method: 'POST', body: payload }),
   login: (email, password) => request('/auth/login', { method: 'POST', body: { email, password } }),
+  requestEmailVerification: (email) => request('/auth/email-verification/request', { method: 'POST', body: { email } }),
+  verifyEmail: (token) => request('/auth/email-verification/confirm', { method: 'POST', body: { token } }),
+  rotateMfaRecoveryCodes: (code) => request('/auth/mfa/recovery-codes/rotate', { method: 'POST', body: { code }, auth: true }),
+  listSessions: () => request('/auth/sessions', { auth: true }),
+  revokeSession: (sessionId) => request(`/auth/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', auth: true }),
+  logout: () => request('/auth/logout', { method: 'POST', auth: true }),
   setupMfa: (challengeToken) => request('/auth/mfa/setup', { method: 'POST', body: { challengeToken } }),
-  verifyMfa: (challengeToken, code) => request('/auth/mfa/verify', { method: 'POST', body: { challengeToken, code } }),
+  verifyMfa: (challengeToken, verification) => request('/auth/mfa/verify', { method: 'POST', body: { challengeToken, ...verification } }),
   me: () => request('/auth/me', { auth: true }),
   saveSession: (result) => {
     sessionStorage.setItem(TOKEN_KEY, result.token)
@@ -202,7 +210,7 @@ export const operatorApi = {
   transactionDetail: (transactionId) => request(`/transactions/${transactionId}`, { auth: true }),
   raiseDispute: (payload) => request('/tenant-portal/disputes', { method: 'POST', body: payload, auth: true }),
   collect: (payload) => request('/transactions/collect', { method: 'POST', body: payload, auth: true }),
-  collectForTenant: (tenantId, payload) => request(`/tenants/${tenantId}/collect`, { method: 'POST', body: payload, auth: true }),
+  collectForTenant: (tenantId, payload, idempotencyKey) => request(`/tenants/${tenantId}/collect`, { method: 'POST', body: payload, auth: true, idempotencyKey }),
   internalTransfer: (payload) => request('/transactions/internal-transfer', { method: 'POST', body: payload, auth: true }),
   payout: (payload) => request('/transactions/payout', { method: 'POST', body: payload, auth: true }),
   reconcile: (transactionId) => request(`/transactions/${transactionId}/reconcile`, { method: 'POST', auth: true }),

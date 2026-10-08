@@ -121,3 +121,39 @@ export async function sendPasswordResetEmail({ email, firstName, lastName, reset
     return false
   }
 }
+
+export async function sendEmailVerificationEmail({ email, firstName, token }) {
+  const apiKey = process.env.RESEND_API_KEY
+  const fromEmail = process.env.RESEND_FROM_EMAIL
+  if (!apiKey || !fromEmail) {
+    console.warn('[email-verification] delivery skipped: Resend is not configured')
+    return false
+  }
+
+  const safeFirstName = escapeHtml(firstName)
+  try {
+    const verificationUrl = new URL('/verify-email', process.env.APP_URL || 'http://localhost:5174')
+    verificationUrl.searchParams.set('token', token)
+    const safeVerificationUrl = escapeHtml(verificationUrl.toString())
+    const response = await axios.post(
+      'https://api.resend.com/emails',
+      {
+        from: fromEmail,
+        to: [email],
+        subject: 'Verify your XORGANAM email address',
+        html: `<p>Hello ${safeFirstName},</p><p>Verify your email address to activate your operator account. This link expires in 30 minutes and can only be used once.</p><p><a href="${safeVerificationUrl}">Verify email address</a></p>`
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15_000
+      }
+    )
+    return response.status >= 200 && response.status < 300
+  } catch (err) {
+    console.error('[email-verification] delivery failed', { code: err?.code || 'EMAIL_GATEWAY_ERROR' })
+    return false
+  }
+}

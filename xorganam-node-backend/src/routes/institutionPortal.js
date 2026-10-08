@@ -9,7 +9,7 @@ import { signToken } from '../security/jwt.js'
 import { institutionDisputeScope, institutionLinkScope } from '../services/institutionScope.js'
 import { institutionMembershipAdapterInternals } from '../services/institutionMembershipAdapterService.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
-import { createSession, revokeCurrentSession } from '../services/sessionService.js'
+import { createSession, listSessionsForUser, revokeCurrentSession } from '../services/sessionService.js'
 import { writePlatformAudit } from '../services/auditService.js'
 
 export const institutionAuthRouter = Router()
@@ -171,6 +171,34 @@ institutionAuthRouter.post(
       'user_logout'
     )
     if (!revoked) return res.status(404).json({ message: 'Session no longer exists.' })
+    res.status(204).send()
+  })
+)
+
+institutionAuthRouter.get(
+  '/sessions',
+  institutionAuthenticate,
+  asyncHandler(async (req, res) => {
+    const sessions = await listSessionsForUser(req.institutionAuth.id, 'INSTITUTION')
+    res.json({ sessions: sessions.map((session) => ({
+      ...session,
+      current: session.id === req.institutionAuth.sessionId
+    })) })
+  })
+)
+
+institutionAuthRouter.delete(
+  '/sessions/:sessionId',
+  institutionAuthenticate,
+  asyncHandler(async (req, res) => {
+    const revoked = await revokeCurrentSession(
+      req.params.sessionId,
+      req.institutionAuth.id,
+      'INSTITUTION',
+      req.institutionAuth.id,
+      'user_revoked_session'
+    )
+    if (!revoked) return res.status(404).json({ message: 'Active session not found.' })
     res.status(204).send()
   })
 )

@@ -6,6 +6,8 @@ import { sendMerchantSms } from '../services/notificationService.js'
 import { refreshSplitParentStatus } from '../services/splitPaymentService.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
+import { updateTransactionStatus } from '../services/transactionStateService.js'
+import { updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10)
 const POLL_DELAY_MS = parseInt(process.env.COLLECTION_STATUS_POLL_DELAY_MS || '5000', 10)
@@ -40,34 +42,45 @@ async function updateCollectionTransactionFields(transactionId, { reference, tra
   )
 }
 
-async function markCollectionFailed(transactionId, reason, gatewayStatus = null) {
-  await query(
-    `UPDATE transactions
-        SET status = 'FAILED',
-            payment_gateway_status = COALESCE($3, payment_gateway_status),
-            failure_reason = $2,
-            updated_at = now(),
-            completed_at = now()
-      WHERE id = $1`,
-    [transactionId, reason, gatewayStatus]
-  )
+async function markCollectionFailed(transactionId, reason, gatewayStatus = null, currentStatus = 'PENDING') {
+  await updateTransactionStatus(query, {
+    id: transactionId,
+    type: 'COLLECTION',
+    currentStatus,
+    nextStatus: 'FAILED',
+    fields: {
+      payment_gateway_status: gatewayStatus,
+      failure_reason: reason,
+      completed_at: new Date()
+    }
+  })
 }
 
-async function markGenericFailed(transactionId, reason, gatewayStatus = null) {
-  await query(
-    `UPDATE transactions
-        SET status = 'FAILED',
-            payment_gateway_status = COALESCE($3, payment_gateway_status),
-            failure_reason = $2,
-            updated_at = now(),
-            completed_at = now()
-      WHERE id = $1`,
-    [transactionId, reason, gatewayStatus]
-  )
-  await query(
-    `UPDATE institution_transactions SET status = 'FAILED', updated_at = now()
+async function markGenericFailed(transactionId, reason, gatewayStatus = null, currentStatus = 'PENDING') {
+  await updateTransactionStatus(query, {
+    id: transactionId,
+    type: 'PAYOUT',
+    currentStatus,
+    nextStatus: 'FAILED',
+    fields: {
+      payment_gateway_status: gatewayStatus,
+      failure_reason: reason,
+      completed_at: new Date()
+    }
+  })
+  const { rows } = await query(
+    `SELECT id, institution_id, status FROM institution_transactions
       WHERE counterparty_transaction_id = $1`, [transactionId]
   )
+  for (const row of rows) {
+    await updateInstitutionTransactionStatus(query, {
+      id: row.id,
+      institutionId: row.institution_id,
+      currentStatus: row.status,
+      nextStatus: 'FAILED',
+      fields: {}
+    })
+  }
 }
 
 async function findRootCollectionId(transactionId) {
@@ -89,47 +102,60 @@ async function findRootCollectionId(transactionId) {
 
 async function markInternalTransferSuccessful(txn, gatewayStatus) {
   await withTransaction(async (client) => {
-    await client.query(
-      `UPDATE transactions SET status = 'SWEPT_INTERNAL', payment_gateway_status = $2,
-              completed_at = now(), updated_at = now() WHERE id = $1`, [txn.id, gatewayStatus]
-    )
+    await updateTransactionStatus(client, {
+      id: txn.id,
+      type: 'INTERNAL_TRANSFER',
+      currentStatus: txn.status,
+      nextStatus: 'SWEPT_INTERNAL',
+      fields: { payment_gateway_status: gatewayStatus, completed_at: new Date() }
+    })
     if (txn.parent_transaction_id) {
-      await client.query(
-        `UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now()
-          WHERE id = $1 AND status IN ('RECEIVED', 'PENDING')`, [txn.parent_transaction_id]
-      )
+      await updateTransactionStatus(client, {
+        id: txn.parent_transaction_id,
+        type: 'COLLECTION',
+        currentStatus: 'RECEIVED',
+        nextStatus: 'SWEPT_INTERNAL',
+        fields: {}
+      })
       await markCreditInstallmentCollected(client, txn.parent_transaction_id)
     }
   })
 }
 
 async function markPayoutSuccessful(txn, gatewayStatus) {
-  await query(
-    `UPDATE transactions
-        SET status = 'PAID_OUT',
-            payment_gateway_status = $2,
-            completed_at = now(),
-            updated_at = now()
-      WHERE id = $1`,
-    [txn.id, gatewayStatus]
+  await updateTransactionStatus(query, {
+    id: txn.id,
+    type: 'PAYOUT',
+    currentStatus: txn.status,
+    nextStatus: 'PAID_OUT',
+    fields: { payment_gateway_status: gatewayStatus, completed_at: new Date() }
+  })
+  const { rows } = await query(
+    `SELECT id, institution_id, status FROM institution_transactions
+      WHERE counterparty_transaction_id = $1`, [txn.id]
   )
-  await query(
-    `UPDATE institution_transactions SET status = 'RECEIVED', eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
-      WHERE counterparty_transaction_id = $1`, [txn.id, txn.eganow_reference || null]
-  )
+  for (const row of rows) {
+    await updateInstitutionTransactionStatus(query, {
+      id: row.id,
+      institutionId: row.institution_id,
+      currentStatus: row.status,
+      nextStatus: 'RECEIVED',
+      fields: { eganow_reference: txn.eganow_reference || null }
+    })
+  }
 
   const rootCollectionId = await findRootCollectionId(txn.id)
   if (rootCollectionId) {
     if (txn.payout_leg === 'VENDOR' || txn.payout_leg === 'INSTITUTION') {
       await refreshSplitParentStatus(rootCollectionId)
     } else {
-      await query(
-        `UPDATE transactions
-            SET status = 'PAID_OUT',
-                updated_at = now()
-          WHERE id = $1`,
-        [rootCollectionId]
-      )
+      await updateTransactionStatus(query, {
+        id: rootCollectionId,
+        type: 'COLLECTION',
+        currentStatus: 'RECEIVED',
+        nextStatus: 'PAID_OUT',
+        fields: {}
+      })
     }
   }
 
@@ -232,12 +258,16 @@ async function processCollectionStatusPollJob(job) {
       // Gateway success confirms the collection. The payout lifecycle is
       // tracked separately as SWEPT_INTERNAL / PAID_OUT.
       await withTransaction(async (tx) => {
-        await tx.query(
-          `UPDATE transactions
-           SET status = 'RECEIVED', payment_gateway_status = $2,
-               completed_at = now(), updated_at = now()
-           WHERE id = $1`, [transactionId, result.status]
-        )
+        await updateTransactionStatus(tx, {
+          id: transactionId,
+          type: 'COLLECTION',
+          currentStatus: 'PENDING',
+          nextStatus: 'RECEIVED',
+          fields: {
+            payment_gateway_status: result.status,
+            completed_at: new Date()
+          }
+        })
         await markStorefrontOrderPaid(tx, transactionId)
       })
 

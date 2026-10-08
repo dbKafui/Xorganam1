@@ -41,6 +41,10 @@ export default function FinancialOperations() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
+  const customerKycConfirmation = (row) => {
+    const selectedTenant = linkedTenants.find((tenant) => tenant.id === tenantSelections[row.id])
+    return 'Verify this customer’s KYC' + (selectedTenant ? ' and link them to ' + selectedTenant.company_name : '') + '?'
+  }
   const load = useCallback(async () => {
     const [customerRows, tenantRows, availableVendorRows, vendorLinkRows, productRows, accountRows, transactionRows, feeRows, eganowConfig, approvalPolicy] = await Promise.all([
       institutionApi.listFinanceCustomers(), institutionApi.listFinanceLinkedTenants(), institutionApi.listFinanceAvailableVendors(),
@@ -62,7 +66,8 @@ export default function FinancialOperations() {
   }, [])
   useEffect(() => { load().catch((e) => setError(e.message)).finally(() => setLoading(false)) }, [load])
 
-  async function submit(action, success) {
+  async function submit(action, success, confirmation) {
+    if (confirmation && !window.confirm(confirmation)) return
     setSaving(true); setError(''); setNotice('')
     try { await action(); setNotice(success); await load() }
     catch (e) { setError(e.message) }
@@ -70,7 +75,7 @@ export default function FinancialOperations() {
   }
   function createCustomer(event) {
     event.preventDefault()
-    return submit(async () => { await institutionApi.createFinanceCustomer(customer); setCustomer(blankCustomer) }, 'Customer onboarded and queued for KYC verification.')
+    return submit(async () => { await institutionApi.createFinanceCustomer(customer); setCustomer(blankCustomer) }, 'Customer onboarded and queued for KYC verification.', 'Onboard this customer and begin KYC verification?')
   }
   function createVendorLink(event) {
     event.preventDefault()
@@ -79,10 +84,14 @@ export default function FinancialOperations() {
     return submit(async () => {
       await institutionApi.createFinanceVendorLink({ tenantId: vendor.tenant_id, merchantId: vendor.merchant_id, memberId: vendorLinkForm.memberId.trim() })
       setVendorLinkForm(blankVendorLink)
-    }, 'Vendor linked to this institution. Products remain optional until the vendor opens an account.')
+    }, 'Vendor linked to this institution. Products remain optional until the vendor opens an account.', `Link ${vendor.vendor_name} to this institution for ${vendorLinkForm.memberId.trim() || 'the selected member'}?`)
   }
   function createProduct(event) {
     event.preventDefault()
+    const minimum = Number(product.minAmount)
+    const maximum = Number(product.maxAmount)
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum <= 0 || maximum <= 0) return setError('Product minimum and maximum amounts must be greater than zero.')
+    if (maximum < minimum) return setError('Maximum amount cannot be lower than minimum amount.')
     return submit(async () => {
       const payload = { institutionPackageId: product.institutionPackageId, productType: product.productType, name: product.name, description: product.description,
         minAmountCents: Math.round(Number(product.minAmount) * 100), maxAmountCents: Math.round(Number(product.maxAmount) * 100),
@@ -102,7 +111,7 @@ export default function FinancialOperations() {
       if (editingProductId) await institutionApi.updateFinanceProductPolicy(editingProductId, payload)
       else await institutionApi.createFinanceProduct(payload)
       setProduct(blankProduct); setEditingProductId('')
-    }, editingProductId ? 'Financial product policy updated.' : 'Financial product created as a draft.')
+    }, editingProductId ? 'Financial product policy updated.' : 'Financial product created as a draft.', `Save the ${product.productType.toLowerCase()} product policy for ${product.name || 'this product'}?`)
   }
   function editProduct(row) {
     setEditingProductId(row.id)
@@ -119,23 +128,27 @@ export default function FinancialOperations() {
   }
   function createAccount(event) {
     event.preventDefault()
+    const requested = Number(account.amount)
+    if (!Number.isFinite(requested) || requested <= 0) return setError('Enter an account amount greater than zero.')
     return submit(async () => {
       await institutionApi.createFinanceAccount({ customerId: account.customerId, productId: account.productId, vendorLinkId: account.vendorLinkId,
-        requestedAmountCents: Math.round(Number(account.amount) * 100), termMonths: account.termMonths ? Number(account.termMonths) : undefined,
+        requestedAmountCents: Math.round(requested * 100), termMonths: account.termMonths ? Number(account.termMonths) : undefined,
         termDays: account.termDays ? Number(account.termDays) : undefined })
       setAccount(blankAccount)
-    }, 'Account request submitted for approval.')
+    }, 'Account request submitted for approval.', `Submit an account request for GHS ${requested.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}?`)
   }
   function createTransaction(event) {
     event.preventDefault()
+    const amountValue = Number(transactionForm.amount)
+    if (!Number.isFinite(amountValue) || amountValue <= 0) return setError('Enter a transaction amount greater than zero.')
     return submit(async () => {
-      await institutionApi.createFinanceTransaction({ ...transactionForm, amountCents: Math.round(Number(transactionForm.amount) * 100) })
+      await institutionApi.createFinanceTransaction({ ...transactionForm, amountCents: Math.round(amountValue * 100) })
       setTransactionForm({ accountId: '', transactionType: 'DEPOSIT', amount: '', externalReference: '', phoneNumber: '', note: '' })
-    }, 'Financial transaction recorded for approval; Eganow will be initiated when an authorized reviewer approves it.')
+    }, 'Financial transaction recorded for approval; Eganow will be initiated when an authorized reviewer approves it.', `Record a pending ${transactionForm.transactionType.toLowerCase()} for GHS ${amountValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}?`)
   }
   function saveEganow(event) {
     event.preventDefault()
-    return submit(async () => { await institutionApi.saveEganowProvisioning(eganow); setEganow((current) => ({ ...current, apiUsername: '', apiPassword: '', xAuth: '' })) }, 'Eganow provisioning saved. Secrets are encrypted and not returned to the portal.')
+    return submit(async () => { await institutionApi.saveEganowProvisioning(eganow); setEganow((current) => ({ ...current, apiUsername: '', apiPassword: '', xAuth: '' })) }, 'Eganow provisioning saved. Secrets are encrypted and not returned to the portal.', 'Save or replace the institution Eganow credentials and payment wallets?')
   }
   function testEganow() {
     return submit(async () => {
@@ -189,7 +202,46 @@ export default function FinancialOperations() {
         <div className="form-span form-actions"><button className="button button-primary" disabled={saving}>Onboard customer</button></div>
       </form>
       <div className="table-wrap"><table><thead><tr><th>Customer</th><th>Customer number</th><th>Phone</th><th>KYC</th><th>SMS consent</th><th>Tenant access</th>{canReview && <th>Review</th>}</tr></thead><tbody>
-        {customers.map((row) => <tr key={row.id}><td>{row.first_name} {row.last_name}</td><td>{row.customer_number}</td><td>{row.phone_number}</td><td>{row.kyc_status}{row.duplicate_phone && <small>Duplicate mobile · supervisor review</small>}</td><td><button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.updateCustomerNotificationConsent(row.id, !row.notification_consent), `SMS consent ${row.notification_consent ? 'revoked' : 'recorded'}.`)}>{row.notification_consent ? 'Opted in · revoke' : 'Not opted in · record'}</button></td><td>{row.tenant_id ? 'Linked to tenant' : 'Institution only'}</td>{canReview && <td>{row.kyc_status === 'PENDING' ? <><select aria-label={`Tenant association for ${row.first_name} ${row.last_name}`} value={tenantSelections[row.id] || ''} onChange={(e) => setTenantSelections({ ...tenantSelections, [row.id]: e.target.value })}><option value="">Institution customer only</option>{linkedTenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.company_name}</option>)}</select> <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideCustomerKyc(row.id, { decision: 'VERIFIED', tenantId: tenantSelections[row.id] || undefined }), 'Customer KYC verified.')}>Verify</button> <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideCustomerKyc(row.id, { decision: 'REJECTED' }), 'Customer KYC rejected.')}>Reject</button></> : row.kyc_status === 'VERIFIED' && !row.tenant_id && <><select aria-label={`Tenant association for ${row.first_name} ${row.last_name}`} value={tenantSelections[row.id] || ''} onChange={(e) => setTenantSelections({ ...tenantSelections, [row.id]: e.target.value })}><option value="">Choose approved tenant link</option>{linkedTenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.company_name}</option>)}</select><button className="button button-secondary button-small" disabled={saving || !tenantSelections[row.id]} onClick={() => submit(() => institutionApi.decideCustomerKyc(row.id, { decision: 'VERIFIED', tenantId: tenantSelections[row.id] }), 'Verified member associated with tenant.')}>Link member</button></>}</td>}</tr>)}
+        {customers.map((row) => {
+          const tenant = linkedTenants.find((item) => item.id === tenantSelections[row.id])
+          return <tr key={row.id}>
+            <td>{row.first_name} {row.last_name}</td>
+            <td>{row.customer_number}</td>
+            <td>{row.phone_number}</td>
+            <td>{row.kyc_status}{row.duplicate_phone && <small>Duplicate mobile · supervisor review</small>}</td>
+            <td><button className="button button-secondary button-small" disabled={saving} onClick={() => submit(
+              () => institutionApi.updateCustomerNotificationConsent(row.id, !row.notification_consent),
+              `${row.notification_consent ? 'SMS consent revoked' : 'SMS consent recorded'}.`,
+              row.notification_consent ? 'Revoke SMS consent for this customer?' : 'Record explicit SMS consent for this customer?'
+            )}>{row.notification_consent ? 'Opted in · revoke' : 'Not opted in · record'}</button></td>
+            <td>{row.tenant_id ? 'Linked to tenant' : 'Institution only'}</td>
+            {canReview && <td>
+              {row.kyc_status === 'PENDING' ? <>
+                <select aria-label={`Tenant association for ${row.first_name} ${row.last_name}`} value={tenantSelections[row.id] || ''} onChange={(event) => setTenantSelections({ ...tenantSelections, [row.id]: event.target.value })}>
+                  <option value="">Institution customer only</option>
+                  {linkedTenants.map((item) => <option key={item.id} value={item.id}>{item.company_name}</option>)}
+                </select>
+                <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(
+                  () => institutionApi.decideCustomerKyc(row.id, { decision: 'VERIFIED', tenantId: tenantSelections[row.id] || undefined }),
+                  'Customer KYC verified.', customerKycConfirmation(row)
+                )}>Verify</button>
+                <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(
+                  () => institutionApi.decideCustomerKyc(row.id, { decision: 'REJECTED' }),
+                  'Customer KYC rejected.', 'Reject this customer’s KYC and record the review reason?'
+                )}>Reject</button>
+              </> : row.kyc_status === 'VERIFIED' && !row.tenant_id ? <>
+                <select aria-label={`Tenant association for ${row.first_name} ${row.last_name}`} value={tenantSelections[row.id] || ''} onChange={(event) => setTenantSelections({ ...tenantSelections, [row.id]: event.target.value })}>
+                  <option value="">Choose approved tenant link</option>
+                  {linkedTenants.map((item) => <option key={item.id} value={item.id}>{item.company_name}</option>)}
+                </select>
+                <button className="button button-secondary button-small" disabled={saving || !tenantSelections[row.id]} onClick={() => submit(
+                  () => institutionApi.decideCustomerKyc(row.id, { decision: 'VERIFIED', tenantId: tenantSelections[row.id] }),
+                  'Verified member associated with tenant.', `Link ${row.first_name} ${row.last_name} to the selected tenant?`
+                )}>Link member</button>
+              </> : null}
+            </td>}
+          </tr>
+        })}
       </tbody></table></div>
     </section>
 
@@ -212,8 +264,8 @@ export default function FinancialOperations() {
         <label className="form-field"><span>Product name</span><input required maxLength="120" value={product.name} onChange={(e) => setProduct({ ...product, name: e.target.value })} /></label>
         <label className="form-field"><span>Minimum amount (GHS)</span><input required type="number" min="0.01" step="0.01" value={product.minAmount} onChange={(e) => setProduct({ ...product, minAmount: e.target.value })} /></label>
         <label className="form-field"><span>Maximum amount (GHS)</span><input required type="number" min="0.01" step="0.01" value={product.maxAmount} onChange={(e) => setProduct({ ...product, maxAmount: e.target.value })} /></label>
-        <label className="form-field"><span>Annual rate (%)</span><input required type="number" min="0" step="0.01" value={product.annualRate} onChange={(e) => setProduct({ ...product, annualRate: e.target.value })} /></label>
-        {product.productType === 'LOAN' ? <><label className="form-field"><span>Interest model</span><select required value={product.interestModel} onChange={(e) => setProduct({ ...product, interestModel: e.target.value })}><option value="FLAT">Flat simple interest</option><option value="REDUCING_BALANCE">Reducing balance (amortized)</option></select></label><label className="form-field"><span>Repayment frequency</span><select required value={product.repaymentFrequency} onChange={(e) => setProduct({ ...product, repaymentFrequency: e.target.value })}><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Minimum term (days)</span><input required type="number" min="1" value={product.minTerm} onChange={(e) => setProduct({ ...product, minTerm: e.target.value })} /></label><label className="form-field"><span>Maximum term (days)</span><input required type="number" min="1" value={product.maxTerm} onChange={(e) => setProduct({ ...product, maxTerm: e.target.value })} /></label><label className="form-field"><span>Tenor options (months, comma separated)</span><input required value={product.tenorOptionsMonths} onChange={(e) => setProduct({ ...product, tenorOptionsMonths: e.target.value })} placeholder="3,6,12" /></label><label className="form-field"><span>Late fee (%)</span><input type="number" min="0" max="100" step="0.01" value={product.lateFee} onChange={(e) => setProduct({ ...product, lateFee: e.target.value })} /></label><label className="form-field"><span>Grace period (days)</span><input type="number" min="0" max="365" value={product.graceDays} onChange={(e) => setProduct({ ...product, graceDays: e.target.value })} /></label><label className="form-field"><span>Minimum prior contributions (GHS)</span><input type="number" min="0" step="0.01" value={product.minContributionHistory} onChange={(e) => setProduct({ ...product, minContributionHistory: e.target.value })} /></label></> : <><label className="form-field"><span>Minimum account balance (GHS)</span><input type="number" min="0" step="0.01" value={product.minBalance} onChange={(e) => setProduct({ ...product, minBalance: e.target.value })} /></label><label className="form-field"><span>Withdrawals per month (optional)</span><input type="number" min="1" value={product.withdrawalsPerMonth} onChange={(e) => setProduct({ ...product, withdrawalsPerMonth: e.target.value })} /></label><label className="form-field"><span>Lock-in period (months)</span><input type="number" min="0" value={product.savingsLockInMonths} onChange={(e) => setProduct({ ...product, savingsLockInMonths: e.target.value })} /></label><label className="form-field"><span>Contribution frequency</span><select value={product.contributionFrequency} onChange={(e) => setProduct({ ...product, contributionFrequency: e.target.value })}><option value="PER_TRANSACTION">Per transaction</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Early withdrawal penalty (%)</span><input type="number" min="0" max="100" step="0.01" value={product.earlyWithdrawalPenalty} onChange={(e) => setProduct({ ...product, earlyWithdrawalPenalty: e.target.value })} /></label></>}
+        <label className="form-field"><span>Annual rate (%)</span><input required type="number" min="0" max="100" step="0.01" value={product.annualRate} onChange={(e) => setProduct({ ...product, annualRate: e.target.value })} /></label>
+        {product.productType === 'LOAN' ? <><label className="form-field"><span>Interest model</span><select required value={product.interestModel} onChange={(e) => setProduct({ ...product, interestModel: e.target.value })}><option value="FLAT">Flat simple interest</option><option value="REDUCING_BALANCE">Reducing balance (amortized)</option></select></label><label className="form-field"><span>Repayment frequency</span><select required value={product.repaymentFrequency} onChange={(e) => setProduct({ ...product, repaymentFrequency: e.target.value })}><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Minimum term (days)</span><input required type="number" min="1" max="3650" value={product.minTerm} onChange={(e) => setProduct({ ...product, minTerm: e.target.value })} /></label><label className="form-field"><span>Maximum term (days)</span><input required type="number" min="1" max="3650" value={product.maxTerm} onChange={(e) => setProduct({ ...product, maxTerm: e.target.value })} /></label><label className="form-field"><span>Tenor options (months, comma separated)</span><input required pattern="[0-9]+(,[0-9]+)*" value={product.tenorOptionsMonths} onChange={(e) => setProduct({ ...product, tenorOptionsMonths: e.target.value })} placeholder="3,6,12" /></label><label className="form-field"><span>Late fee (%)</span><input type="number" min="0" max="100" step="0.01" value={product.lateFee} onChange={(e) => setProduct({ ...product, lateFee: e.target.value })} /></label><label className="form-field"><span>Grace period (days)</span><input type="number" min="0" max="365" value={product.graceDays} onChange={(e) => setProduct({ ...product, graceDays: e.target.value })} /></label><label className="form-field"><span>Minimum prior contributions (GHS)</span><input type="number" min="0" step="0.01" value={product.minContributionHistory} onChange={(e) => setProduct({ ...product, minContributionHistory: e.target.value })} /></label></> : <><label className="form-field"><span>Minimum account balance (GHS)</span><input type="number" min="0" step="0.01" value={product.minBalance} onChange={(e) => setProduct({ ...product, minBalance: e.target.value })} /></label><label className="form-field"><span>Withdrawals per month (optional)</span><input type="number" min="1" value={product.withdrawalsPerMonth} onChange={(e) => setProduct({ ...product, withdrawalsPerMonth: e.target.value })} /></label><label className="form-field"><span>Lock-in period (months)</span><input type="number" min="0" value={product.savingsLockInMonths} onChange={(e) => setProduct({ ...product, savingsLockInMonths: e.target.value })} /></label><label className="form-field"><span>Contribution frequency</span><select value={product.contributionFrequency} onChange={(e) => setProduct({ ...product, contributionFrequency: e.target.value })}><option value="PER_TRANSACTION">Per transaction</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label><label className="form-field"><span>Early withdrawal penalty (%)</span><input type="number" min="0" max="100" step="0.01" value={product.earlyWithdrawalPenalty} onChange={(e) => setProduct({ ...product, earlyWithdrawalPenalty: e.target.value })} /></label></>}
         <label className="form-field form-span"><span>Description</span><textarea maxLength="2000" value={product.description} onChange={(e) => setProduct({ ...product, description: e.target.value })} /></label>
         <div className="form-span form-actions"><button className="button button-primary" disabled={saving}>{editingProductId ? 'Save product policy' : 'Create draft product'}</button>{editingProductId && <button type="button" className="button button-secondary" onClick={() => { setEditingProductId(''); setProduct(blankProduct) }}>Cancel edit</button>}</div>
       </form>
@@ -233,7 +285,7 @@ export default function FinancialOperations() {
         <div className="form-span form-actions"><button className="button button-primary" disabled={saving}>Submit account request</button></div>
       </form>
       <div className="table-wrap"><table><thead><tr><th>Account</th><th>Customer</th><th>Product</th><th>Requested</th><th>Outstanding / balance</th><th>Status</th>{canReview && <th>Approval</th>}</tr></thead><tbody>
-        {accounts.map((row) => { const next = row.installments?.find((installment) => installment.status !== 'PAID'); const split = row.split_allocations?.[0]; return <tr key={row.id}><td>{row.account_number}{next && <small>Next installment {next.dueDate} · {amount(Number(next.amountDueCents) - Number(next.amountPaidCents))} · {next.status}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · {amount(split.amountCents)}</small>}</td><td>{row.first_name} {row.last_name}</td><td>{row.product_name}</td><td>{amount(row.requested_amount_cents)}</td><td>{row.product_type === 'LOAN' ? amount(row.outstanding_cents) : amount(row.balance_cents)}</td><td>{row.status}</td>{canReview && <td>{row.status === 'PENDING_APPROVAL' && <><button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceAccount(row.id, 'APPROVED'), 'Account request approved.')}>Approve</button> <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceAccount(row.id, 'REJECTED'), 'Account request rejected.')}>Reject</button></>}</td>}</tr>})}
+        {accounts.map((row) => { const next = row.installments?.find((installment) => installment.status !== 'PAID'); const split = row.split_allocations?.[0]; return <tr key={row.id}><td>{row.account_number}{next && <small>Next installment {next.dueDate} · {amount(Number(next.amountDueCents) - Number(next.amountPaidCents))} · {next.status}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · {amount(split.amountCents)}</small>}</td><td>{row.first_name} {row.last_name}</td><td>{row.product_name}</td><td>{amount(row.requested_amount_cents)}</td><td>{row.product_type === 'LOAN' ? amount(row.outstanding_cents) : amount(row.balance_cents)}</td><td>{row.status}</td>{canReview && <td>{row.status === 'PENDING_APPROVAL' && <><button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceAccount(row.id, 'APPROVED'), 'Account request approved.', `Approve this account request for ${row.first_name} ${row.last_name} for ${amount(row.requested_amount_cents)}?`)}>Approve</button> <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceAccount(row.id, 'REJECTED'), 'Account request rejected.', `Reject this account request for ${row.first_name} ${row.last_name}?`)}>Reject</button></>}</td>}</tr>})}
       </tbody></table></div>
     </section>
 
@@ -258,7 +310,7 @@ export default function FinancialOperations() {
       </form>
       <p className="footnote">This is an institution ledger entry awaiting approval. It does not collect or disburse funds through Eganow.</p>
       <div className="table-wrap"><table><thead><tr><th>Reference</th><th>Customer</th><th>Operation</th><th>Amount</th><th>Status</th>{canReview && <th>Review</th>}</tr></thead><tbody>
-        {transactions.map((row) => <tr key={row.id}><td>{row.external_reference}<small>{row.gateway_reference || row.payment_gateway_status || ''}</small></td><td>{row.first_name} {row.last_name}</td><td>{row.transaction_type}</td><td>{amount(row.amount_cents)}<small>Fee {amount(row.fee_cents)}</small></td><td>{row.status}</td>{canReview && <td>{row.status === 'PENDING_APPROVAL' ? <><button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceTransaction(row.id, { decision: 'POSTED' }), 'Eganow transaction initiated.')}>Approve & initiate</button> <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceTransaction(row.id, { decision: 'REJECTED' }), 'Transaction rejected.')}>Reject</button></> : row.status === 'PENDING_GATEWAY' && <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.reconcileFinanceTransaction(row.id), 'Eganow status refreshed.')}>Check Eganow status</button>}</td>}</tr>)}
+        {transactions.map((row) => <tr key={row.id}><td>{row.external_reference}<small>{row.gateway_reference || row.payment_gateway_status || ''}</small></td><td>{row.first_name} {row.last_name}</td><td>{row.transaction_type}</td><td>{amount(row.amount_cents)}<small>Fee {amount(row.fee_cents)}</small></td><td>{row.status}</td>{canReview && <td>{row.status === 'PENDING_APPROVAL' ? <><button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceTransaction(row.id, { decision: 'POSTED' }), 'Eganow transaction initiated.', `Approve and initiate this ${row.transaction_type.toLowerCase()} for ${amount(row.amount_cents)}?`)}>Approve & initiate</button> <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.decideFinanceTransaction(row.id, { decision: 'REJECTED' }), 'Transaction rejected.', `Reject this ${row.transaction_type.toLowerCase()} for ${amount(row.amount_cents)}?`)}>Reject</button></> : row.status === 'PENDING_GATEWAY' && <button className="button button-secondary button-small" disabled={saving} onClick={() => submit(() => institutionApi.reconcileFinanceTransaction(row.id), 'Eganow status refreshed.')}>Check Eganow status</button>}</td>}</tr>)}
       </tbody></table></div>
     </section>
   </>

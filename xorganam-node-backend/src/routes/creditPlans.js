@@ -5,6 +5,7 @@ import { asyncHandler } from '../middleware/asyncHandler.js'
 import { recordCreditWebhookEvent } from '../services/creditWebhookOutbox.js'
 import { issueInstallmentToken, verifyInstallmentToken, installmentPaymentUrl } from '../services/creditInstallmentToken.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
+import { updateCreditInstallmentStatus, updateCreditPlanStatus } from '../services/creditStateService.js'
 
 export const creditPlansRouter = Router()
 export const creditPaymentsRouter = Router()
@@ -233,11 +234,12 @@ creditPaymentsRouter.post('/:installmentToken/collect', asyncHandler(async (req,
     const result = await initiateCollection(rows[0].merchant_id, {
       amount: Number(rows[0].amount_due), msisdn: req.body?.msisdn, network: req.body?.network,
       narration: `Credit installment ${token.installmentId}`,
+      idempotencyKey: req.get('Idempotency-Key') || null,
       creditPlanId: token.planId, creditInstallmentId: token.installmentId
     })
     return res.json({ reference: result.internalReference, status: result.status, message: result.message || 'Approve the payment prompt on your phone.' })
   } catch (error) {
-    if (error instanceof CollectionRejectedError) return res.status(400).json({ message: error.message })
+    if (error instanceof CollectionRejectedError) return res.status(error.status).json({ message: error.message })
     throw error
   }
 }))
@@ -264,17 +266,29 @@ creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', re
     const plan = rows[0]
     if (!['PENDING', 'OVERDUE'].includes(plan.installment_status)) return { conflict: true }
     const { rows: activePayments } = await tx.query(
-      `SELECT 1 FROM transactions WHERE credit_installment_id = $1 AND type = 'COLLECTION' AND status <> 'FAILED' LIMIT 1`,
+      `SELECT 1 FROM transactions
+         WHERE credit_installment_id = $1 AND type = 'COLLECTION'
+           AND status IN ('PENDING', 'RECEIVED', 'SWEPT_INTERNAL', 'PARTIALLY_SETTLED')
+         LIMIT 1`,
       [plan.installment_id]
     )
     if (activePayments.length) return { conflict: true }
-    const paid = await tx.query(
-      `UPDATE credit_plan_installments
-          SET status = 'PAID', paid_at = now(), paid_transaction_id = NULL,
-              manually_recorded = TRUE, manually_recorded_by_user_id = $2
-        WHERE id = $1 AND status IN ('PENDING', 'OVERDUE')
-        RETURNING id, installment_number, amount_due, paid_at`, [plan.installment_id, req.user.id]
+    const { rows: completedPlans } = await tx.query(
+      `SELECT 1 FROM credit_plans WHERE id = $1 AND status IN ('COMPLETED', 'DEFAULTED', 'CANCELLED')`,
+      [plan.id]
     )
+    if (completedPlans.length) return { conflict: true }
+    const paid = await updateCreditInstallmentStatus(tx, {
+      id: plan.installment_id,
+      currentStatus: plan.installment_status,
+      nextStatus: 'PAID',
+      fields: {
+        paid_at: new Date(),
+        paid_transaction_id: null,
+        manually_recorded: true,
+        manually_recorded_by_user_id: req.user.id
+      }
+    })
     const remaining = await tx.query(
       `SELECT COUNT(*)::int AS count FROM credit_plan_installments
         WHERE credit_plan_id = $1 AND status <> 'PAID'`, [plan.id]
@@ -282,15 +296,23 @@ creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', re
     let completed = false
     if (remaining.rows[0].count === 0) {
       completed = true
-      await tx.query(`UPDATE credit_plans SET status = 'COMPLETED' WHERE id = $1`, [plan.id])
+      await updateCreditPlanStatus(tx, {
+        id: plan.id,
+        currentStatus: plan.status,
+        nextStatus: 'COMPLETED'
+      })
     } else if (plan.status !== 'DEFAULTED') {
       const stillOverdue = await tx.query(`SELECT 1 FROM credit_plan_installments WHERE credit_plan_id = $1 AND status = 'OVERDUE' LIMIT 1`, [plan.id])
-      await tx.query(`UPDATE credit_plans SET status = $2 WHERE id = $1`, [plan.id, stillOverdue.rows.length ? 'OVERDUE' : 'ACTIVE'])
+      await updateCreditPlanStatus(tx, {
+        id: plan.id,
+        currentStatus: plan.status,
+        nextStatus: stillOverdue.rows.length ? 'OVERDUE' : 'ACTIVE'
+      })
     }
     const eventPayload = { planId: plan.id, installmentId: plan.installment_id, installmentNumber: plan.installment_number, merchantId: plan.merchant_id, amount: Number(plan.amount_due), status: 'PAID', manuallyRecorded: true }
     await recordCreditWebhookEvent(tx, { tenantId, merchantId: plan.merchant_id, eventType: 'installment.paid', eventKey: `installment.paid:${plan.installment_id}`, payload: eventPayload })
     if (completed) await recordCreditWebhookEvent(tx, { tenantId, merchantId: plan.merchant_id, eventType: 'plan.completed', eventKey: `plan.completed:${plan.id}`, payload: { planId: plan.id, merchantId: plan.merchant_id, status: 'COMPLETED' } })
-    return { installment: paid.rows[0], planCompleted: completed }
+    return { installment: paid, planCompleted: completed }
   })
   if (result.notFound) return res.status(404).json({ message: 'Credit plan or installment not found.' })
   if (result.conflict) return res.status(409).json({ message: 'This installment is already paid or has a platform collection in progress.' })

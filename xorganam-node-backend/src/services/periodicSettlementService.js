@@ -8,6 +8,8 @@ import {
 } from './eganowClient.js'
 import { applyInstitutionSplitRepayments } from './creditCashSweepService.js'
 import { createVendorReference } from './referenceIds.js'
+import { updateInstitutionSweepStatus } from './institutionSweepStateService.js'
+import { updateTransactionStatus } from './transactionStateService.js'
 
 const RETRY_WINDOW_MS = 10 * 60 * 1000
 
@@ -267,12 +269,17 @@ async function settleLeg(leg, config, network) {
     const statusResult = await queryTransactionStatus(config.tenant_id, leg.internal_reference, { merchantId: config.merchant_id })
     if (isGatewaySuccess(statusResult.status) || isGatewayFailure(statusResult.status)) {
       const status = isGatewaySuccess(statusResult.status) ? 'PAID_OUT' : 'FAILED'
-      await query(
-        `UPDATE transactions SET status = $2, payment_gateway_status = $3,
-                failure_reason = $4, completed_at = CASE WHEN $2 <> 'PENDING' THEN now() ELSE completed_at END,
-                updated_at = now() WHERE id = $1`,
-        [leg.id, status, statusResult.status, status === 'FAILED' ? `Eganow returned ${statusResult.status}.` : null]
-      )
+      await updateTransactionStatus(query, {
+        id: leg.id,
+        type: 'PAYOUT',
+        currentStatus: 'PENDING',
+        nextStatus: status,
+        fields: {
+          payment_gateway_status: statusResult.status,
+          failure_reason: status === 'FAILED' ? `Eganow returned ${statusResult.status}.` : null,
+          completed_at: new Date()
+        }
+      })
       if (leg.payout_leg === 'INSTITUTION') await query(
         `UPDATE institution_transactions
             SET status = CASE WHEN $2 = 'PAID_OUT' THEN 'RECEIVED'::institution_txn_status ELSE 'FAILED'::institution_txn_status END,
@@ -294,16 +301,31 @@ async function settleLeg(leg, config, network) {
     narration: `Periodic settlement ${config.period.key}`
   })
   const status = isGatewaySuccess(result.status) ? 'PAID_OUT' : isGatewayFailure(result.status) ? 'FAILED' : 'PENDING'
-  await query(
-    `UPDATE transactions SET status = $2, eganow_reference = COALESCE($3, eganow_reference),
-            eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-            payment_gateway_status = $5, failure_reason = $6,
-            raw_webhook_payload = $7,
-            completed_at = CASE WHEN $2 = 'PAID_OUT' THEN now() ELSE completed_at END, updated_at = now()
-      WHERE id = $1`,
-    [leg.id, status, result.reference, result.transactionId, result.status,
-      status === 'FAILED' ? `Eganow returned ${result.status}.` : null, result.raw]
-  )
+  if (status !== 'PENDING') {
+    await updateTransactionStatus(query, {
+      id: leg.id,
+      type: 'PAYOUT',
+      currentStatus: 'PENDING',
+      nextStatus: status,
+      fields: {
+        eganow_reference: result.reference || null,
+        eganow_transaction_id: result.transactionId || null,
+        payment_gateway_status: result.status,
+        failure_reason: status === 'FAILED' ? `Eganow returned ${result.status}.` : null,
+        raw_webhook_payload: result.raw,
+        completed_at: new Date()
+      }
+    })
+  } else {
+    await query(
+      `UPDATE transactions SET eganow_reference = COALESCE($2, eganow_reference),
+              eganow_transaction_id = COALESCE($3, eganow_transaction_id),
+              payment_gateway_status = $4, failure_reason = $5,
+              raw_webhook_payload = $6, updated_at = now()
+        WHERE id = $1`,
+      [leg.id, result.reference || null, result.transactionId || null, result.status, null, result.raw]
+    )
+  }
   if (leg.payout_leg === 'INSTITUTION') await query(
     `UPDATE institution_transactions
         SET status = CASE WHEN $2 = 'PAID_OUT' THEN 'RECEIVED'::institution_txn_status
@@ -337,23 +359,23 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
     try {
       balance = await getPayoutWalletBalance(periodConfig.tenant_id, periodConfig.eganow_payout_account_id, periodConfig.merchant_id)
     } catch (error) {
-      await query(
-        `UPDATE institution_sweep_ledger
-            SET status = 'ACCRUED_UNSWEPT', failure_reason = $2, updated_at = now()
-          WHERE sweep_transaction_id = $1`,
-        [parent.id, error.message]
-      )
+      await updateInstitutionSweepStatus(query, {
+        id: parent.id,
+        currentStatus: parent.status,
+        nextStatus: 'ACCRUED_UNSWEPT',
+        fields: { failure_reason: error.message }
+      })
       results.push({ sweepId: parent.id, status: 'ACCRUED_UNSWEPT', reason: error.message })
       continue
     }
 
     if (Number(balance) < outstandingAmount) {
-      await query(
-        `UPDATE institution_sweep_ledger SET status = 'ACCRUED_UNSWEPT',
-                failure_reason = 'Insufficient payout-wallet balance.', updated_at = now()
-          WHERE sweep_transaction_id = $1`,
-        [parent.id]
-      )
+      await updateInstitutionSweepStatus(query, {
+        id: parent.id,
+        currentStatus: parent.status,
+        nextStatus: 'ACCRUED_UNSWEPT',
+        fields: { failure_reason: 'Insufficient payout-wallet balance.' }
+      })
       results.push({ sweepId: parent.id, status: 'ACCRUED_UNSWEPT' })
       continue
     }
@@ -363,16 +385,16 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
       institutionStatus = await settleLeg(institutionLeg, periodConfig)
       vendorStatus = vendorLeg ? await settleLeg(vendorLeg, periodConfig, periodConfig.network_provider) : 'PAID_OUT'
     } catch (error) {
-      await query(
-        `UPDATE institution_sweep_ledger
-            SET status = 'PENDING',
-                institution_leg_status = $2,
-                vendor_leg_status = $3,
-                failure_reason = $4,
-                updated_at = now()
-          WHERE sweep_transaction_id = $1`,
-        [parent.id, institutionStatus || institutionLeg.status, vendorStatus, error.message]
-      )
+      await updateInstitutionSweepStatus(query, {
+        id: parent.id,
+        currentStatus: parent.status,
+        nextStatus: 'PENDING',
+        fields: {
+          institution_leg_status: institutionStatus || institutionLeg.status,
+          vendor_leg_status: vendorStatus,
+          failure_reason: error.message
+        }
+      })
       throw error
     }
     const status = institutionStatus === 'PAID_OUT' && vendorStatus === 'PAID_OUT'
@@ -382,11 +404,15 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
         : 'PENDING'
     if (institutionStatus === 'PAID_OUT') {
       await withTransaction(async (tx) => {
-        await tx.query(
-          `UPDATE institution_sweep_ledger SET status = $2,
-                  institution_leg_status = $3, vendor_leg_status = $4, updated_at = now()
-            WHERE sweep_transaction_id = $1`, [parent.id, status, institutionStatus, vendorStatus]
-        )
+        await updateInstitutionSweepStatus(tx, {
+          id: parent.id,
+          currentStatus: parent.status,
+          nextStatus: status,
+          fields: {
+            institution_leg_status: institutionStatus,
+            vendor_leg_status: vendorStatus
+          }
+        })
         await applyInstitutionSplitRepayments(tx, parent.id)
         if (status === 'SETTLED') await tx.query(
             `UPDATE periodic_accrual_ledger
@@ -397,11 +423,15 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
           )
       })
     } else {
-      await query(
-        `UPDATE institution_sweep_ledger SET status = $2,
-                institution_leg_status = $3, vendor_leg_status = $4, updated_at = now()
-          WHERE sweep_transaction_id = $1`, [parent.id, status, institutionStatus, vendorStatus]
-      )
+      await updateInstitutionSweepStatus(query, {
+        id: parent.id,
+        currentStatus: parent.status,
+        nextStatus: status,
+        fields: {
+          institution_leg_status: institutionStatus,
+          vendor_leg_status: vendorStatus
+        }
+      })
     }
     results.push({ sweepId: parent.id, status })
     }

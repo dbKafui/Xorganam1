@@ -9,6 +9,8 @@ import {
   queryTransactionStatus
 } from '../services/eganowClient.js'
 import { createVendorReference } from '../services/referenceIds.js'
+import { updateTransactionStatus } from '../services/transactionStateService.js'
+import { updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
 
 const connection = getRedisConnection()
 const scheduler = new Queue(INSTITUTION_LOAN_RECOVERY_QUEUE, { connection })
@@ -23,18 +25,31 @@ async function postRecovery(payoutTransactionId, gatewayResult) {
         WHERE r.payout_transaction_id = $1 AND r.status = 'PENDING'
         FOR UPDATE OF r, i`, [payoutTransactionId]
     )
-    await tx.query(
-      `UPDATE transactions SET status = 'PAID_OUT', payment_gateway_status = $2,
-              eganow_reference = COALESCE($3, eganow_reference),
-              eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-              completed_at = now(), updated_at = now() WHERE id = $1`,
-      [payoutTransactionId, gatewayResult.status, gatewayResult.reference || null, gatewayResult.transactionId || null]
+    await updateTransactionStatus(tx, {
+      id: payoutTransactionId,
+      type: 'PAYOUT',
+      currentStatus: 'PENDING',
+      nextStatus: 'PAID_OUT',
+      fields: {
+        payment_gateway_status: gatewayResult.status,
+        eganow_reference: gatewayResult.reference || null,
+        eganow_transaction_id: gatewayResult.transactionId || null,
+        completed_at: new Date()
+      }
+    })
+    const { rows: institutionTransactions } = await tx.query(
+      `SELECT id, institution_id, status FROM institution_transactions
+        WHERE counterparty_transaction_id = $1`, [payoutTransactionId]
     )
-    await tx.query(
-      `UPDATE institution_transactions SET status = 'RECEIVED'::institution_txn_status,
-              eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
-        WHERE counterparty_transaction_id = $1`, [payoutTransactionId, gatewayResult.reference || null]
-    )
+    for (const row of institutionTransactions) {
+      await updateInstitutionTransactionStatus(tx, {
+        id: row.id,
+        institutionId: row.institution_id,
+        currentStatus: row.status,
+        nextStatus: 'RECEIVED',
+        fields: { eganow_reference: gatewayResult.reference || null }
+      })
+    }
     for (const recovery of recoveries) {
       const paidCents = Number(recovery.amount_cents)
       const installmentPaid = Number(recovery.amount_paid_cents) + paidCents
@@ -59,30 +74,53 @@ async function postRecovery(payoutTransactionId, gatewayResult) {
         `UPDATE institution_default_payout_recoveries SET status = 'POSTED', posted_at = now() WHERE id = $1`, [recovery.id]
       )
     }
-    await tx.query(`UPDATE transactions SET status = 'PAID_OUT', completed_at = now(), updated_at = now()
-      WHERE id = (SELECT parent_transaction_id FROM transactions WHERE id = $1)`, [payoutTransactionId])
+    await updateTransactionStatus(tx, {
+      id: (await tx.query('SELECT parent_transaction_id FROM transactions WHERE id = $1', [payoutTransactionId])).rows[0].parent_transaction_id,
+      type: 'COLLECTION',
+      currentStatus: 'RECEIVED',
+      nextStatus: 'PAID_OUT',
+      fields: {}
+    })
   })
 }
 
 async function markPayoutFailed(payoutTransactionId, gatewayResult) {
   await withTransaction(async (tx) => {
-    await tx.query(
-      `UPDATE transactions SET status = 'FAILED', payment_gateway_status = $2,
-              eganow_reference = COALESCE($3, eganow_reference),
-              eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-              failure_reason = 'Eganow rejected the institution default recovery payout.',
-              completed_at = now(), updated_at = now() WHERE id = $1`,
-      [payoutTransactionId, gatewayResult.status, gatewayResult.reference || null, gatewayResult.transactionId || null]
+    await updateTransactionStatus(tx, {
+      id: payoutTransactionId,
+      type: 'PAYOUT',
+      currentStatus: 'PENDING',
+      nextStatus: 'FAILED',
+      fields: {
+        payment_gateway_status: gatewayResult.status,
+        eganow_reference: gatewayResult.reference || null,
+        eganow_transaction_id: gatewayResult.transactionId || null,
+        failure_reason: 'Eganow rejected the institution default recovery payout.',
+        completed_at: new Date()
+      }
+    })
+    const { rows: institutionTransactions } = await tx.query(
+      `SELECT id, institution_id, status FROM institution_transactions
+        WHERE counterparty_transaction_id = $1`, [payoutTransactionId]
     )
-    await tx.query(
-      `UPDATE institution_transactions SET status = 'FAILED'::institution_txn_status,
-              eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
-        WHERE counterparty_transaction_id = $1`, [payoutTransactionId, gatewayResult.reference || null]
-    )
+    for (const row of institutionTransactions) {
+      await updateInstitutionTransactionStatus(tx, {
+        id: row.id,
+        institutionId: row.institution_id,
+        currentStatus: row.status,
+        nextStatus: 'FAILED',
+        fields: { eganow_reference: gatewayResult.reference || null }
+      })
+    }
     await tx.query(`UPDATE institution_default_payout_recoveries SET status = 'FAILED'
       WHERE payout_transaction_id = $1 AND status = 'PENDING'`, [payoutTransactionId])
-    await tx.query(`UPDATE transactions SET status = 'FAILED', updated_at = now()
-      WHERE id = (SELECT parent_transaction_id FROM transactions WHERE id = $1)`, [payoutTransactionId])
+    await updateTransactionStatus(tx, {
+      id: (await tx.query('SELECT parent_transaction_id FROM transactions WHERE id = $1', [payoutTransactionId])).rows[0].parent_transaction_id,
+      type: 'COLLECTION',
+      currentStatus: 'RECEIVED',
+      nextStatus: 'FAILED',
+      fields: {}
+    })
   })
 }
 

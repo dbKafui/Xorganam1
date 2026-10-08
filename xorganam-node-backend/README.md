@@ -40,7 +40,7 @@ Merchant never authenticates at all — she only ever receives SMS.
 ```
 POST   /api/v1/public/tenants/register        Operator self-registration; MFA enrollment is required at sign-in
 GET    /api/v1/public/merchants/:id            Checkout: can this merchant take payments?
-POST   /api/v1/public/collect                  Checkout: customer-initiated collection
+POST   /api/v1/public/collect                  Checkout: customer-initiated collection [Idempotency-Key required]
 GET    /api/v1/public/collect/:ref/status       Checkout: poll payment outcome
 
 POST   /api/v1/auth/login                      Operator / platform admin login
@@ -62,7 +62,7 @@ PUT    /api/v1/merchants/:id/settings           allow_manual_control, notify pre
 
 GET    /api/v1/transactions?tenantId=           List, filterable by merchantId/status/type
 GET    /api/v1/transactions/:id                 Detail + linked children
-POST   /api/v1/transactions/collect             Staff-triggered collection    [TENANT_OPERATOR+]
+POST   /api/v1/transactions/collect             Staff-triggered collection    [TENANT_OPERATOR+, Idempotency-Key required]
 POST   /api/v1/transactions/internal-transfer    Manual sweep                  [TENANT_MANAGER+]
 POST   /api/v1/transactions/payout               Manual payout                 [TENANT_MANAGER+]
 POST   /api/v1/transactions/:id/reconcile        Force a status re-check       [TENANT_OPERATOR+]
@@ -86,10 +86,20 @@ POST   /api/v1/credit-plans/:id/installments/:iid/payment-link    Issue hosted l
 POST   /api/v1/public/credit-customer/request-code SMS customer verification        [PUBLIC, RATE LIMITED]
 POST   /api/v1/public/credit-customer/verify-code  Verify code and issue customer token [PUBLIC, RATE LIMITED]
 GET    /api/v1/credit-customer/plans              Customer schedules               [CUSTOMER TOKEN]
-POST   /api/v1/public/credit-installments/:token/collect Hosted installment payment [PUBLIC]
+POST   /api/v1/public/credit-installments/:token/collect Hosted installment payment [PUBLIC, Idempotency-Key required]
 PUT    /api/v1/credit-webhooks/:merchantId        Set merchant webhook             [TENANT]
 DELETE /api/v1/credit-webhooks/:merchantId        Disable merchant webhook         [TENANT]
 ```
+
+### Payment request idempotency
+
+Every collection and storefront-order creation request must include an `Idempotency-Key`
+header containing 8–128 letters, digits, periods, underscores, colons, or hyphens. Generate a
+cryptographically random key once per user action and reuse it for retries of that exact request.
+The same key and same request returns the existing transaction/order; reusing it with changed
+payment or order terms returns HTTP 409. Do not rotate the key after a timeout, connection loss,
+or `OUTCOME_UNKNOWN` response: keep the transaction pending and reconcile its status before
+starting another payment. CVV is not persisted; card and request fingerprints are keyed hashes.
 
 ## Hire-purchase / credit sales (Track 4)
 

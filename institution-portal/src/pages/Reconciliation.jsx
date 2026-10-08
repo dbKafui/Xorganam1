@@ -3,8 +3,19 @@ import { institutionApi } from '../api/client.js'
 import PageHeader from '../components/PageHeader.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import { EmptyState, ErrorMessage, LoadingState } from '../components/Feedback.jsx'
+import { normalizePaymentStatus } from '../lib/statusContract.js'
 
 const amount = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+function describeFailure(row) {
+  const statuses = [row.institution_leg_status, row.vendor_leg_status].filter(Boolean)
+  const failures = [row.institution_failure_reason, row.vendor_failure_reason, row.failure_reason].filter(Boolean)
+  if (failures.length === 0) return null
+  return {
+    status: statuses.find((status) => status === 'FAILED') || null,
+    message: failures[0]
+  }
+}
 
 export default function Reconciliation() {
   const [records, setRecords] = useState([])
@@ -35,13 +46,14 @@ export default function Reconciliation() {
         </div>
         {loading ? <LoadingState /> : visible.length ? <div className="table-wrap"><table><thead><tr><th>Period / reference</th><th>Tenant</th><th>Merchant</th><th>Institution amount</th><th>Vendor amount</th><th>Settlement legs</th><th>State</th></tr></thead><tbody>
           {visible.map((row, index) => {
-            const status = row.reconciliation_state || row.sweep_status || row.status || 'PENDING'
+            const status = normalizePaymentStatus(row.reconciliation_state || row.sweep_status || row.status || 'PENDING')
+            const legFailure = describeFailure(row)
             return <tr key={row.sweep_transaction_id || row.parent_transaction_id || index}>
               <td><strong>{row.period_key ? new Date(`${row.period_key}T00:00:00`).toLocaleDateString() : 'Transaction'}</strong><small className="mono">{(row.sweep_transaction_id || row.parent_transaction_id || '').slice(0, 12)}</small></td>
               <td className="mono">{row.tenant_name || row.tenant_id || '—'}</td><td className="mono">{row.merchant_name || row.merchant_id || '—'}</td>
               <td className="mono">GHS {amount(row.institution_amount ?? row.pending_accrual_amount)}</td><td className="mono">GHS {amount(row.vendor_amount)}</td>
-              <td><span className="leg-summary">I: {row.institution_leg_status || '—'}<br />V: {row.vendor_leg_status || '—'}</span>{row.failure_reason && <small className="failure-reason">{row.failure_reason}</small>}</td>
-              <td><StatusBadge value={status} /></td>
+              <td><span className="leg-summary">I: {row.institution_leg_status || '—'}<br />V: {row.vendor_leg_status || '—'}</span>{legFailure && <small className="failure-reason">{legFailure.status ? `Failed leg: ${legFailure.status}.` : ''} {legFailure.message}</small>}</td>
+              <td><StatusBadge value={status} />{status === 'PARTIALLY_SETTLED' && <small className="footnote">Review the failed leg before making further payouts or retries.</small>}</td>
             </tr>
           })}
         </tbody></table></div> : <EmptyState title="No reconciliation records">Settlement records will be listed here when available.</EmptyState>}

@@ -21,6 +21,23 @@ services:
       timeout: 5s
       retries: 5
 
+  vault:
+    image: hashicorp/vault:1.18
+    container_name: xorganam-vault
+    cap_add: ["IPC_LOCK"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-root}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "127.0.0.1:8200:8200"
+    command: server -dev
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: xorganam-redis
@@ -62,17 +79,21 @@ services:
       PORT: 3000
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}@postgres:5432/xorganam
       REDIS_URL: redis://redis:6379
-      CORS_ORIGINS: http://localhost:${BACKOFFICE_HOST_PORT:-5173},http://localhost:${CHECKOUT_HOST_PORT:-5174},http://localhost:${INSTITUTION_PORTAL_HOST_PORT:-5175}
+      CORS_ORIGINS: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKOFFICE_HOST_PORT:-5173},http://${FRONTEND_API_HOST:-172.20.10.7}:${CHECKOUT_HOST_PORT:-5174},http://${FRONTEND_API_HOST:-172.20.10.7}:${INSTITUTION_PORTAL_HOST_PORT:-5175},http://localhost:${BACKOFFICE_HOST_PORT:-5173},http://localhost:${CHECKOUT_HOST_PORT:-5174},http://localhost:${INSTITUTION_PORTAL_HOST_PORT:-5175}
       ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in the environment}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the environment}
-      VAULT_ADDR: ${VAULT_ADDR:?Set VAULT_ADDR in the environment}
-      VAULT_ROLE_ID: ${VAULT_ROLE_ID:?Set VAULT_ROLE_ID in the environment}
-      VAULT_SECRET_ID: ${VAULT_SECRET_ID:?Set VAULT_SECRET_ID in the environment}
+      VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+      VAULT_TOKEN: ${VAULT_TOKEN:-root}
+      VAULT_ROLE_ID: ${VAULT_ROLE_ID:-}
+      VAULT_SECRET_ID: ${VAULT_SECRET_ID:-}
       EGANOW_BASE_URL: ""
       EGANOW_CALLBACK_URL: ${EGANOW_CALLBACK_URL:?Set EGANOW_CALLBACK_URL in the environment}
       EGANOW_DEBUG: "false"
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-}
+      APP_URL: ${APP_URL:-http://${FRONTEND_API_HOST:-172.20.10.7}:${CHECKOUT_HOST_PORT:-5174}}
     ports:
-      - "127.0.0.1:${BACKEND_HOST_PORT:-3000}:3000"
+      - "${BACKEND_HOST_PORT:-3000}:3000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -94,9 +115,10 @@ services:
       REDIS_URL: redis://redis:6379
       ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in the environment}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the environment}
-      VAULT_ADDR: ${VAULT_ADDR:?Set VAULT_ADDR in the environment}
-      VAULT_ROLE_ID: ${VAULT_ROLE_ID:?Set VAULT_ROLE_ID in the environment}
-      VAULT_SECRET_ID: ${VAULT_SECRET_ID:?Set VAULT_SECRET_ID in the environment}
+      VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+      VAULT_TOKEN: ${VAULT_TOKEN:-root}
+      VAULT_ROLE_ID: ${VAULT_ROLE_ID:-}
+      VAULT_SECRET_ID: ${VAULT_SECRET_ID:-}
       EGANOW_BASE_URL: ""
       EGANOW_CALLBACK_URL: ${EGANOW_CALLBACK_URL:?Set EGANOW_CALLBACK_URL in the environment}
       EGANOW_DEBUG: "false"
@@ -113,12 +135,12 @@ services:
       context: ./backoffice-dashboard
       dockerfile: Dockerfile.static
       args:
-        VITE_API_BASE_URL: http://localhost:${BACKEND_HOST_PORT:-3000}/api/v1
+        VITE_API_BASE_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKEND_HOST_PORT:-3000}/api/v1
     container_name: xorganam-backoffice-dashboard
     environment:
-      VITE_API_BASE_URL: http://localhost:${BACKEND_HOST_PORT:-3000}/api/v1
+      VITE_API_BASE_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKEND_HOST_PORT:-3000}/api/v1
     ports:
-      - "127.0.0.1:${BACKOFFICE_HOST_PORT:-5173}:5173"
+      - "${BACKOFFICE_HOST_PORT:-5173}:5173"
     networks: [app]
 
   checkout:
@@ -126,13 +148,15 @@ services:
       context: ./xorganam-checkout
       dockerfile: Dockerfile.production
       args:
-        VITE_API_BASE_URL: http://localhost:${BACKEND_HOST_PORT:-3000}/api/v1
+        VITE_STOREFRONT_PUBLIC_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${CHECKOUT_HOST_PORT:-5174}
+        VITE_OPERATOR_PUBLIC_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${CHECKOUT_HOST_PORT:-5174}
+        VITE_API_BASE_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKEND_HOST_PORT:-3000}/api/v1
         VITE_BUILD_MODE: development
     container_name: xorganam-checkout
     environment:
-      VITE_API_BASE_URL: http://localhost:${BACKEND_HOST_PORT:-3000}/api/v1
+      VITE_API_BASE_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKEND_HOST_PORT:-3000}/api/v1
     ports:
-      - "127.0.0.1:${CHECKOUT_HOST_PORT:-5174}:5174"
+      - "${CHECKOUT_HOST_PORT:-5174}:5174"
     networks: [app]
 
   institution-portal:
@@ -140,12 +164,12 @@ services:
       context: ./institution-portal
       dockerfile: Dockerfile.static
       args:
-        VITE_API_BASE_URL: http://localhost:${BACKEND_HOST_PORT:-3000}/api/v1
+        VITE_API_BASE_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKEND_HOST_PORT:-3000}/api/v1
     container_name: xorganam-institution-portal
     environment:
-      VITE_API_BASE_URL: http://localhost:${BACKEND_HOST_PORT:-3000}/api/v1
+      VITE_API_BASE_URL: http://${FRONTEND_API_HOST:-172.20.10.7}:${BACKEND_HOST_PORT:-3000}/api/v1
     ports:
-      - "127.0.0.1:${INSTITUTION_PORTAL_HOST_PORT:-5175}:5175"
+      - "${INSTITUTION_PORTAL_HOST_PORT:-5175}:5175"
     depends_on:
       - backend
     networks: [app]

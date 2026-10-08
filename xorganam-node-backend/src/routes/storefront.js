@@ -213,7 +213,13 @@ publicStorefrontRouter.post('/marketplace/storefronts/:slug/orders', asyncHandle
 
 async function startOrderCheckout(req, res, marketplaceOrder) {
   let prepared
-  try { prepared = await createStorefrontOrder(req.params.slug, { ...req.body, marketplaceOrder }) } catch (error) {
+  try {
+    prepared = await createStorefrontOrder(req.params.slug, {
+      ...req.body,
+      marketplaceOrder,
+      idempotencyKey: req.get('Idempotency-Key') || null
+    })
+  } catch (error) {
     if (error instanceof StorefrontOrderError) return res.status(error.status).json({ message: error.message })
     throw error
   }
@@ -232,22 +238,26 @@ async function startOrderCheckout(req, res, marketplaceOrder) {
       expiryDateYear: req.body?.expiryDateYear,
       cvv: req.body?.cvv,
       narration: `Storefront order ${prepared.order.id}`,
+      idempotencyKey: req.get('Idempotency-Key') || null,
       orderId: prepared.order.id,
       creditPlanId: prepared.paymentMethod === 'CREDIT' ? prepared.credit.planId : null
     })
     if (result.status === 'FAILED') {
-      await cancelAndRestock(prepared.order.id, { onlyPending: true, reason: 'Eganow did not start the order payment.' })
+      if (!prepared.existingOrder) {
+        await cancelAndRestock(prepared.order.id, { onlyPending: true, reason: 'Eganow did not start the order payment.' })
+      }
       return res.status(402).json({ message: result.failureReason || 'Eganow could not start this payment.', orderId: prepared.order.id, status: 'CANCELLED' })
     }
     await query(`UPDATE orders SET collection_transaction_id = $2 WHERE id = $1 AND status = 'PENDING_PAYMENT'`, [prepared.order.id, result.transactionId])
-    res.status(201).json({ orderId: prepared.order.id, status: 'PENDING_PAYMENT', totalAmount: prepared.totalAmount,
+    const { rows: currentOrderRows } = await query('SELECT status FROM orders WHERE id = $1', [prepared.order.id])
+    res.status(prepared.existingOrder ? 200 : 201).json({ orderId: prepared.order.id, status: currentOrderRows[0]?.status || prepared.order.status, totalAmount: prepared.totalAmount,
       paymentAmount: prepared.collectionAmount, paymentMethod: prepared.paymentMethod, reference: result.internalReference,
       redirectHtml: result.redirectHtml || null,
-      message: String(req.body?.collectionMethod || 'MOMO').toUpperCase() === 'CARD' ? 'Complete card verification to finish payment.' : prepared.paymentMethod === 'CREDIT' ? 'Approve the down-payment prompt on your phone.' : result.message })
+      message: result.message || (String(req.body?.collectionMethod || 'MOMO').toUpperCase() === 'CARD' ? 'Complete card verification to finish payment.' : prepared.paymentMethod === 'CREDIT' ? 'Approve the down-payment prompt on your phone.' : 'Approve the payment prompt on your phone.') })
   } catch (error) {
     if (error instanceof CollectionRejectedError) {
-      await cancelAndRestock(prepared.order.id, { onlyPending: true, reason: error.message })
-      return res.status(409).json({ message: error.message })
+      if (!prepared.existingOrder) await cancelAndRestock(prepared.order.id, { onlyPending: true, reason: error.message })
+      return res.status(error.status).json({ message: error.message })
     }
     throw error
   }

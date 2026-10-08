@@ -2,6 +2,8 @@ import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { authenticate, requirePermission, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
+import { isFailedTransactionStatus, isPendingTransactionStatus, isSuccessfulTransactionStatus } from '../lib/statusContract.js'
+import { buildReportSummary } from '../services/reportSummaryService.js'
 
 export const reportsRouter = Router()
 
@@ -29,13 +31,70 @@ async function computeTotals(whereClause, params) {
         COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED') AND fee_config_version_id IS NULL) AS fee_data_unavailable_count,
         COUNT(*) FILTER (WHERE type = 'COLLECTION') AS collection_count,
         COUNT(*) FILTER (WHERE type = 'COLLECTION' AND status IN ('RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED')) AS successful_count,
-        COUNT(*) FILTER (WHERE status = 'FAILED') AS failed_count,
-        COUNT(*) FILTER (WHERE status = 'PENDING') AS pending_count
+        COUNT(*) FILTER (WHERE status = 'FAILED' OR status = 'REJECTED') AS failed_count,
+        COUNT(*) FILTER (WHERE status IN ('PENDING', 'UNKNOWN', 'VERIFICATION_BLOCKED', 'MANUAL_RECONCILIATION_REQUIRED')) AS pending_count
      FROM transactions
      WHERE ${whereClause}`,
     params
   )
   return rows[0]
+}
+
+async function computeLedgerTotals({ merchantId = null, tenantId = null } = {}) {
+  const { rows } = await query(
+    `SELECT
+      COALESCE((
+        SELECT SUM(accrued_amount)
+        FROM periodic_accrual_ledger
+        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'PENDING')
+           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'PENDING')
+      ), 0) AS pending_accrual_amount,
+      COALESCE((
+        SELECT SUM(accrued_amount)
+        FROM periodic_accrual_ledger
+        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'SWEPT')
+           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'SWEPT')
+      ), 0) AS swept_accrual_amount,
+      COALESCE((
+        SELECT SUM(institution_amount)
+        FROM institution_sweep_ledger
+        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'PENDING')
+           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'PENDING')
+      ), 0) AS pending_settlement_amount,
+      COALESCE((
+        SELECT SUM(institution_amount)
+        FROM institution_sweep_ledger
+        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'SETTLED')
+           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'SETTLED')
+      ), 0) AS settled_amount,
+      COALESCE((
+        SELECT SUM(a.amount_cents) / 100.0
+        FROM institution_split_financial_allocations a
+        WHERE ($1::UUID IS NOT NULL AND a.institution_id IN (
+          SELECT institution_id FROM tenant_institution_links WHERE merchant_id = $1
+        )) OR ($2::UUID IS NOT NULL AND a.institution_id IN (
+          SELECT institution_id FROM tenant_institution_links WHERE tenant_id = $2
+        ))
+      ), 0) AS allocated_amount,
+      COALESCE((
+        SELECT COUNT(*)
+        FROM order_payment_reconciliation_flags f
+        JOIN orders o ON o.id = f.order_id
+        WHERE ($1::UUID IS NOT NULL AND o.merchant_id = $1 AND f.resolved_at IS NULL)
+           OR ($2::UUID IS NOT NULL AND o.tenant_id = $2 AND f.resolved_at IS NULL)
+      ), 0) AS unresolved_flag_count
+    `,
+    [merchantId, tenantId]
+  )
+  return rows[0]
+}
+
+function mapStatusOutcome(status) {
+  const normalized = status ?? ''
+  if (isSuccessfulTransactionStatus(normalized)) return 'success'
+  if (isFailedTransactionStatus(normalized)) return 'failed'
+  if (isPendingTransactionStatus(normalized)) return 'pending'
+  return 'unknown'
 }
 
 // ---------------------------------------------------------------------
@@ -61,7 +120,9 @@ reportsRouter.get(
       return res.status(403).json({ message: 'You do not have access to other merchants.' })
     }
 
-    const totals = await computeTotals('merchant_id = $1', [merchantId])
+    const transactionTotals = await computeTotals('merchant_id = $1', [merchantId])
+    const ledgerTotals = await computeLedgerTotals({ merchantId })
+    const summary = buildReportSummary({ transactionTotals, ledgerTotals })
 
     const recent = await query(
       `SELECT id, type, status, amount, currency, internal_reference, payment_gateway_status, created_at
@@ -72,7 +133,8 @@ reportsRouter.get(
     res.json({
       merchantId: merchant.id,
       displayName: merchant.display_name,
-      ...mapTotals(totals),
+      ...mapTotals(transactionTotals),
+      ...summary,
       recentTransactions: recent.rows.map(mapTxnSummary)
     })
   })
@@ -93,7 +155,9 @@ reportsRouter.get(
     const tenantRow = await query('SELECT id, company_name FROM tenants WHERE id = $1', [tenantId])
     if (tenantRow.rows.length === 0) return res.status(404).json({ message: 'Tenant not found.' })
 
-    const totals = await computeTotals('tenant_id = $1', [tenantId])
+    const transactionTotals = await computeTotals('tenant_id = $1', [tenantId])
+    const ledgerTotals = await computeLedgerTotals({ tenantId })
+    const summary = buildReportSummary({ transactionTotals, ledgerTotals })
 
     const perMerchant = await query(
       `SELECT m.id, m.display_name,
@@ -110,7 +174,8 @@ reportsRouter.get(
     res.json({
       tenantId,
       companyName: tenantRow.rows[0].company_name,
-      ...mapTotals(totals),
+      ...mapTotals(transactionTotals),
+      ...summary,
       merchants: perMerchant.rows.map((r) => ({
         merchantId: r.id,
         displayName: r.display_name,
@@ -181,6 +246,7 @@ function mapTxnSummary(row) {
     id: row.id,
     type: row.type,
     status: row.status,
+    outcome: mapStatusOutcome(row.status),
     paymentGatewayStatus: row.payment_gateway_status,
     amount: row.amount,
     currency: row.currency,

@@ -10,6 +10,7 @@ import { markCreditInstallmentCollected } from '../services/creditInstallmentSet
 import { loadVendorPackagePayoutRule, processSplitPayout } from '../services/splitPaymentService.js'
 import { computeFee } from '../services/feeService.js'
 import { createVendorReference } from '../services/referenceIds.js'
+import { updateTransactionStatus } from '../services/transactionStateService.js'
 
 // No env-level Eganow callback fallback: tenant-stored callback must be used.
 
@@ -228,6 +229,7 @@ transactionsRouter.post(
         expiryDateYear,
         cvv,
         payoutMsisdn: payoutMsisdn || payoutMobileNumber || accountNoOrMsisdn || null,
+        idempotencyKey: req.get('Idempotency-Key') || null,
         callback: undefined
       })
       if (result.status !== 'FAILED') {
@@ -241,10 +243,12 @@ transactionsRouter.post(
         internalReference: result.internalReference,
         status: result.status,
         paymentGatewayStatus: result.paymentGatewayStatus || result.status,
-        redirectHtml: result.redirectHtml || null
+        redirectHtml: result.redirectHtml || null,
+        message: result.message || null,
+        duplicate: result.duplicate || false
       })
     } catch (err) {
-      if (err instanceof CollectionRejectedError) return res.status(400).json({ message: err.message })
+      if (err instanceof CollectionRejectedError) return res.status(err.status).json({ message: err.message })
       if (err.name === 'TenantCredentialsError') return res.status(400).json({ message: err.message })
       throw err
     }
@@ -341,20 +345,38 @@ transactionsRouter.post(
       }
 
       await withTransaction(async (client) => {
-        await client.query(
-          `UPDATE transactions SET status = 'SWEPT_INTERNAL', payment_gateway_status = $4,
-                  eganow_reference = $2, eganow_transaction_id = $3,
-                  completed_at = now(), updated_at = now() WHERE id = $1`,
-          [transferId, result.reference || internalReference, result.transactionId || null, result.status]
-        )
-        await client.query(`UPDATE transactions SET status = 'SWEPT_INTERNAL', updated_at = now() WHERE id = $1`, [source.id])
+        await updateTransactionStatus(client, {
+          id: transferId,
+          type: 'INTERNAL_TRANSFER',
+          currentStatus: 'PENDING',
+          nextStatus: 'SWEPT_INTERNAL',
+          fields: {
+            payment_gateway_status: result.status,
+            eganow_reference: result.reference || internalReference,
+            eganow_transaction_id: result.transactionId || null,
+            completed_at: new Date()
+          }
+        })
+        await updateTransactionStatus(client, {
+          id: source.id,
+          type: 'COLLECTION',
+          currentStatus: source.status,
+          nextStatus: 'SWEPT_INTERNAL',
+          fields: {}
+        })
         await markCreditInstallmentCollected(client, source.id)
       })
 
       res.json({ id: transferId, internalReference, status: 'SWEPT_INTERNAL' })
     } catch (err) {
       const message = err instanceof EganowApiError ? err.message : err.message
-      await query(`UPDATE transactions SET status = 'FAILED', failure_reason = $2, updated_at = now() WHERE id = $1`, [transferId, message])
+      await updateTransactionStatus(query, {
+        id: transferId,
+        type: 'INTERNAL_TRANSFER',
+        currentStatus: 'PENDING',
+        nextStatus: 'FAILED',
+        fields: { failure_reason: message }
+      })
       res.status(502).json({ message: 'Internal transfer failed.', detail: message })
     }
   })
@@ -544,18 +566,27 @@ transactionsRouter.post(
         return res.json({ id: payoutId, internalReference, status: 'PENDING', paymentGatewayStatus: result.status || 'PENDING' })
       }
 
-      await query(
-        `UPDATE transactions
-            SET status = 'PAID_OUT',
-                payment_gateway_status = $4,
-                eganow_reference = $2,
-                eganow_transaction_id = $3,
-                completed_at = now(),
-                updated_at = now()
-          WHERE id = $1`,
-        [payoutId, result.reference || internalReference, result.transactionId || null, result.status]
-      )
-      await query(`UPDATE transactions SET status = 'PAID_OUT', updated_at = now() WHERE id = $1`, [source.id])
+      await withTransaction(async (tx) => {
+        await updateTransactionStatus(tx, {
+          id: payoutId,
+          type: 'PAYOUT',
+          currentStatus: 'PENDING',
+          nextStatus: 'PAID_OUT',
+          fields: {
+            payment_gateway_status: result.status,
+            eganow_reference: result.reference || internalReference,
+            eganow_transaction_id: result.transactionId || null,
+            completed_at: new Date()
+          }
+        })
+        await updateTransactionStatus(tx, {
+          id: source.id,
+          type: 'COLLECTION',
+          currentStatus: source.status,
+          nextStatus: 'PAID_OUT',
+          fields: {}
+        })
+      })
 
       res.json({ id: payoutId, internalReference, status: 'PAID_OUT' })
     } catch (err) {

@@ -1,4 +1,5 @@
 import { query, withTransaction } from '../db/pool.js'
+import { updateInstitutionFinancialTransactionStatus, updateInstitutionTransactionStatus } from './institutionStateService.js'
 
 async function postSuccess(transactionId, gatewayResult) {
   return withTransaction(async (tx) => {
@@ -63,20 +64,33 @@ async function postSuccess(transactionId, gatewayResult) {
             updated_at = now() WHERE a.id = $1`, [item.account_id, amount]
       )
     }
-    const { rows: updated } = await tx.query(
-      `UPDATE institution_financial_transactions SET status = 'POSTED', payment_gateway_status = $2,
-          gateway_reference = COALESCE($3, gateway_reference), gateway_transaction_id = COALESCE($4, gateway_transaction_id),
-          updated_at = now() WHERE id = $1 RETURNING *`,
-      [transactionId, gatewayResult.status, gatewayResult.reference, gatewayResult.transactionId]
+    const { rows: updated } = await updateInstitutionFinancialTransactionStatus(tx, {
+      id: transactionId,
+      institutionId: item.institution_id,
+      currentStatus: 'PENDING_GATEWAY',
+      nextStatus: 'POSTED',
+      fields: {
+        payment_gateway_status: gatewayResult.status,
+        gateway_reference: gatewayResult.reference || null,
+        gateway_transaction_id: gatewayResult.transactionId || null
+      }
+    })
+    const institutionTransactionId = await tx.query(
+      `SELECT id, status FROM institution_transactions
+        WHERE internal_reference = $1 AND institution_id = $2`,
+      [item.external_reference, item.institution_id]
     )
-    await tx.query(
-      `UPDATE institution_transactions
-          SET status = CASE WHEN type = 'PAYOUT' THEN 'PAID_OUT'::institution_txn_status
-                            ELSE 'RECEIVED'::institution_txn_status END,
-              eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
-        WHERE internal_reference = $1`,
-      [item.external_reference, gatewayResult.reference]
-    )
+    if (institutionTransactionId.rows[0]) {
+      await updateInstitutionTransactionStatus(tx, {
+        id: institutionTransactionId.rows[0].id,
+        institutionId: item.institution_id,
+        currentStatus: institutionTransactionId.rows[0].status,
+        nextStatus: item.transaction_type === 'LOAN_DISBURSEMENT' || item.transaction_type === 'WITHDRAWAL' ? 'PAID_OUT' : 'RECEIVED',
+        fields: {
+          eganow_reference: gatewayResult.reference || null
+        }
+      })
+    }
     return { transaction: updated[0] }
   })
 }
@@ -127,25 +141,47 @@ export async function reconcileInstitutionTransaction(institutionId, transaction
   const status = String(gatewayResult?.status || '').toLowerCase()
   if (['success', 'successful', 'completed'].includes(status)) return postSuccess(transactionId, gatewayResult)
   if (['failed', 'failure', 'declined', 'expired', 'cancelled', 'canceled', 'rejected'].includes(status)) {
-    const { rows } = await query(
-      `UPDATE institution_financial_transactions SET status = 'FAILED', payment_gateway_status = $3,
-          gateway_reference = COALESCE($4, gateway_reference), gateway_transaction_id = COALESCE($5, gateway_transaction_id),
-          failure_reason = COALESCE($6, 'Eganow rejected the transaction.'), updated_at = now()
-        WHERE id = $1 AND institution_id = $2 AND status = 'PENDING_GATEWAY' RETURNING *`,
-      [transactionId, institutionId, status, gatewayResult.reference, gatewayResult.transactionId, gatewayResult.message]
-    )
-    if (rows[0]) await query(
-      `UPDATE institution_transactions SET status = 'FAILED', eganow_reference = COALESCE($2, eganow_reference), updated_at = now()
-        WHERE internal_reference = $1`, [rows[0].external_reference, gatewayResult.reference]
-    )
+    const { rows } = await updateInstitutionFinancialTransactionStatus(query, {
+      id: transactionId,
+      institutionId,
+      currentStatus: 'PENDING_GATEWAY',
+      nextStatus: 'FAILED',
+      fields: {
+        payment_gateway_status: status,
+        gateway_reference: gatewayResult.reference || null,
+        gateway_transaction_id: gatewayResult.transactionId || null,
+        failure_reason: gatewayResult.message || 'Eganow rejected the transaction.'
+      }
+    })
+    if (rows[0]) {
+      const institutionTransaction = await query(
+        `SELECT id, status FROM institution_transactions
+          WHERE internal_reference = $1 AND institution_id = $2`,
+        [rows[0].external_reference, institutionId]
+      )
+      if (institutionTransaction.rows[0]) {
+        await updateInstitutionTransactionStatus(query, {
+          id: institutionTransaction.rows[0].id,
+          institutionId,
+          currentStatus: institutionTransaction.rows[0].status,
+          nextStatus: 'FAILED',
+          fields: { eganow_reference: gatewayResult.reference || null }
+        })
+      }
+    }
     return { transaction: rows[0] || null }
   }
-  const { rows } = await query(
-    `UPDATE institution_financial_transactions SET payment_gateway_status = COALESCE($3, payment_gateway_status),
-        gateway_reference = COALESCE($4, gateway_reference), gateway_transaction_id = COALESCE($5, gateway_transaction_id), updated_at = now()
-      WHERE id = $1 AND institution_id = $2 AND status = 'PENDING_GATEWAY' RETURNING *`,
-    [transactionId, institutionId, status || 'PENDING', gatewayResult.reference, gatewayResult.transactionId]
-  )
+  const { rows } = await updateInstitutionFinancialTransactionStatus(query, {
+    id: transactionId,
+    institutionId,
+    currentStatus: 'PENDING_GATEWAY',
+    nextStatus: 'PENDING_GATEWAY',
+    fields: {
+      payment_gateway_status: status || 'PENDING',
+      gateway_reference: gatewayResult.reference || null,
+      gateway_transaction_id: gatewayResult.transactionId || null
+    }
+  })
   return { transaction: rows[0] || null, pending: true }
 }
 

@@ -1,8 +1,19 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { publicApi } from '../api/client'
+import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../lib/idempotency'
+import { classifyPaymentStatus } from '../lib/statusOutcome'
 
 function money(value) { return `GHS ${Number(value || 0).toFixed(2)}` }
+
+function restoreOrderAttempt(slug) {
+  try {
+    const value = sessionStorage.getItem(`xorganam_store_order:${slug}`)
+    return value ? JSON.parse(value) : null
+  } catch {
+    return null
+  }
+}
 
 export default function Storefront() {
   const { slug } = useParams()
@@ -22,8 +33,11 @@ export default function Storefront() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [payment, setPayment] = useState(null)
+  const [payment, setPayment] = useState(() => restoreOrderAttempt(slug))
   const [cardRedirectHtml, setCardRedirectHtml] = useState('')
+  const idempotencyStorageKey = `xorganam_store_order_key:${slug}`
+  const idempotencyKey = useRef(sessionStorage.getItem(idempotencyStorageKey))
+  const attemptStorageKey = `xorganam_store_order:${slug}`
 
   useEffect(() => {
     let current = true
@@ -32,7 +46,7 @@ export default function Storefront() {
     setBranchId('')
     setCart({})
     setSelectedCategoryId('')
-    setPayment(null)
+    setPayment(restoreOrderAttempt(slug))
     setCardRedirectHtml('')
     setNotice('')
     setFulfillment('PICKUP')
@@ -42,6 +56,7 @@ export default function Storefront() {
     setPaymentMethod('EGANOW')
     setCollectionMethod('MOMO')
     setCard({ number: '', name: '', month: '', year: '', cvv: '' })
+    idempotencyKey.current = null
     publicApi.getStorefront(slug).then((result) => {
       if (!current) return
       setData(result)
@@ -51,6 +66,23 @@ export default function Storefront() {
     })
     return () => { current = false }
   }, [slug])
+
+  useEffect(() => {
+    if (!payment) {
+      sessionStorage.removeItem(attemptStorageKey)
+      return
+    }
+    const safePaymentState = {
+      orderId: payment.orderId,
+      status: payment.status,
+      totalAmount: payment.totalAmount,
+      paymentAmount: payment.paymentAmount,
+      paymentMethod: payment.paymentMethod,
+      reference: payment.reference,
+      message: payment.message
+    }
+    sessionStorage.setItem(attemptStorageKey, JSON.stringify(safePaymentState))
+  }, [payment, attemptStorageKey])
 
   useEffect(() => {
     setPaymentMethod(data?.creditDefaults?.enabled ? 'CREDIT' : 'EGANOW')
@@ -65,12 +97,25 @@ export default function Storefront() {
       try {
         const result = await publicApi.getStatus(payment.reference)
         if (cancelled) return
-        const status = String(result.status || '').toUpperCase()
-        if (['RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED'].includes(status)) {
-          setPayment((current) => ({ ...current, status: 'PLACED' })); setNotice('Payment received. Your order is placed.'); return
+        const outcome = classifyPaymentStatus({ status: result.status, failureReason: result.failureReason })
+
+        if (outcome.state === 'success') {
+          setPayment((current) => ({ ...current, status: 'PLACED' })); setCart({}); setNotice('Payment received. Your order is placed.')
+          idempotencyKey.current = null
+          clearIdempotencyKey(idempotencyStorageKey)
+          return
         }
-        if (status === 'FAILED') {
-          setPayment((current) => ({ ...current, status: 'CANCELLED' })); setError(result.failureReason || 'Payment failed. The reservation is being released.'); return
+        if (outcome.state === 'partial') {
+          setPayment((current) => ({ ...current, status: 'PLACED' })); setCart({}); setNotice(outcome.message)
+          idempotencyKey.current = null
+          clearIdempotencyKey(idempotencyStorageKey)
+          return
+        }
+        if (['failed', 'blocked', 'manual-reconciliation'].includes(outcome.state)) {
+          setPayment((current) => ({ ...current, status: 'CANCELLED' })); setError(outcome.message)
+          idempotencyKey.current = null
+          clearIdempotencyKey(idempotencyStorageKey)
+          return
         }
       } catch { /* Payment remains pending; the server expiry worker owns stock release. */ }
       attempts += 1
@@ -97,8 +142,11 @@ export default function Storefront() {
   }
 
   function add(product) {
+    if (payment?.status === 'PENDING_PAYMENT') return
     const stock = stockFor(product)
     setError(''); setNotice(''); setPayment(null)
+    idempotencyKey.current = null
+    clearIdempotencyKey(idempotencyStorageKey)
     if (!stock.available) return
     setCart((current) => ({ ...current, [product.id]: Math.min(stock.quantity, 100, Number(current[product.id] || 0) + 1) }))
   }
@@ -116,6 +164,11 @@ export default function Storefront() {
 
   async function checkout(event) {
     event.preventDefault(); setSubmitting(true); setError(''); setNotice('')
+    if (payment?.status === 'PENDING_PAYMENT') {
+      setSubmitting(false)
+      setError('This order payment is still pending. Check its status before starting another payment.')
+      return
+    }
     const unavailable = allProducts.find((product) => cart[product.id] && Number(cart[product.id]) > stockFor(product).quantity)
     if (unavailable) {
       setSubmitting(false)
@@ -125,20 +178,31 @@ export default function Storefront() {
     const items = Object.entries(cart).map(([productId, quantity]) => ({ productId, quantity }))
     try {
       const createOrder = marketplaceEntry ? publicApi.createMarketplaceOrder : publicApi.createStorefrontOrder
+      if (!idempotencyKey.current) idempotencyKey.current = getOrCreateIdempotencyKey(idempotencyStorageKey)
       const result = await createOrder(slug, {
         items, customerPhone, customerName,
         fulfillmentType: fulfillment, fulfillmentAddress: fulfillment === 'DELIVERY' ? address : undefined,
         merchantId: fulfillment === 'PICKUP' ? branchId : undefined, paymentMethod, collectionMethod,
         ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {})
-      })
+      }, idempotencyKey.current)
       if (result.redirectHtml) {
         try { setCardRedirectHtml(decodeURIComponent(escape(atob(result.redirectHtml)))) } catch { setCardRedirectHtml(atob(result.redirectHtml)) }
       } else setCardRedirectHtml('')
       setPayment({ ...result, reference: result.reference || null })
+      if (result.status === 'CANCELLED' || result.status === 'PLACED') {
+        idempotencyKey.current = null
+        clearIdempotencyKey(idempotencyStorageKey)
+      }
       if (result.reference) setNotice(result.message || 'Payment prompt sent. Approve it on your phone.')
       else setNotice(result.status === 'PLACED' ? 'Credit purchase confirmed. Your order is placed.' : 'Order created.')
-      setCart({})
-    } catch (requestError) { setError(requestError.message) }
+      if (result.status === 'PLACED') setCart({})
+    } catch (requestError) {
+      setError(requestError.message)
+      if (requestError.status >= 400 && requestError.status < 500 && requestError.status !== 409) {
+        idempotencyKey.current = null
+        clearIdempotencyKey(idempotencyStorageKey)
+      }
+    }
     finally { setSubmitting(false) }
   }
 
@@ -172,6 +236,7 @@ export default function Storefront() {
         : <p>Delivery inventory is checked at the vendor’s configured fulfillment location.</p>}
     </section>
     {data.categories?.length > 0 && <div className="store-category-filter"><label htmlFor="store-category-filter">Browse category</label><select id="store-category-filter" value={selectedCategoryId} onChange={(event) => setSelectedCategoryId(event.target.value)}><option value="">All products</option>{data.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>}
+    {payment && <section className="store-order-status" aria-live="polite"><h2>Order {payment.orderId}</h2><p>Status: {String(payment.status || 'PENDING_PAYMENT').replaceAll('_', ' ').toLowerCase()}</p>{payment.paymentAmount > 0 && <p>Payment amount: {money(payment.paymentAmount)}</p>}{payment.reference && <p>Payment reference: <span className="mono">{payment.reference}</span></p>}{payment.status === 'PENDING_PAYMENT' && <p>Do not submit another payment while this order is pending.</p>}{cardRedirectHtml && <><h3>Verify card payment</h3><iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={cardRedirectHtml} style={{ width: '100%', minHeight: 500, border: 0 }} /></>}<Link to="/my-orders">Track your order</Link></section>}
     {blocks.map((block, index) => {
       if (block.type === 'hero') return <section key={index} className="store-hero" style={{ backgroundColor: block.props.backgroundColor, color: block.props.textColor, ...block.props.style, backgroundImage: block.props.imageUrl ? `linear-gradient(90deg,rgba(0,0,0,.48),rgba(0,0,0,.08)),url("${block.props.imageUrl}")` : undefined }}>
         <h2>{block.props.headline}</h2>{block.props.subheadline && <p>{block.props.subheadline}</p>}
@@ -199,8 +264,7 @@ export default function Storefront() {
         {(paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="field"><label>Collection method</label><select value={collectionMethod} onChange={(e) => setCollectionMethod(e.target.value)}><option value="MOMO">Mobile Money</option><option value="CARD">Visa / Mastercard</option></select></div>}
         {collectionMethod === 'CARD' && (paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="two-col"><div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={card.number} onChange={(e) => setCard((v) => ({ ...v, number: e.target.value }))} /></div><div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={card.name} onChange={(e) => setCard((v) => ({ ...v, name: e.target.value }))} /></div><div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" autoComplete="cc-exp-month" value={card.month} onChange={(e) => setCard((v) => ({ ...v, month: e.target.value }))} /></div><div className="field"><label>Expiry year</label><input required inputMode="numeric" autoComplete="cc-exp-year" placeholder="2030" value={card.year} onChange={(e) => setCard((v) => ({ ...v, year: e.target.value }))} /></div><div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={card.cvv} onChange={(e) => setCard((v) => ({ ...v, cvv: e.target.value }))} /></div></div>}
         {error && <div className="status-banner error" role="alert">{error}</div>}{notice && <div className="status-banner success" role="status">{notice}</div>}
-        {payment && <div className="order-confirmation"><strong>Order {payment.orderId}</strong><span>Status: {payment.status}</span>{payment.paymentAmount > 0 && <span>Payment prompt amount: {money(payment.paymentAmount)}</span>}{cardRedirectHtml && <><h3>Verify card payment</h3><iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={cardRedirectHtml} style={{ width: '100%', minHeight: 500, border: 0 }} /></>}<Link to="/my-orders">Track your order</Link></div>}
-        <button className="btn btn-primary" disabled={submitting || !branchId && fulfillment === 'PICKUP'}>{submitting ? 'Starting checkout…' : `Place order · ${money(total)}`}</button>
+        <button className="btn btn-primary" disabled={submitting || payment?.status === 'PENDING_PAYMENT' || !branchId && fulfillment === 'PICKUP'}>{submitting ? 'Starting checkout…' : payment?.status === 'PENDING_PAYMENT' ? 'Payment pending' : `Place order · ${money(total)}`}</button>
       </form>
     </aside>}
   </main>

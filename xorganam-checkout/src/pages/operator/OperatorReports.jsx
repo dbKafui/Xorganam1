@@ -197,6 +197,15 @@ export default function OperatorReports() {
             <div className="kv-row"><span>Pending</span><span className="mono">{report.pendingCount}</span></div>
             <div className="kv-row"><span>Failed</span><span className="mono">{report.failedCount}</span></div>
             <div className="kv-row"><span>Fees</span><span className="mono">GHS {money(report.totalFees)}</span></div>
+            <div className="kv-row"><span>Pending financial movement</span><span className="mono">GHS {money(report.pendingFinancialMovement)}</span></div>
+            <div className="kv-row"><span>Finalized financial movement</span><span className="mono">GHS {money(report.finalizedFinancialMovement)}</span></div>
+            <div className="kv-row"><span>Unresolved reconciliation flags</span><span className="mono">{report.unresolvedFlagCount}</span></div>
+            {report.reconciliationRequiresReview && (
+              <div className="status-banner warning">
+                <span className="status-icon">!</span>
+                <span>{report.reconciliationWarnings?.[0] || 'Financial reconciliation requires review.'}</span>
+              </div>
+            )}
           </div>
         </>
       )}

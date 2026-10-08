@@ -30,6 +30,7 @@ import { getRedisConnection } from './queue/queue.js'
 import { mfaRouter } from './routes/mfa.js'
 import { platformSecurityRouter } from './routes/platformSecurity.js'
 import { sanitizeInput } from './middleware/sanitizeInput.js'
+import { defaultObservability } from './lib/observability.js'
 import './workers/eganowTokenRefreshWorker.js'
 
 const app = express()
@@ -39,11 +40,33 @@ if (env.corsOrigins.includes('*')) {
 }
 
 app.use((req, res, next) => {
-  // API responses do not need a browser document policy or third-party origins.
+  req.id = req.get('x-request-id') || defaultObservability.generateRequestId()
+  res.setHeader('x-request-id', req.id)
   res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  next()
+})
+
+app.use((req, res, next) => {
+  const startedAt = process.hrtime.bigint()
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000
+    defaultObservability.recordRequest({
+      method: req.method,
+      route: req.route?.path || req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs
+    })
+    console.info('[http]', {
+      requestId: req.id,
+      method: req.method,
+      route: req.route?.path || req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs
+    })
+  })
   next()
 })
 
@@ -74,10 +97,28 @@ app.get('/health', async (_req, res) => {
     await pool.query('SELECT 1')
     const redis = getRedisConnection()
     await redis.ping()
-    res.json({ status: 'ok' })
+    res.json({ status: 'ok', service: 'xorganam-node-backend' })
   } catch (err) {
     console.error('[health] dependency check failed', { code: err?.code || 'DEPENDENCY_UNAVAILABLE' })
-    res.status(503).json({ status: 'unhealthy' })
+    res.status(503).json({ status: 'unhealthy', service: 'xorganam-node-backend' })
+  }
+})
+
+app.get('/ready', async (_req, res) => {
+  try {
+    const [databaseReady, redisReady] = await Promise.all([
+      pool.query('SELECT 1').then(() => true).catch(() => false),
+      getRedisConnection().ping().then(() => true).catch(() => false)
+    ])
+    const readiness = defaultObservability.getReadiness({
+      database: databaseReady,
+      redis: redisReady,
+      worker: true
+    })
+    res.status(readiness.ready ? 200 : 503).json(readiness)
+  } catch (err) {
+    console.error('[ready] readiness check failed', { code: err?.code || 'READINESS_ERROR' })
+    res.status(503).json({ ready: false, service: 'xorganam-node-backend', dependencies: {} })
   }
 })
 
@@ -139,6 +180,14 @@ const passwordResetLimiter = rateLimit({
   message: { message: 'Too many reset requests. Please try again later.' }
 })
 
+const emailVerificationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many verification requests. Please try again later.' }
+})
+
 const institutionRegistrationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
@@ -157,6 +206,7 @@ app.use('/api/v1/public', publicLimiter, publicRouter)
 app.use('/api/v1/auth/login', tenantLoginLimiter)
 app.use('/api/v1/auth/mfa', mfaVerificationLimiter, mfaRouter)
 app.use('/api/v1/auth/password-reset', passwordResetLimiter)
+app.use('/api/v1/auth/email-verification', emailVerificationLimiter)
 app.use('/api/v1/auth', authRouter)
 app.use('/api/v1/platform/security-settings', platformSecurityRouter)
 app.use('/api/v1/institution-auth/login', institutionLoginLimiter)
@@ -190,7 +240,7 @@ app.use((req, res) => {
 
 // Centralized error handler - guarantees an unexpected thrown error in
 // any route never crashes the process or leaks a stack trace to the caller.
-app.use((err, _req, res, _next) => {
+app.use((err, req, res, _next) => {
   if (err instanceof ForbiddenError) {
     return res.status(403).json({ message: err.message })
   }
@@ -200,9 +250,13 @@ app.use((err, _req, res, _next) => {
   if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ message: 'Uploaded document exceeds the 20 MB limit.' })
   if (err?.code === 'LIMIT_FILE_COUNT' || err?.code === 'LIMIT_FIELD_COUNT') return res.status(400).json({ message: 'Too many upload fields or files.' })
   if (err?.statusCode === 400) return res.status(400).json({ message: err.message })
-  // Error messages may contain SQL, provider response bodies, callback URLs,
-  // identifiers, or request data. Log only a stable error classification.
-  console.error('[http] request failed', { name: err?.name || 'Error', code: err?.code || 'UNEXPECTED' })
+  console.error('[http] request failed', {
+    requestId: req.id,
+    name: err?.name || 'Error',
+    code: err?.code || 'UNEXPECTED',
+    route: req.originalUrl,
+    method: req.method
+  })
   res.status(500).json({ message: 'Internal server error.' })
 })
 

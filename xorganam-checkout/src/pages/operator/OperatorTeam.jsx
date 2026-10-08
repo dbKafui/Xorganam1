@@ -81,8 +81,10 @@ export default function OperatorTeam() {
     setNotice('')
     setCreating(true)
     try {
-      await operatorApi.createUser({ tenantId: user.tenantId, ...form })
-      setNotice(`${form.firstName} ${form.lastName} added to your team.`)
+      const result = await operatorApi.createUser({ tenantId: user.tenantId, ...form })
+      setNotice(result.emailVerificationSent
+        ? `${form.firstName} ${form.lastName} added. A verification email was sent to ${form.email}.`
+        : `${form.firstName} ${form.lastName} added, but their verification email was not sent. Configure email delivery before they sign in.`)
       setForm(initialForm)
       load()
     } catch (err) {
@@ -248,6 +250,7 @@ export default function OperatorTeam() {
                 <tr>
                   <th>Name</th>
                   <th>Email</th>
+                  <th>Email verification</th>
                   <th>Role</th>
                   <th>Merchant</th>
                   <th>Status</th>
@@ -259,6 +262,7 @@ export default function OperatorTeam() {
                   <tr key={m.id}>
                     <td>{m.firstName} {m.lastName}</td>
                     <td className="mono">{m.email}</td>
+                    <td><span className={`status-pill ${m.emailVerifiedAt ? 'approved' : 'pending'}`}>{m.emailVerifiedAt ? 'Verified' : 'Pending verification'}</span></td>
                     <td>{ROLE_LABELS[m.role] || m.role}</td>
                     <td>{m.merchantId ? ((merchants.find((x) => x.id === m.merchantId) || {}).displayName || '—') : <em>Tenant-level</em>}</td>
                     <td><span className={`status-pill ${m.isActive ? 'approved' : 'rejected'}`}>{m.isActive ? 'Active' : 'Inactive'}</span></td>

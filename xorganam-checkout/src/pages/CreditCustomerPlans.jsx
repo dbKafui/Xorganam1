@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { creditCustomerApi, publicApi } from '../api/client'
+import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../lib/idempotency'
 
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '')
@@ -19,6 +20,7 @@ export default function CreditCustomerPlans() {
   const [plans, setPlans] = useState([])
   const [loading, setLoading] = useState(creditCustomerApi.hasSession())
   const [busyInstallment, setBusyInstallment] = useState('')
+  const [pendingInstallments, setPendingInstallments] = useState({})
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -64,8 +66,11 @@ export default function CreditCustomerPlans() {
     setNotice('')
     setBusyInstallment(installment.id)
     try {
-      const result = await creditCustomerApi.payInstallment(plan.id, installment.id)
+      const storageKey = `xorganam_credit_payment_key:${plan.id}:${installment.id}`
+      const result = await creditCustomerApi.payInstallment(plan.id, installment.id, getOrCreateIdempotencyKey(storageKey))
       setNotice(result.message || 'Payment prompt sent. Approve it on your phone.')
+      if (result.status === 'FAILED') clearIdempotencyKey(storageKey)
+      else setPendingInstallments((current) => ({ ...current, [installment.id]: true }))
     } catch (requestError) { setError(requestError.message) }
     finally { setBusyInstallment('') }
   }
@@ -109,7 +114,7 @@ export default function CreditCustomerPlans() {
               <span className={`status-pill ${String(item.status).toLowerCase()}`}>{item.status.toLowerCase().replaceAll('_', ' ')}</span>
             </div>)}
           </div>
-          {next && <button className="pay-btn" disabled={!!busyInstallment} onClick={() => pay(plan, next)}>{busyInstallment === next.id ? 'Sending prompt…' : `Pay installment ${next.installment_number} · ${money(next.amount_due)}`}</button>}
+          {next && <button className="pay-btn" disabled={!!busyInstallment || pendingInstallments[next.id]} onClick={() => pay(plan, next)}>{busyInstallment === next.id ? 'Sending prompt…' : pendingInstallments[next.id] ? 'Payment started · check status' : `Pay installment ${next.installment_number} · ${money(next.amount_due)}`}</button>}
         </section>
       }))}
       <p className="link-row"><Link to="/">Return to checkout</Link></p>

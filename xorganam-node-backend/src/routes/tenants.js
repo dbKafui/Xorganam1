@@ -486,6 +486,7 @@ tenantsRouter.put(
           msisdn,
           network,
           narration,
+          idempotencyKey: req.get('Idempotency-Key') || null,
           payoutMsisdn: payoutMsisdn || payoutMobileNumber || accountNoOrMsisdn || null,
           callback: callbackOverride || undefined
         })
@@ -502,10 +503,11 @@ tenantsRouter.put(
           internalReference: result.internalReference,
           status: result.status,
           paymentGatewayStatus: result.paymentGatewayStatus || result.status,
-          message: result.message || null
+          message: result.message || null,
+          duplicate: result.duplicate || false
         })
       } catch (err) {
-        if (err instanceof CollectionRejectedError) return res.status(400).json({ message: err.message })
+        if (err instanceof CollectionRejectedError) return res.status(err.status).json({ message: err.message })
         if (err.name === 'TenantCredentialsError') return res.status(400).json({ message: err.message })
         throw err
       }

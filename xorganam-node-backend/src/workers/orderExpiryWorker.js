@@ -3,6 +3,7 @@ import { getRedisConnection } from '../queue/queue.js'
 import { withTransaction } from '../db/pool.js'
 import { isGatewayFailure, isGatewaySuccess, queryTransactionStatus } from '../services/eganowClient.js'
 import { cancelAndRestockOrder, markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
+import { updateTransactionStatus } from '../services/transactionStateService.js'
 
 const QUEUE_NAME = 'storefront-order-expiry'
 const connection = getRedisConnection()
@@ -65,20 +66,31 @@ async function processExpiredOrder() {
     // place the order and release its stock.
     const result = await queryTransactionStatus(order.tenant_id, collection.internal_reference, { merchantId: order.merchant_id })
     if (isGatewaySuccess(result.status)) {
-      await tx.query(
-        `UPDATE transactions SET status = 'RECEIVED', payment_gateway_status = $2,
-                completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'PENDING'`,
-        [collection.id, result.status]
-      )
+      await updateTransactionStatus(tx, {
+        id: collection.id,
+        type: 'COLLECTION',
+        currentStatus: 'PENDING',
+        nextStatus: 'RECEIVED',
+        fields: {
+          payment_gateway_status: result.status,
+          completed_at: new Date()
+        }
+      })
       await markStorefrontOrderPaid(tx, collection.id)
       return { orderId: order.id, placed: true }
     }
     if (isGatewayFailure(result.status)) {
-      await tx.query(
-        `UPDATE transactions SET status = 'FAILED', payment_gateway_status = $2,
-                failure_reason = 'Eganow confirmed the order payment failed.', completed_at = now(), updated_at = now()
-          WHERE id = $1 AND status = 'PENDING'`, [collection.id, result.status]
-      )
+      await updateTransactionStatus(tx, {
+        id: collection.id,
+        type: 'COLLECTION',
+        currentStatus: 'PENDING',
+        nextStatus: 'FAILED',
+        fields: {
+          payment_gateway_status: result.status,
+          failure_reason: 'Eganow confirmed the order payment failed.',
+          completed_at: new Date()
+        }
+      })
     } else if (!result.status || !['PENDING', 'PROCESSING', 'INITIATED'].includes(String(result.status).toUpperCase())) {
       return { orderId: order.id, pendingReconciliation: true }
     }

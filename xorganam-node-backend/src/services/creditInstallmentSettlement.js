@@ -1,4 +1,5 @@
 import { recordCreditWebhookEvent } from './creditWebhookOutbox.js'
+import { updateCreditInstallmentStatus, updateCreditPlanStatus } from './creditStateService.js'
 
 export async function markCreditInstallmentCollected(tx, collectionTransactionId) {
   const { rows } = await tx.query(
@@ -13,23 +14,35 @@ export async function markCreditInstallmentCollected(tx, collectionTransactionId
   const context = rows[0]
   if (!context || context.installment_status === 'PAID') return { tagged: Boolean(context), completed: false }
 
-  const paid = await tx.query(
-    `UPDATE credit_plan_installments
-        SET status = 'PAID', paid_transaction_id = $2, paid_at = now(),
-            manually_recorded = FALSE, manually_recorded_by_user_id = NULL
-      WHERE id = $1 AND status IN ('PENDING', 'OVERDUE')
-      RETURNING id`, [context.credit_installment_id, context.transaction_id]
-  )
-  if (!paid.rows.length) return { tagged: true, completed: false }
+  const paid = await updateCreditInstallmentStatus(tx, {
+    id: context.credit_installment_id,
+    currentStatus: context.installment_status,
+    nextStatus: 'PAID',
+    fields: {
+      paid_transaction_id: context.transaction_id,
+      paid_at: new Date(),
+      manually_recorded: false,
+      manually_recorded_by_user_id: null
+    }
+  })
+  if (!paid) return { tagged: true, completed: false }
   const { rows: remaining } = await tx.query(
     `SELECT COUNT(*)::int AS count FROM credit_plan_installments
       WHERE credit_plan_id = $1 AND status <> 'PAID'`, [context.credit_plan_id]
   )
   const completed = remaining[0].count === 0
-  if (completed) await tx.query(`UPDATE credit_plans SET status = 'COMPLETED' WHERE id = $1`, [context.credit_plan_id])
+  if (completed) await updateCreditPlanStatus(tx, {
+    id: context.credit_plan_id,
+    currentStatus: context.plan_status,
+    nextStatus: 'COMPLETED'
+  })
   else if (context.plan_status !== 'DEFAULTED') {
     const overdue = await tx.query(`SELECT 1 FROM credit_plan_installments WHERE credit_plan_id = $1 AND status = 'OVERDUE' LIMIT 1`, [context.credit_plan_id])
-    await tx.query(`UPDATE credit_plans SET status = $2 WHERE id = $1`, [context.credit_plan_id, overdue.rows.length ? 'OVERDUE' : 'ACTIVE'])
+    await updateCreditPlanStatus(tx, {
+      id: context.credit_plan_id,
+      currentStatus: context.plan_status,
+      nextStatus: overdue.rows.length ? 'OVERDUE' : 'ACTIVE'
+    })
   }
 
   const payload = {

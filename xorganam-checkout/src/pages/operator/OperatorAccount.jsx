@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
-import { operatorApi } from '../../api/client'
+import { operatorApi, operatorAuth } from '../../api/client'
 
 function statusClass(status) {
   return (status || '').toLowerCase().replace(/_/g, '')
@@ -9,11 +9,15 @@ function statusClass(status) {
 export default function OperatorAccount() {
   const { user } = useOperatorAuth()
   const [tenant, setTenant] = useState(null)
+  const [sessions, setSessions] = useState([])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
   const [uploadForm, setUploadForm] = useState({ kycType: 'BUSINESS', entries: [] })
   const [uploading, setUploading] = useState(false)
+  const [recoveryCode, setRecoveryCode] = useState('')
+  const [recoveryCodes, setRecoveryCodes] = useState([])
+  const [rotatingRecoveryCodes, setRotatingRecoveryCodes] = useState(false)
 
   const load = useCallback(() => {
     if (!user?.tenantId) return
@@ -23,6 +27,19 @@ export default function OperatorAccount() {
   useEffect(() => {
     load()
   }, [load])
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const result = await operatorAuth.listSessions()
+      setSessions(result.sessions || [])
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadSessions()
+  }, [loadSessions])
 
   async function handleUpload(e) {
     e.preventDefault()
@@ -53,6 +70,36 @@ export default function OperatorAccount() {
       setError(err.message)
     } finally {
       setUploading(false)
+    }
+  }
+
+  async function rotateRecoveryCodes(event) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+    setRotatingRecoveryCodes(true)
+    try {
+      const result = await operatorAuth.rotateMfaRecoveryCodes(recoveryCode)
+      setRecoveryCodes(result.recoveryCodes || [])
+      setRecoveryCode('')
+      setNotice('Recovery codes replaced. Save the new set now; previous codes no longer work.')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setRotatingRecoveryCodes(false)
+    }
+  }
+
+  async function revokeSession(session) {
+    if (!window.confirm(`Sign out the device last seen ${new Date(session.last_seen_at).toLocaleString()}?`)) return
+    setError('')
+    setNotice('')
+    try {
+      await operatorAuth.revokeSession(session.id)
+      setSessions((current) => current.filter((item) => item.id !== session.id))
+      setNotice('Device session revoked.')
+    } catch (requestError) {
+      setError(requestError.message)
     }
   }
 
@@ -87,6 +134,30 @@ export default function OperatorAccount() {
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
+
+      <section className="card">
+        <h2>Sign-in recovery codes</h2>
+        <p style={{ fontSize: 13, color: 'var(--muted)' }}>Use a current authenticator code to replace your recovery-code set. Previous codes stop working immediately.</p>
+        <form onSubmit={rotateRecoveryCodes}>
+          <div className="field"><label htmlFor="rotate-mfa-code">Current authenticator code</label><input id="rotate-mfa-code" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></div>
+          <button className="btn btn-primary" disabled={rotatingRecoveryCodes}>{rotatingRecoveryCodes ? 'Replacing codes…' : 'Replace recovery codes'}</button>
+        </form>
+        {recoveryCodes.length > 0 && <ol className="mfa-recovery-codes">{recoveryCodes.map((item) => <li className="mono" key={item}>{item}</li>)}</ol>}
+      </section>
+
+      <section className="card">
+        <h2>Active sessions</h2>
+        {sessions.length === 0 ? <p style={{ fontSize: 13, color: 'var(--muted)' }}>No active sessions found.</p> : <div className="table-wrap"><table className="ledger">
+          <thead><tr><th>Device</th><th>IP address</th><th>Last seen</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>{sessions.map((session) => <tr key={session.id}>
+            <td style={{ overflowWrap: 'anywhere' }}>{session.user_agent || 'Unknown device'}</td>
+            <td className="mono">{session.ip_address || '—'}</td>
+            <td>{new Date(session.last_seen_at).toLocaleString()}</td>
+            <td>{session.current ? <span className="status-pill approved">Current device</span> : <span className="status-pill pending">Active</span>}</td>
+            <td>{session.current ? '—' : <button className="btn btn-link btn-sm" onClick={() => revokeSession(session)}>Revoke</button>}</td>
+          </tr>)}</tbody>
+        </table></div>}
+      </section>
 
       {tenant.documents?.length > 0 && (
         <div className="card">

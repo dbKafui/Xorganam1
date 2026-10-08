@@ -4,6 +4,10 @@ import { encrypt, decrypt } from '../security/encryption.js'
 import { verifyToken } from '../security/jwt.js'
 import { createTotpSecret, verifyTotp, totpProvisioningUri } from '../security/totp.js'
 import { createSession } from '../services/sessionService.js'
+import { authenticate } from '../middleware/auth.js'
+import { institutionAuthenticate } from '../middleware/institutionAuth.js'
+import { asyncHandler } from '../middleware/asyncHandler.js'
+import { consumeMfaRecoveryCode, enableMfaWithRecoveryCodes, replaceMfaRecoveryCodes } from '../services/mfaRecoveryService.js'
 
 export const mfaRouter = Router()
 const ENCRYPTION_CONTEXT = 'xorganam-authenticator-mfa-v1'
@@ -12,17 +16,45 @@ function principalContext(principal) {
   return `${ENCRYPTION_CONTEXT}:${principal.kind}:${principal.id}`
 }
 
+async function rotateRecoveryCodes(principalId, principalType, code, req, res) {
+  const principal = principalType === 'TENANT'
+    ? await query('SELECT mfa_enabled, mfa_secret_encrypted FROM users WHERE id = $1', [principalId])
+    : await query('SELECT mfa_enabled, mfa_secret_encrypted FROM institution_staff WHERE id = $1', [principalId])
+  const row = principal.rows[0]
+  if (!row?.mfa_enabled || !row.mfa_secret_encrypted) {
+    return res.status(409).json({ message: 'Authenticator MFA is not enabled for this account.' })
+  }
+  const secret = await decrypt(row.mfa_secret_encrypted, principalContext({ kind: principalType, id: principalId }))
+  if (!secret || secret === row.mfa_secret_encrypted || !verifyTotp(secret, code)) {
+    return res.status(401).json({ message: 'A valid authenticator code is required to rotate recovery codes.' })
+  }
+  const recoveryCodes = await replaceMfaRecoveryCodes(principalId, principalType, undefined, {
+    ipAddress: req.ip || null,
+    userAgent: req.headers['user-agent'] || null,
+    requestId: req.id || null
+  })
+  return res.json({ recoveryCodes })
+}
+
 function getChallenge(req) {
   const token = req.body?.challengeToken
   if (typeof token !== 'string') return null
   try {
     const payload = verifyToken(token)
-    if (!payload.mfaFlow || !['TENANT', 'INSTITUTION'].includes(payload.principalType)) return null
+    if (!['ENROLL', 'CHALLENGE'].includes(payload.mfaFlow) || !['TENANT', 'INSTITUTION'].includes(payload.principalType)) return null
     return payload
   } catch {
     return null
   }
 }
+
+mfaRouter.post('/recovery-codes/rotate', authenticate, asyncHandler(async (req, res) => {
+  return rotateRecoveryCodes(req.user.id, 'TENANT', req.body?.code, req, res)
+}))
+
+mfaRouter.post('/recovery-codes/rotate-institution', institutionAuthenticate, asyncHandler(async (req, res) => {
+  return rotateRecoveryCodes(req.institutionAuth.id, 'INSTITUTION', req.body?.code, req, res)
+}))
 
 async function loadPrincipal(challenge) {
   if (challenge.principalType === 'INSTITUTION') {
@@ -70,21 +102,26 @@ mfaRouter.post('/verify', async (req, res, next) => {
     if (!challenge) return res.status(401).json({ message: 'A valid MFA challenge is required.' })
     const principal = await loadPrincipal(challenge)
     if (!principal) return res.status(401).json({ message: 'MFA challenge is no longer valid.' })
-    const encrypted = challenge.mfaFlow === 'ENROLL'
-      ? principal.row.mfa_pending_secret_encrypted
-      : principal.row.mfa_secret_encrypted
+    const isEnrollment = challenge.mfaFlow === 'ENROLL'
+    const encrypted = isEnrollment ? principal.row.mfa_pending_secret_encrypted : principal.row.mfa_secret_encrypted
     if (!encrypted) return res.status(409).json({ message: 'Start MFA enrollment before verifying a code.' })
     const secret = await decrypt(encrypted, principalContext(principal))
-    if (!secret || secret === encrypted || !verifyTotp(secret, req.body?.code)) {
-      return res.status(401).json({ message: 'The authenticator code is invalid or expired.' })
+    const validTotp = secret && secret !== encrypted && verifyTotp(secret, req.body?.code)
+    let usedRecoveryCode = false
+    if (!validTotp && !isEnrollment) {
+      usedRecoveryCode = await consumeMfaRecoveryCode(principal.id, principal.kind, req.body?.recoveryCode, {
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
+      })
     }
-    if (challenge.mfaFlow === 'ENROLL') {
-      await query(
-        `UPDATE ${principal.table}
-            SET mfa_enabled = TRUE, mfa_secret_encrypted = mfa_pending_secret_encrypted,
-                mfa_pending_secret_encrypted = NULL, updated_at = now()
-          WHERE id = $1`, [principal.id]
-      )
+    if (!validTotp && !usedRecoveryCode) {
+      return res.status(401).json({ message: 'The authenticator code or recovery code is invalid or already used.' })
+    }
+
+    let recoveryCodes
+    if (isEnrollment) {
+      recoveryCodes = await enableMfaWithRecoveryCodes(principal.id, principal.kind)
     }
     const row = principal.row
     const session = principal.kind === 'INSTITUTION'
@@ -107,8 +144,8 @@ mfaRouter.post('/verify', async (req, res, next) => {
           mfa: true
         }, req)
     if (principal.kind === 'INSTITUTION') {
-      return res.json({ token: session, staff: { id: row.id, institutionId: row.institution_id, institutionName: row.institution_name, branchId: row.branch_id || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role } })
+      return res.json({ token: session, staff: { id: row.id, institutionId: row.institution_id, institutionName: row.institution_name, branchId: row.branch_id || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role }, ...(recoveryCodes ? { recoveryCodes } : {}), recoveryCodeUsed: usedRecoveryCode })
     }
-    res.json({ token: session, user: { id: row.id, tenantId: row.tenant_id, merchantId: row.merchant_id || null, tenantCompanyName: row.tenant_company_name || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role, isPlatformAdmin: row.role === 'PLATFORM_ADMIN' } })
+    res.json({ token: session, user: { id: row.id, tenantId: row.tenant_id, merchantId: row.merchant_id || null, tenantCompanyName: row.tenant_company_name || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role, isPlatformAdmin: row.role === 'PLATFORM_ADMIN' }, ...(recoveryCodes ? { recoveryCodes } : {}), recoveryCodeUsed: usedRecoveryCode })
   } catch (error) { next(error) }
 })

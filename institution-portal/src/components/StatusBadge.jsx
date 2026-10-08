@@ -1,10 +1,14 @@
+import { normalizePaymentStatus } from '../lib/statusContract.js'
+
 export default function StatusBadge({ value }) {
-  const text = String(value || 'UNKNOWN').replaceAll('_', ' ').toLowerCase()
-  const tone = text.includes('approv') || text.includes('settled') || text === 'active' || text === 'resolved'
+  const status = normalizePaymentStatus(value)
+  const text = status.replaceAll('_', ' ').toLowerCase()
+  const tone = status === 'PAID_OUT' || status === 'SETTLED' || status === 'ACTIVE' || status === 'APPROVED'
     ? 'good'
-    : text.includes('reject') || text.includes('failed') || text.includes('partial')
+    : status === 'FAILED' || status === 'REJECTED' || status === 'PARTIALLY_SETTLED'
       ? 'bad'
-      : text.includes('pending') || text.includes('review') || text.includes('accrued')
+      : status === 'PENDING' || status === 'UNDER_REVIEW' || status === 'ACCRUED_UNSWEPT' ||
+          status === 'VERIFICATION_BLOCKED' || status === 'MANUAL_RECONCILIATION_REQUIRED'
         ? 'warn'
         : 'neutral'
   return <span className={`badge badge-${tone}`}>{text}</span>

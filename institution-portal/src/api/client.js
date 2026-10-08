@@ -35,7 +35,11 @@ async function request(path, { method = 'GET', body, auth = false } = {}) {
 export const institutionAuth = {
   login: (email, password) => request('/institution-auth/login', { method: 'POST', body: { email, password } }),
   setupMfa: (challengeToken) => request('/auth/mfa/setup', { method: 'POST', body: { challengeToken } }),
-  verifyMfa: (challengeToken, code) => request('/auth/mfa/verify', { method: 'POST', body: { challengeToken, code } }),
+  verifyMfa: (challengeToken, verification) => request('/auth/mfa/verify', { method: 'POST', body: { challengeToken, ...verification } }),
+  rotateMfaRecoveryCodes: (code) => request('/auth/mfa/recovery-codes/rotate-institution', { method: 'POST', body: { code }, auth: true }),
+  listSessions: () => request('/institution-auth/sessions', { auth: true }),
+  revokeSession: (sessionId) => request(`/institution-auth/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', auth: true }),
+  logout: () => request('/institution-auth/logout', { method: 'POST', auth: true }),
   submitApplication: (body) => request('/institution-auth/registrations', { method: 'POST', body }),
   checkApplicationStatus: (applicationId, trackingToken) =>
     request(`/institution-auth/registrations/${encodeURIComponent(applicationId)}/status`, { method: 'POST', body: { trackingToken } }),

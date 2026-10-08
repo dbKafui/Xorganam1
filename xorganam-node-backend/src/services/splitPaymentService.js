@@ -10,6 +10,7 @@ import {
   isGatewayPending,
   queryTransactionStatus
 } from './eganowClient.js'
+import { updateTransactionStatus } from './transactionStateService.js'
 
 export function calculateInstitutionAmount(collectionAmount, rule) {
   const amount = Number(collectionAmount)
@@ -82,17 +83,15 @@ async function updateLeg(leg, result) {
 
   await query(
     `UPDATE transactions
-        SET status = $2,
-            eganow_reference = COALESCE($3, eganow_reference),
-            eganow_transaction_id = COALESCE($4, eganow_transaction_id),
-            payment_gateway_status = COALESCE($5, payment_gateway_status),
-            failure_reason = $6,
-            completed_at = CASE WHEN $7 THEN now() ELSE completed_at END,
+        SET eganow_reference = COALESCE($2, eganow_reference),
+            eganow_transaction_id = COALESCE($3, eganow_transaction_id),
+            payment_gateway_status = COALESCE($4, payment_gateway_status),
+            failure_reason = $5,
+            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
             updated_at = now()
       WHERE id = $1`,
     [
       leg.id,
-      status,
       result.reference || null,
       result.transactionId || null,
       result.status || null,
@@ -100,6 +99,15 @@ async function updateLeg(leg, result) {
       success
     ]
   )
+  if (status !== 'PENDING') {
+    await query(
+      `UPDATE transactions
+          SET status = $2,
+              updated_at = now()
+        WHERE id = $1 AND status = $3`,
+      [leg.id, status, leg.status]
+    )
+  }
   if (leg.payout_leg === 'INSTITUTION') {
     await query(
       `UPDATE institution_transactions
@@ -167,14 +175,15 @@ export async function refreshSplitParentStatus(collectionId, allowPartial = fals
       ? 'PARTIALLY_SETTLED'
       : 'SWEPT_INTERNAL'
 
-  await query(
-    `UPDATE transactions
-        SET status = $2,
-            completed_at = CASE WHEN $2 = 'PAID_OUT' THEN now() ELSE completed_at END,
-            updated_at = now()
-      WHERE id = $1`,
-    [collectionId, status]
-  )
+  await updateTransactionStatus(query, {
+    id: collectionId,
+    type: 'COLLECTION',
+    currentStatus: parentRows[0]?.status,
+    nextStatus: status,
+    fields: {
+      completed_at: status === 'PAID_OUT' ? new Date() : null
+    }
+  })
   return status
 }
 

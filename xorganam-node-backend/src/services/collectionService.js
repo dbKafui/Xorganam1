@@ -1,11 +1,64 @@
+import crypto from 'node:crypto'
+import { env } from '../config/env.js'
 import { query, withTransaction } from '../db/pool.js'
 import { createEganowClientForMerchant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
 import { TenantCredentialsError } from './credentialsService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { computeFee } from './feeService.js'
 import { createVendorReference } from './referenceIds.js'
+import { updateTransactionStatus } from './transactionStateService.js'
 
-export class CollectionRejectedError extends Error {}
+export class CollectionRejectedError extends Error {
+  constructor(message, status = 400) {
+    super(message)
+    this.status = status
+  }
+}
+
+export function collectionFingerprint({ merchantId, amount, collectionMethod, network, narration, msisdn, payoutMsisdn, cardNumber, expiryDateMonth, expiryDateYear, creditPlanId, creditInstallmentId, orderId }) {
+  const cardFingerprint = cardNumber
+    ? crypto.createHmac('sha256', env.jwt.secret).update(JSON.stringify({
+        number: String(cardNumber).replace(/[\s-]/g, ''),
+        month: expiryDateMonth || null,
+        year: expiryDateYear || null
+      })).digest('hex')
+    : null
+  const payload = JSON.stringify({
+    merchantId,
+    amountCents: Math.round(amount * 100),
+    currency: 'GHS',
+    collectionMethod,
+    network: network || null,
+    narration: narration || null,
+    msisdn: msisdn || null,
+    payoutMsisdn: payoutMsisdn || null,
+    cardFingerprint,
+    creditPlanId: creditPlanId || null,
+    creditInstallmentId: creditInstallmentId || null,
+    orderId: orderId || null
+  })
+  return crypto.createHmac('sha256', env.jwt.secret).update(payload).digest('hex')
+}
+
+async function findExistingIdempotentCollection(client, merchantId, key, fingerprint) {
+  if (!key) return null
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`collection:${merchantId}:${key}`])
+  const { rows } = await client.query(
+    `SELECT id, internal_reference, status, payment_gateway_status, failure_reason, idempotency_fingerprint
+       FROM transactions WHERE merchant_id = $1 AND idempotency_key = $2 FOR UPDATE`,
+    [merchantId, key]
+  )
+  if (!rows.length) return null
+  if (rows[0].idempotency_fingerprint !== fingerprint) {
+    throw new CollectionRejectedError('This idempotency key was already used for a different payment request.', 409)
+  }
+  return rows[0]
+}
+
+export function isUncertainProviderOutcome(error) {
+  const statusCode = Number(error?.response?.status)
+  return !statusCode || statusCode === 429 || statusCode >= 500
+}
 
 function normalizeMsisdn(rawMsisdn) {
   if (!rawMsisdn) return rawMsisdn
@@ -85,7 +138,7 @@ export async function findMerchantForCollection(merchantId) {
  * @param {{ amount: number, msisdn: string, network?: string, narration?: string, payoutMsisdn?: string }} input
  * @returns {Promise<{ transactionId: string, internalReference: string, status: string, tenantId: string }>}
  */
-export async function initiateCollection(merchantId, { amount, msisdn, network, narration, collectionMethod = 'MOMO', cardNumber = null, cardholderName = null, expiryDateMonth = null, expiryDateYear = null, cvv = null, payoutMsisdn = null, callback = null, creditPlanId = null, creditInstallmentId = null, orderId = null }) {
+export async function initiateCollection(merchantId, { amount, msisdn, network, narration, collectionMethod = 'MOMO', cardNumber = null, cardholderName = null, expiryDateMonth = null, expiryDateYear = null, cvv = null, payoutMsisdn = null, callback = null, creditPlanId = null, creditInstallmentId = null, orderId = null, idempotencyKey = null }) {
   const merchant = await findMerchantForCollection(merchantId)
 
   if (!merchant || !merchant.is_active) {
@@ -125,9 +178,31 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     throw new CollectionRejectedError('A valid payout phone number is required in local or international format.')
   }
 
+  if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) {
+    throw new CollectionRejectedError('Idempotency-Key must be 8 to 128 characters using letters, numbers, period, underscore, colon, or hyphen.')
+  }
+  const fingerprint = collectionFingerprint({
+    merchantId: merchant.id,
+    amount,
+    collectionMethod: normalizedCollectionMethod,
+    network,
+    narration,
+    msisdn: normalizedMsisdn,
+    payoutMsisdn: normalizedPayoutMsisdn,
+    cardNumber,
+    expiryDateMonth,
+    expiryDateYear,
+    creditPlanId,
+    creditInstallmentId,
+    orderId
+  })
+
   let transactionId
+  let existingTransaction = null
   if (creditInstallmentId || creditPlanId || orderId) {
     transactionId = await withTransaction(async (client) => {
+      existingTransaction = await findExistingIdempotentCollection(client, merchant.id, idempotencyKey, fingerprint)
+      if (existingTransaction) return existingTransaction.id
       let validatedPlanId = null
       let validatedInstallmentId = null
       let validatedOrderId = null
@@ -203,30 +278,51 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
            (tenant_id, merchant_id, type, status, amount, currency, internal_reference,
             collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn,
             notification_sent, credit_plan_id, credit_installment_id, order_id, base_amount,
-            fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
-         VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $5, 'INITIATED', $6, FALSE, $7, $8, $9,
-                 $10, $11, $12, $13, $14, $15)
+              fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id,
+              idempotency_key, idempotency_fingerprint)
+           VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $5, 'INITIATED', $6, FALSE, $7, $8, $9,
+             $10, $11, $12, $13, $14, $15, $16, $17)
          RETURNING id`,
         [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedPayoutMsisdn,
           validatedPlanId, validatedInstallmentId, validatedOrderId, amount, collectionFee.chargedAmount,
-          collectionFee.chargedPayer, collectionFee.eganowCost, collectionFee.platformMargin, collectionFee.feeConfigVersionId]
+            collectionFee.chargedPayer, collectionFee.eganowCost, collectionFee.platformMargin, collectionFee.feeConfigVersionId,
+            idempotencyKey, fingerprint]
       )
       return inserted.rows[0].id
     })
   } else {
-    const { rows } = await query(
-      `INSERT INTO transactions
+    transactionId = await withTransaction(async (client) => {
+      existingTransaction = await findExistingIdempotentCollection(client, merchant.id, idempotencyKey, fingerprint)
+      if (existingTransaction) return existingTransaction.id
+      const { rows } = await client.query(
+        `INSERT INTO transactions
          (tenant_id, merchant_id, type, status, amount, currency, internal_reference, collection_msisdn, kyc_msisdn, payment_gateway_status, payout_msisdn, notification_sent,
-          base_amount, fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
-       VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $6, 'INITIATED', $7, FALSE, $8, $9, $10, $11, $12, $13)
+          base_amount, fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id,
+          idempotency_key, idempotency_fingerprint)
+       VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, $5, $6, 'INITIATED', $7, FALSE, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING id`,
-      [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedMsisdn, normalizedPayoutMsisdn,
-        amount, collectionFee.chargedAmount, collectionFee.chargedPayer, collectionFee.eganowCost,
-        collectionFee.platformMargin, collectionFee.feeConfigVersionId]
-    )
-    transactionId = rows[0].id
+        [merchant.tenant_id, merchant.id, gatewayAmount, internalReference, normalizedMsisdn, normalizedMsisdn, normalizedPayoutMsisdn,
+          amount, collectionFee.chargedAmount, collectionFee.chargedPayer, collectionFee.eganowCost,
+          collectionFee.platformMargin, collectionFee.feeConfigVersionId, idempotencyKey, fingerprint]
+      )
+      return rows[0].id
+    })
   }
 
+  if (existingTransaction) {
+    return {
+      transactionId: existingTransaction.id,
+      internalReference: existingTransaction.internal_reference,
+      status: existingTransaction.status,
+      paymentGatewayStatus: existingTransaction.payment_gateway_status,
+      failureReason: existingTransaction.failure_reason,
+      message: 'This payment request already exists. Check its status instead of submitting again.',
+      tenantId: merchant.tenant_id,
+      duplicate: true
+    }
+  }
+
+  let providerSubmissionAttempted = false
   try {
     let paypartnerCode
     const inferredPaypartnerCode = normalizedCollectionMethod === 'CARD' ? 'CARDGATEWAY' : inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
@@ -289,16 +385,17 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       kycResponse = await client.post('/api/vas/kyc', kycBody)
     } catch {
       const failureReason = 'Customer verification failed. Verify the payment details or contact support.'
-      await query(
-        `UPDATE transactions
-            SET status = 'FAILED',
-                payment_gateway_status = 'KYC_FAILED',
-                failure_reason = $2,
-                updated_at = now(),
-                completed_at = now()
-          WHERE id = $1`,
-        [transactionId, failureReason]
-      )
+      await updateTransactionStatus(query, {
+        id: transactionId,
+        type: 'COLLECTION',
+        currentStatus: 'PENDING',
+        nextStatus: 'FAILED',
+        fields: {
+          payment_gateway_status: 'KYC_FAILED',
+          failure_reason: failureReason,
+          completed_at: new Date()
+        }
+      })
 
       return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: 'KYC_FAILED', failureReason, tenantId: merchant.tenant_id }
     }
@@ -320,16 +417,17 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     if (kycExplicitFailure) {
       const reason = `KYC failed: ${kycStatus || 'DECLINED'}`
 
-      await query(
-        `UPDATE transactions
-            SET status = 'FAILED',
-                payment_gateway_status = $3,
-                failure_reason = $2,
-                updated_at = now(),
-                completed_at = now()
-          WHERE id = $1`,
-        [transactionId, reason, kycStatusStr || 'KYC_FAILED']
-      )
+      await updateTransactionStatus(query, {
+        id: transactionId,
+        type: 'COLLECTION',
+        currentStatus: 'PENDING',
+        nextStatus: 'FAILED',
+        fields: {
+          payment_gateway_status: kycStatusStr || 'KYC_FAILED',
+          failure_reason: reason,
+          completed_at: new Date()
+        }
+      })
 
       return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: kycStatusStr || 'KYC_FAILED', failureReason: reason, tenantId: merchant.tenant_id }
     } else if (kycStatus && kycStatusStr !== 'successful' && kycStatusStr !== 'success') {
@@ -372,6 +470,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     }
 
     body.amount = gatewayAmount
+    providerSubmissionAttempted = true
     const response = await client.post(normalizedCollectionMethod === 'CARD' ? '/api/transactions/card/collect' : '/api/transactions/collection', body)
 
     const normalized = normalizeEganowResponse(response.data)
@@ -407,20 +506,50 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       tenantId: merchant.tenant_id
     }
   } catch (err) {
+    if (providerSubmissionAttempted && isUncertainProviderOutcome(err)) {
+      const message = 'The payment provider outcome is not confirmed. Do not submit another payment; check this transaction status first.'
+      await updateTransactionStatus(query, {
+        id: transactionId,
+        type: 'COLLECTION',
+        currentStatus: 'PENDING',
+        nextStatus: 'PENDING',
+        fields: {
+          payment_gateway_status: 'OUTCOME_UNKNOWN',
+          failure_reason: message,
+          completed_at: null
+        }
+      })
+      try {
+        await enqueueCollectionStatusPollJob({ tenantId: merchant.tenant_id, merchantId: merchant.id, transactionId })
+      } catch (queueError) {
+        console.error('[collection] status reconciliation enqueue failed', { code: queueError?.code || 'QUEUE_ERROR' })
+      }
+      return {
+        transactionId,
+        internalReference,
+        status: 'PENDING',
+        paymentGatewayStatus: 'OUTCOME_UNKNOWN',
+        failureReason: message,
+        message,
+        tenantId: merchant.tenant_id
+      }
+    }
+
     const message = err instanceof CollectionRejectedError || err instanceof TenantCredentialsError
       ? err.message
       : 'Payment service is temporarily unavailable. Check transaction status or contact support.'
 
-    await query(
-      `UPDATE transactions
-          SET status = 'FAILED',
-              payment_gateway_status = 'REQUEST_FAILED',
-              failure_reason = $2,
-              updated_at = now(),
-              completed_at = now()
-        WHERE id = $1`,
-      [transactionId, message]
-    )
+    await updateTransactionStatus(query, {
+      id: transactionId,
+      type: 'COLLECTION',
+      currentStatus: 'PENDING',
+      nextStatus: 'FAILED',
+      fields: {
+        payment_gateway_status: 'REQUEST_FAILED',
+        failure_reason: message,
+        completed_at: new Date()
+      }
+    })
 
     return { transactionId, internalReference, status: 'FAILED', paymentGatewayStatus: 'REQUEST_FAILED', failureReason: message, tenantId: merchant.tenant_id }
   }

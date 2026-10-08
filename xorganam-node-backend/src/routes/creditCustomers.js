@@ -123,11 +123,12 @@ creditCustomerRouter.post('/plans/:planId/installments/:installmentId/collect', 
     const result = await initiateCollection(installment.merchant_id, {
       amount: Number(installment.amount_due), msisdn: req.creditCustomer.phone,
       creditPlanId: installment.plan_id, creditInstallmentId: installment.installment_id,
+      idempotencyKey: req.get('Idempotency-Key') || null,
       narration: `Credit installment ${installment.installment_id}`
     })
     res.json({ reference: result.internalReference, status: result.status, message: result.message || 'Approve the payment prompt on your phone.' })
   } catch (error) {
-    if (error instanceof CollectionRejectedError) return res.status(409).json({ message: error.message })
+    if (error instanceof CollectionRejectedError) return res.status(error.status).json({ message: error.message })
     throw error
   }
 }))
