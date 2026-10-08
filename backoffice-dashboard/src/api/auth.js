@@ -11,6 +11,7 @@ export const authApi = {
 }
 
 export const platformSecurityApi = {
+  listAuditLog: (params) => api.get('/platform/security-settings/audit-log', params),
   getMfaExemptions: () => api.get('/platform/security-settings/mfa-exemptions'),
   updateMfaExemption: (account, exempt) => api.put(
     `/platform/security-settings/mfa-exemptions/${account.type}/${account.id}`,

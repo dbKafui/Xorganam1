@@ -1,5 +1,35 @@
 import { recordCreditWebhookEvent } from './creditWebhookOutbox.js'
 import { updateCreditInstallmentStatus, updateCreditPlanStatus } from './creditStateService.js'
+import { updateTransactionStatus } from './transactionStateService.js'
+import { createVendorReference } from './referenceIds.js'
+
+export async function createManualCreditCollectionTransaction(tx, {
+  tenantId,
+  merchantId,
+  amount,
+  planId,
+  installmentId,
+  initiatedByUserId,
+  internalReference = createVendorReference('MANUAL', 'COL')
+}) {
+  const { rows } = await tx.query(
+    `INSERT INTO transactions
+       (tenant_id, merchant_id, type, status, amount, currency, internal_reference,
+        payment_gateway_status, credit_plan_id, credit_installment_id,
+        initiated_by_user_id, manually_triggered)
+     VALUES ($1, $2, 'COLLECTION', 'PENDING', $3, 'GHS', $4, 'MANUAL', $5, $6, $7, TRUE)
+     RETURNING id, internal_reference, status, payment_gateway_status`,
+    [tenantId, merchantId, amount, internalReference, planId, installmentId, initiatedByUserId]
+  )
+  const transaction = rows[0]
+  const finalized = await updateTransactionStatus(tx, {
+    id: transaction.id,
+    type: 'COLLECTION',
+    currentStatus: transaction.status,
+    nextStatus: 'RECEIVED'
+  })
+  return { ...transaction, status: finalized.status }
+}
 
 export async function markCreditInstallmentCollected(tx, collectionTransactionId) {
   const { rows } = await tx.query(

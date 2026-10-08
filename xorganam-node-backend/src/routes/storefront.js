@@ -547,15 +547,21 @@ storefrontRouter.patch('/orders/:orderId/status', requireAnyRole('TENANT_ADMIN',
   if (!['FULFILLED', 'CANCELLED'].includes(nextStatus)) return res.status(400).json({ message: 'Orders may be marked FULFILLED or CANCELLED.' })
   const branchId = req.user.role === 'TENANT_BRANCH_MANAGER' ? req.user.merchantId : null
   if (nextStatus === 'CANCELLED') {
-    const result = await withTransaction(async (tx) => {
-      const { rows } = await tx.query(
-        `SELECT id FROM orders WHERE id = $1 AND tenant_id = $2 AND ($3::uuid IS NULL OR merchant_id = $3) FOR UPDATE`,
-        [req.params.orderId, tenantId, branchId]
-      )
-      if (!rows.length) return 'NOT_FOUND'
-      const cancelled = await cancelAndRestockOrder(tx, req.params.orderId, { reason: String(req.body?.reason || 'Cancelled by vendor.').slice(0, 500) })
-      return cancelled ? 'CANCELLED' : 'CONFLICT'
-    })
+    let result
+    try {
+      result = await withTransaction(async (tx) => {
+        const { rows } = await tx.query(
+          `SELECT id FROM orders WHERE id = $1 AND tenant_id = $2 AND ($3::uuid IS NULL OR merchant_id = $3)`,
+          [req.params.orderId, tenantId, branchId]
+        )
+        if (!rows.length) return 'NOT_FOUND'
+        const cancelled = await cancelAndRestockOrder(tx, req.params.orderId, { reason: String(req.body?.reason || 'Cancelled by vendor.').slice(0, 500) })
+        return cancelled ? 'CANCELLED' : 'CONFLICT'
+      })
+    } catch (error) {
+      if (error instanceof StorefrontOrderError) return res.status(error.status).json({ message: error.message })
+      throw error
+    }
     if (result === 'NOT_FOUND') return res.status(404).json({ message: 'Order not found.' })
     if (result === 'CONFLICT') return res.status(409).json({ message: 'Only pending-payment or placed orders can be cancelled.' })
     return res.json({ id: req.params.orderId, status: 'CANCELLED' })

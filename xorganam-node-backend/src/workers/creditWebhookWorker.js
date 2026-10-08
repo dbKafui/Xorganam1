@@ -2,6 +2,7 @@ import { Queue, Worker } from 'bullmq'
 import { getRedisConnection, CREDIT_WEBHOOK_QUEUE, enqueueCreditWebhookDelivery } from '../queue/queue.js'
 import { query } from '../db/pool.js'
 import { deliverMerchantWebhook } from '../services/outboundWebhookService.js'
+import { recordOperationalFailure } from '../services/operationalFailureService.js'
 
 const connection = getRedisConnection()
 const dispatcherQueue = new Queue(CREDIT_WEBHOOK_QUEUE, { connection })
@@ -49,5 +50,7 @@ export const creditWebhookWorker = new Worker(CREDIT_WEBHOOK_QUEUE, async (job) 
 
 creditWebhookWorker.on('failed', (job, error) => {
   console.error('[credit-webhook] delivery job failed', { code: error?.code || 'WORKER_ERROR' })
+  recordOperationalFailure({ queueName: CREDIT_WEBHOOK_QUEUE, job, error })
+    .catch((persistError) => console.error('[credit-webhook] failure alert persistence failed', { code: persistError?.code || 'DB_ERROR' }))
 })
 creditWebhookWorker.on('error', (error) => console.error('[credit-webhook] worker error', { code: error?.code || 'WORKER_ERROR' }))

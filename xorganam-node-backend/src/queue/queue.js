@@ -1,6 +1,7 @@
 import { Queue } from 'bullmq'
 import IORedis from 'ioredis'
 import { env } from '../config/env.js'
+import { filterQueueFailuresByTenant } from '../services/operationalHealthService.js'
 
 // One shared Redis connection, one shared queue, used by every tenant.
 // Tenant isolation for job PROCESSING happens at the job-data level
@@ -59,6 +60,69 @@ export function getRedisHealth() {
     available: !connectError,
     error: connectError?.message || null
   }
+}
+
+export async function getQueueHealth() {
+  const queues = [
+    COLLECT_FOR_ME_QUEUE,
+    COLLECTION_STATUS_POLL_QUEUE,
+    PERIODIC_SETTLEMENT_QUEUE,
+    CREDIT_WEBHOOK_QUEUE,
+    CREDIT_REMINDER_QUEUE,
+    CREDIT_CASH_SWEEP_QUEUE,
+    INSTITUTION_LOAN_RECOVERY_QUEUE
+  ]
+
+  const entries = {}
+  for (const name of queues) {
+    try {
+      const queue = new Queue(name, { connection: getRedisConnection() })
+      entries[name] = await queue.getJobCounts('waiting', 'delayed', 'active', 'failed', 'completed')
+      await queue.close()
+    } catch (error) {
+      entries[name] = { waiting: 0, delayed: 0, active: 0, failed: 0, completed: 0, error: error?.message || 'queue unavailable' }
+    }
+  }
+  return entries
+}
+
+export async function getFailedQueueJobs(limit = 20, tenantId = null) {
+  const queues = [
+    COLLECT_FOR_ME_QUEUE,
+    COLLECTION_STATUS_POLL_QUEUE,
+    PERIODIC_SETTLEMENT_QUEUE,
+    CREDIT_WEBHOOK_QUEUE,
+    CREDIT_REMINDER_QUEUE,
+    CREDIT_CASH_SWEEP_QUEUE,
+    INSTITUTION_LOAN_RECOVERY_QUEUE
+  ]
+
+  const failures = []
+  for (const name of queues) {
+    try {
+      const queue = new Queue(name, { connection: getRedisConnection() })
+      const jobs = await queue.getFailed(0, limit)
+      for (const job of jobs) {
+        const data = job?.data || {}
+        failures.push({
+          queue: name,
+          id: String(job.id),
+          name: String(job.name || ''),
+          failedReason: String(job.failedReason || 'Unknown failure'),
+          attemptsMade: Number(job.attemptsMade || 0),
+          finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
+          tenantId: data.tenantId || null,
+          merchantId: data.merchantId || null,
+          transactionId: data.transactionId || null
+        })
+      }
+      await queue.close()
+    } catch {
+      // Failures are reported by the health summary when the queue is unavailable.
+    }
+  }
+  const scopedFailures = filterQueueFailuresByTenant(failures, tenantId)
+  return scopedFailures.sort((a, b) => new Date(b.finishedAt || 0) - new Date(a.finishedAt || 0)).slice(0, limit)
 }
 
 function makeSafeJobId(prefix, id) {

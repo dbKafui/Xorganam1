@@ -6,8 +6,9 @@ import { sendMerchantSms } from '../services/notificationService.js'
 import { refreshSplitParentStatus } from '../services/splitPaymentService.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
-import { updateTransactionStatus } from '../services/transactionStateService.js'
+import { MAX_SPLIT_PAYOUT_RETRIES, updateTransactionStatus } from '../services/transactionStateService.js'
 import { updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
+import { recordOperationalFailure } from '../services/operationalFailureService.js'
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10)
 const POLL_DELAY_MS = parseInt(process.env.COLLECTION_STATUS_POLL_DELAY_MS || '5000', 10)
@@ -57,30 +58,32 @@ async function markCollectionFailed(transactionId, reason, gatewayStatus = null,
 }
 
 async function markGenericFailed(transactionId, reason, gatewayStatus = null, currentStatus = 'PENDING') {
-  await updateTransactionStatus(query, {
-    id: transactionId,
-    type: 'PAYOUT',
-    currentStatus,
-    nextStatus: 'FAILED',
-    fields: {
-      payment_gateway_status: gatewayStatus,
-      failure_reason: reason,
-      completed_at: new Date()
+  await withTransaction(async (client) => {
+    await updateTransactionStatus(client, {
+      id: transactionId,
+      type: 'PAYOUT',
+      currentStatus,
+      nextStatus: 'FAILED',
+      fields: {
+        payment_gateway_status: gatewayStatus,
+        failure_reason: reason,
+        completed_at: new Date()
+      }
+    })
+    const { rows } = await client.query(
+      `SELECT id, institution_id, status FROM institution_transactions
+        WHERE counterparty_transaction_id = $1 FOR UPDATE`, [transactionId]
+    )
+    for (const row of rows) {
+      await updateInstitutionTransactionStatus(client, {
+        id: row.id,
+        institutionId: row.institution_id,
+        currentStatus: row.status,
+        nextStatus: 'FAILED',
+        fields: {}
+      })
     }
   })
-  const { rows } = await query(
-    `SELECT id, institution_id, status FROM institution_transactions
-      WHERE counterparty_transaction_id = $1`, [transactionId]
-  )
-  for (const row of rows) {
-    await updateInstitutionTransactionStatus(query, {
-      id: row.id,
-      institutionId: row.institution_id,
-      currentStatus: row.status,
-      nextStatus: 'FAILED',
-      fields: {}
-    })
-  }
 }
 
 async function findRootCollectionId(transactionId) {
@@ -123,26 +126,28 @@ async function markInternalTransferSuccessful(txn, gatewayStatus) {
 }
 
 async function markPayoutSuccessful(txn, gatewayStatus) {
-  await updateTransactionStatus(query, {
-    id: txn.id,
-    type: 'PAYOUT',
-    currentStatus: txn.status,
-    nextStatus: 'PAID_OUT',
-    fields: { payment_gateway_status: gatewayStatus, completed_at: new Date() }
-  })
-  const { rows } = await query(
-    `SELECT id, institution_id, status FROM institution_transactions
-      WHERE counterparty_transaction_id = $1`, [txn.id]
-  )
-  for (const row of rows) {
-    await updateInstitutionTransactionStatus(query, {
-      id: row.id,
-      institutionId: row.institution_id,
-      currentStatus: row.status,
-      nextStatus: 'RECEIVED',
-      fields: { eganow_reference: txn.eganow_reference || null }
+  await withTransaction(async (client) => {
+    await updateTransactionStatus(client, {
+      id: txn.id,
+      type: 'PAYOUT',
+      currentStatus: txn.status,
+      nextStatus: 'PAID_OUT',
+      fields: { payment_gateway_status: gatewayStatus, completed_at: new Date() }
     })
-  }
+    const { rows } = await client.query(
+      `SELECT id, institution_id, status FROM institution_transactions
+        WHERE counterparty_transaction_id = $1 FOR UPDATE`, [txn.id]
+    )
+    for (const row of rows) {
+      await updateInstitutionTransactionStatus(client, {
+        id: row.id,
+        institutionId: row.institution_id,
+        currentStatus: row.status,
+        nextStatus: 'RECEIVED',
+        fields: { eganow_reference: txn.eganow_reference || null }
+      })
+    }
+  })
 
   const rootCollectionId = await findRootCollectionId(txn.id)
   if (rootCollectionId) {
@@ -225,13 +230,12 @@ async function processCollectionStatusPollJob(job) {
         await markGenericFailed(transactionId, message, result.status)
         if (txn.type === 'PAYOUT' && ['VENDOR', 'INSTITUTION'].includes(txn.payout_leg)) {
           const { rows: retryRows } = await query(
-            `UPDATE transactions SET payout_retry_count = payout_retry_count + 1, updated_at = now()
-              WHERE id = $1 RETURNING payout_retry_count`, [transactionId]
+            'SELECT payout_retry_count FROM transactions WHERE id = $1', [transactionId]
           )
           const rootCollectionId = await findRootCollectionId(transactionId)
           const retryCount = Number(retryRows[0]?.payout_retry_count || 0)
-          if (rootCollectionId && retryCount < 5) {
-            await enqueueCollectForMeJob({ tenantId, merchantId, transactionId: rootCollectionId, retryToken: `split-retry-${txn.id}-${retryCount}` })
+          if (rootCollectionId && retryCount < MAX_SPLIT_PAYOUT_RETRIES) {
+            await enqueueCollectForMeJob({ tenantId, merchantId, transactionId: rootCollectionId, retryToken: `split-retry-${txn.id}-${retryCount + 1}` })
           } else if (rootCollectionId) {
             await refreshSplitParentStatus(rootCollectionId, true)
           }
@@ -309,6 +313,8 @@ export const collectionStatusPollWorker = new Worker(
 collectionStatusPollWorker.on('failed', (job, err) => {
   if (job.attemptsMade >= job.opts.attempts) {
     console.error('[status-poll] job exhausted retries', { attempts: job.attemptsMade, code: err?.code || 'WORKER_ERROR' })
+    recordOperationalFailure({ queueName: COLLECTION_STATUS_POLL_QUEUE, job, error: err })
+      .catch((error) => console.error('[status-poll] failure alert persistence failed', { code: error?.code || 'DB_ERROR' }))
   }
 })
 

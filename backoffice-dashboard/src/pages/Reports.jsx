@@ -19,7 +19,13 @@ function reportSections(report, title) {
         ['Collections', report.collectionCount],
         ['Successful', report.successfulCount],
         ['Pending', report.pendingCount],
-        ['Failed', report.failedCount]
+        ['Failed', report.failedCount],
+        ['Pending accrual', money(report.pendingAccrualAmount)],
+        ['Swept accrual', money(report.sweptAccrualAmount)],
+        ['Pending settlement', money(report.pendingSettlementAmount)],
+        ['Settled', money(report.settledAmount)],
+        ['Allocated', money(report.allocatedAmount)],
+        ['Unresolved reconciliation flags', report.unresolvedFlagCount]
       ]
     }
   ]
@@ -235,7 +241,20 @@ export default function Reports() {
               <div><strong>Failed:</strong> <span className="mono">{report.failedCount}</span></div>
               <div><strong>Fees:</strong> <span className="mono">GHS {money(report.totalFees)}</span></div>
               <div><strong>Net revenue:</strong> <span className="mono">GHS {money(report.netRevenue)}</span></div>
+              <div><strong>Pending financial movement:</strong> <span className="mono">GHS {money(report.pendingFinancialMovement)}</span></div>
+              <div><strong>Pending accrual:</strong> <span className="mono">GHS {money(report.pendingAccrualAmount)}</span></div>
+              <div><strong>Swept accrual:</strong> <span className="mono">GHS {money(report.sweptAccrualAmount)}</span></div>
+              <div><strong>Pending settlement:</strong> <span className="mono">GHS {money(report.pendingSettlementAmount)}</span></div>
+              <div><strong>Settled:</strong> <span className="mono">GHS {money(report.settledAmount)}</span></div>
+              <div><strong>Allocated:</strong> <span className="mono">GHS {money(report.allocatedAmount)}</span></div>
+              <div><strong>Unresolved reconciliation flags:</strong> <span className="mono">{report.unresolvedFlagCount}</span></div>
             </div>
+            {report.reconciliationRequiresReview && (
+              <div className="status-banner warning">
+                <span className="status-icon">!</span>
+                <span>{report.reconciliationWarnings?.[0] || 'Financial reconciliation requires review.'}</span>
+              </div>
+            )}
           </div>
         </>
       )}

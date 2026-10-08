@@ -195,6 +195,26 @@ controls or an antivirus scanner. Confirm the migration ledger in the target dat
 provider transaction/recovery exercises before enabling real payments. Dependency audit results
 are specific to the checked lockfile and must be repeated for each release.
 
+Apply ordered SQL migrations with `npm run db:migrate` when upgrading an existing database. The
+split-payout retry guard in `db/20261225_guard_split_payout_retries.sql` is required for this release:
+it permits only bounded retries of split payout legs, with a fresh provider reference and synchronized
+institution status. Run at least one collection worker after deployment so queued status polls and
+split-payout retries are processed.
+
+The permission-expiry feature requires `db/20261226_add_user_permission_expiration.sql`; apply it
+before deploying the permission-management UI/API update. Existing custom grants remain non-expiring.
+
+Transaction audit timelines require `db/20261227_add_transaction_status_history.sql`. The migration
+backfills current transaction states and records future initial and status-transition events as
+append-only rows, exposed on the operator transaction detail view.
+
+Durable worker alerts require `db/20261228_add_operational_failure_alerts.sql`. Exhausted worker
+jobs are stored without raw provider payloads, visible only within their tenant (or globally to
+platform admins), and must be resolved with an audited operator note.
+
+Set `SECURITY_SCHEMA_TEST_DATABASE_URL` to a migrated PostgreSQL test database to run the append-only
+security and transaction-history integration tests; without it, those database tests are skipped.
+
 ## Webhook listener (`src/routes/webhooks.js`)
 
 Parses Eganow's documented `TransactionId`, `TransactionStatus`, and `EganowReferenceNo` fields,

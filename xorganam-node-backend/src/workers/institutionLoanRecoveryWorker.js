@@ -11,6 +11,7 @@ import {
 import { createVendorReference } from '../services/referenceIds.js'
 import { updateTransactionStatus } from '../services/transactionStateService.js'
 import { updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
+import { recordOperationalFailure } from '../services/operationalFailureService.js'
 
 const connection = getRedisConnection()
 const scheduler = new Queue(INSTITUTION_LOAN_RECOVERY_QUEUE, { connection })
@@ -330,3 +331,7 @@ export const institutionLoanRecoveryWorker = new Worker(INSTITUTION_LOAN_RECOVER
 }, { connection, concurrency: 1 })
 
 institutionLoanRecoveryWorker.on('error', (error) => console.error('[institution-loan-recovery] worker error', { code: error?.code || 'WORKER_ERROR' }))
+institutionLoanRecoveryWorker.on('failed', (job, error) => {
+  recordOperationalFailure({ queueName: INSTITUTION_LOAN_RECOVERY_QUEUE, job, error })
+    .catch((persistError) => console.error('[institution-loan-recovery] failure alert persistence failed', { code: persistError?.code || 'DB_ERROR' }))
+})

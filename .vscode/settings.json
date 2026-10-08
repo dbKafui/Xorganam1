@@ -11,6 +11,27 @@
         "/^node --test --test-concurrency=1 \\./test/creditStateService\\.test\\.js \\./test/transactionStateIntegrity\\.test\\.js \\./test/creditPolicyIntegrity\\.test\\.js \\./test/reportReconciliation\\.test\\.js$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^node --test --test-concurrency=1 \\./test/permissionAudit\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "npm run build": true,
+        "/^cd /Users/eyramcarter/Documents/GitHub/Xorganam1/xorganam-node-backend && node --test --test-concurrency=1 \\./test/permissionAudit\\.test\\.js \\./test/auditService\\.test\\.js \\./test/permissionsContract\\.test\\.js && npm test$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --test --test-concurrency=1 \\./test/reportReconciliation\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /Users/eyramcarter/Documents/GitHub/Xorganam1/xorganam-node-backend && node --test --test-concurrency=1 \\./test/reportReconciliation\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --test --test-concurrency=1 \\./test/\\*\\.test\\.js && npm run lint$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

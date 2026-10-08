@@ -40,51 +40,51 @@ async function computeTotals(whereClause, params) {
   return rows[0]
 }
 
-async function computeLedgerTotals({ merchantId = null, tenantId = null } = {}) {
+async function computeLedgerTotals({ merchantId = null, tenantId = null, includeAll = false } = {}) {
   const { rows } = await query(
     `SELECT
       COALESCE((
         SELECT SUM(accrued_amount)
         FROM periodic_accrual_ledger
-        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'PENDING')
-           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'PENDING')
+          WHERE ($3::BOOLEAN OR ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'PENDING')
+            OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'PENDING'))
       ), 0) AS pending_accrual_amount,
       COALESCE((
         SELECT SUM(accrued_amount)
         FROM periodic_accrual_ledger
-        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'SWEPT')
-           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'SWEPT')
+          WHERE ($3::BOOLEAN OR ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'SWEPT')
+            OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'SWEPT'))
       ), 0) AS swept_accrual_amount,
       COALESCE((
         SELECT SUM(institution_amount)
         FROM institution_sweep_ledger
-        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'PENDING')
-           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'PENDING')
+          WHERE ($3::BOOLEAN OR ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'PENDING')
+            OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'PENDING'))
       ), 0) AS pending_settlement_amount,
       COALESCE((
         SELECT SUM(institution_amount)
         FROM institution_sweep_ledger
-        WHERE ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'SETTLED')
-           OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'SETTLED')
+          WHERE ($3::BOOLEAN OR ($1::UUID IS NOT NULL AND merchant_id = $1 AND status = 'SETTLED')
+            OR ($2::UUID IS NOT NULL AND tenant_id = $2 AND status = 'SETTLED'))
       ), 0) AS settled_amount,
       COALESCE((
         SELECT SUM(a.amount_cents) / 100.0
         FROM institution_split_financial_allocations a
-        WHERE ($1::UUID IS NOT NULL AND a.institution_id IN (
-          SELECT institution_id FROM tenant_institution_links WHERE merchant_id = $1
-        )) OR ($2::UUID IS NOT NULL AND a.institution_id IN (
-          SELECT institution_id FROM tenant_institution_links WHERE tenant_id = $2
-        ))
+        JOIN transactions sweep ON sweep.id = a.sweep_transaction_id
+        WHERE $3::BOOLEAN
+           OR ($1::UUID IS NOT NULL AND sweep.merchant_id = $1)
+           OR ($2::UUID IS NOT NULL AND sweep.tenant_id = $2)
       ), 0) AS allocated_amount,
       COALESCE((
         SELECT COUNT(*)
         FROM order_payment_reconciliation_flags f
         JOIN orders o ON o.id = f.order_id
-        WHERE ($1::UUID IS NOT NULL AND o.merchant_id = $1 AND f.resolved_at IS NULL)
-           OR ($2::UUID IS NOT NULL AND o.tenant_id = $2 AND f.resolved_at IS NULL)
+          WHERE f.resolved_at IS NULL AND ($3::BOOLEAN
+            OR ($1::UUID IS NOT NULL AND o.merchant_id = $1)
+            OR ($2::UUID IS NOT NULL AND o.tenant_id = $2))
       ), 0) AS unresolved_flag_count
     `,
-    [merchantId, tenantId]
+    [merchantId, tenantId, includeAll]
   )
   return rows[0]
 }
@@ -201,6 +201,8 @@ reportsRouter.get(
     )
 
     const totals = await computeTotals('TRUE', [])
+    const ledgerTotals = await computeLedgerTotals({ includeAll: true })
+    const summary = buildReportSummary({ transactionTotals: totals, ledgerTotals })
 
     const topTenants = await query(
       `SELECT t.id, t.company_name,
@@ -217,6 +219,7 @@ reportsRouter.get(
       totalActiveTenants: Number(tenantCounts.rows[0].active_tenants),
       totalPendingTenants: Number(tenantCounts.rows[0].pending_tenants),
       ...mapTotals(totals),
+      ...summary,
       topTenantsByVolume: topTenants.rows.map((r) => ({
         tenantId: r.id,
         companyName: r.company_name,

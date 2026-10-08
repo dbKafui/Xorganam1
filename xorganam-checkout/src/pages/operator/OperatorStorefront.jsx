@@ -156,7 +156,7 @@ export default function OperatorStorefront() {
   }
 
   async function updateOrder(order, status) {
-    if (status === 'CANCELLED' && !window.confirm('Cancel this order and release its reserved stock? A payment already collected is not automatically refunded.')) return
+    if (status === 'CANCELLED' && !window.confirm('Cancel this order and release its reserved stock? Orders with pending or completed payments require reconciliation and refund review first.')) return
     setBusy(true); setError(''); setNotice('')
     try { await operatorApi.updateStorefrontOrderStatus(order.id, status, status === 'CANCELLED' ? 'Cancelled by vendor.' : undefined); setNotice(`Order marked ${status.toLowerCase()}.`); await refresh() }
     catch (requestError) { setError(requestError.message) }

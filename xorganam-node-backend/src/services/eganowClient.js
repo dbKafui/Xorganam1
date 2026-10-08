@@ -366,7 +366,7 @@ async function withRetry(fn, { tenantId, operation, retries = 3 }) {
 /**
  * Internal transfer: merchant's collection account -> payout account.
  */
-export async function sweepToPayoutAccount(tenantId, { amount, network: _network, narration, merchantId = null }) {
+export async function sweepToPayoutAccount(tenantId, { reference, amount, network: _network, narration, merchantId = null }) {
   const { client } = merchantId
     ? await createEganowClientForMerchant(tenantId, merchantId)
     : await createEganowClientForTenant(tenantId)
@@ -377,6 +377,7 @@ export async function sweepToPayoutAccount(tenantId, { amount, network: _network
       const payload = {
         narration: narrationValue,
         TransactionAmount: amount,
+        transactionId: reference,
         countryCode: 'GH0233',
         languageId: 'en'
       }

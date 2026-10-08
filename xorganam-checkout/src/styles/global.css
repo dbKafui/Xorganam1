@@ -229,6 +229,144 @@ body {
   margin-bottom: 16px;
 }
 
+.connection-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border: 1px solid var(--muted-soft);
+  border-radius: 4px;
+  background: var(--amber-soft);
+  color: #634a18;
+  font-size: 13px;
+}
+
+.connection-banner.offline,
+.connection-banner.degraded {
+  border-color: var(--red-soft);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.connection-banner button {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 6px 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.settlement-visual-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  padding: 18px 0;
+  margin-bottom: 12px;
+  border-block: 1px solid var(--muted-soft);
+}
+
+.settlement-visual-summary h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+}
+
+.settlement-status-row,
+.settlement-accrual-row {
+  display: grid;
+  grid-template-columns: minmax(105px, 1fr) minmax(70px, 2fr) 32px;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  font-size: 12px;
+}
+
+.settlement-accrual-row {
+  grid-template-columns: 1fr auto;
+  margin: 8px 0;
+}
+
+.settlement-bar-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--muted-soft);
+}
+
+.settlement-bar {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  background: #277e72;
+  transition: width 180ms ease-out;
+}
+
+.settlement-bar.pending { background: #c88a2d; }
+.settlement-bar.accrued_unswept { background: #9c653b; }
+.settlement-bar.partially_settled { background: #497da3; }
+.settlement-bar.settled { background: #277e72; }
+
+.bulk-permission-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.transaction-history {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.transaction-history li {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--muted-soft);
+}
+
+.transaction-history-marker {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #277e72;
+}
+
+.operational-failure-resolution {
+  display: flex;
+  gap: 8px;
+  min-width: 260px;
+}
+
+.operational-failure-resolution input {
+  min-width: 0;
+  flex: 1;
+}
+
+.transaction-history small,
+.transaction-history time {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 700px) {
+  .settlement-visual-summary { grid-template-columns: 1fr; }
+  .bulk-permission-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 600px) {
+  .connection-banner { align-items: flex-start; flex-direction: column; }
+  .bulk-permission-grid { grid-template-columns: 1fr; }
+}
+
 .status-banner.pending {
   background: var(--amber-soft);
   color: #8a6425;

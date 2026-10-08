@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { env } from '../config/env.js'
 import { query, withTransaction } from '../db/pool.js'
+import { CREDIT_PLAN_CANCELLABLE_STATUSES, updateCreditPlanStatus } from './creditStateService.js'
 
 function normalizeMsisdn(value) {
   const digits = String(value || '').trim().replace(/\D/g, '')
@@ -49,6 +50,23 @@ export const PREVENTED_ORDER_CANCELLATION_STATUS = {
 
 export function assertStorefrontOrderCancellationAllowed(status) {
   return !PREVENTED_ORDER_CANCELLATION_STATUS[status]
+}
+
+export function isOrderPaymentSafeToCancel(paymentStatus) {
+  return paymentStatus === null || paymentStatus === undefined || paymentStatus === 'FAILED'
+}
+
+export function isOrderCancellationSafe({
+  paymentStatus,
+  unresolvedReconciliation = false,
+  creditPlanStatus = null,
+  hasPaidInstallments = false
+}) {
+  return isOrderPaymentSafeToCancel(paymentStatus)
+    && !unresolvedReconciliation
+    && (!creditPlanStatus || (
+      CREDIT_PLAN_CANCELLABLE_STATUSES.includes(creditPlanStatus) && !hasPaidInstallments
+    ))
 }
 
 export function orderFingerprint({ slug, itemMap, customerIdentifier, customerName, fulfillmentType, address, merchantId, paymentMethod, collectionMethod }) {
@@ -268,6 +286,12 @@ export async function createStorefrontOrder(slug, input) {
 
 export async function cancelAndRestockOrder(tx, orderId, { onlyPending = false, reason = null } = {}) {
   const statuses = onlyPending ? ['PENDING_PAYMENT'] : ['PENDING_PAYMENT', 'PLACED']
+  const { rows: paymentRows } = await tx.query(
+    `SELECT id, status FROM transactions
+      WHERE order_id = $1 AND type = 'COLLECTION'
+      ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+    [orderId]
+  )
   const { rows } = await tx.query(
     `SELECT id, tenant_id, merchant_id, credit_plan_id, status
        FROM orders
@@ -276,6 +300,28 @@ export async function cancelAndRestockOrder(tx, orderId, { onlyPending = false, 
   const order = rows[0]
   if (!order || !assertStorefrontOrderCancellationAllowed(order.status)) return false
   if (!statuses.includes(order.status)) return false
+  const { rows: reconciliationRows } = await tx.query(
+    `SELECT 1 FROM order_payment_reconciliation_flags
+      WHERE order_id = $1 AND resolved_at IS NULL LIMIT 1`,
+    [order.id]
+  )
+  let creditPlan = null
+  if (order.credit_plan_id) {
+    const { rows: planRows } = await tx.query(
+      `SELECT p.id, p.status,
+              EXISTS (SELECT 1 FROM credit_plan_installments i WHERE i.credit_plan_id = p.id AND i.status = 'PAID') AS has_paid_installments
+         FROM credit_plans p WHERE p.id = $1 FOR UPDATE OF p`, [order.credit_plan_id]
+    )
+    creditPlan = planRows[0]
+  }
+  if (!isOrderCancellationSafe({
+    paymentStatus: paymentRows[0]?.status,
+    unresolvedReconciliation: reconciliationRows.length > 0,
+    creditPlanStatus: creditPlan?.status || null,
+    hasPaidInstallments: Boolean(creditPlan?.has_paid_installments)
+  })) {
+    throw new StorefrontOrderError('Payment, reconciliation, or credit-plan history requires review before cancellation or stock release.', 409)
+  }
   const updated = await tx.query(
     `UPDATE orders SET status = 'CANCELLED', updated_at = now()
       WHERE id = $1 AND status = $2
@@ -299,8 +345,12 @@ export async function cancelAndRestockOrder(tx, orderId, { onlyPending = false, 
     if (!rowCount && stock[0] && !stock[0].unlimited_stock) throw new Error('Order inventory could not be released; cancellation was rolled back.')
     if (!stock[0]) throw new Error('Order inventory record is missing; cancellation was rolled back.')
   }
-  if (order.credit_plan_id) {
-    await tx.query(`UPDATE credit_plans SET status = 'CANCELLED' WHERE id = $1 AND status = 'ACTIVE'`, [order.credit_plan_id])
+  if (creditPlan) {
+    await updateCreditPlanStatus(tx, {
+      id: creditPlan.id,
+      currentStatus: creditPlan.status,
+      nextStatus: 'CANCELLED'
+    })
   }
   if (reason) await tx.query(`UPDATE orders SET cancellation_reason = $2 WHERE id = $1`, [order.id, reason])
   return true

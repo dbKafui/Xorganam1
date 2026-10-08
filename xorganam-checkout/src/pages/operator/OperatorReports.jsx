@@ -18,7 +18,13 @@ function reportSections(report, title) {
         ['Collections', report.collectionCount],
         ['Successful', report.successfulCount],
         ['Pending', report.pendingCount],
-        ['Failed', report.failedCount]
+        ['Failed', report.failedCount],
+        ['Pending accrual', money(report.pendingAccrualAmount)],
+        ['Swept accrual', money(report.sweptAccrualAmount)],
+        ['Pending settlement', money(report.pendingSettlementAmount)],
+        ['Settled', money(report.settledAmount)],
+        ['Allocated', money(report.allocatedAmount)],
+        ['Unresolved reconciliation flags', report.unresolvedFlagCount]
       ]
     }
   ]
@@ -199,6 +205,11 @@ export default function OperatorReports() {
             <div className="kv-row"><span>Fees</span><span className="mono">GHS {money(report.totalFees)}</span></div>
             <div className="kv-row"><span>Pending financial movement</span><span className="mono">GHS {money(report.pendingFinancialMovement)}</span></div>
             <div className="kv-row"><span>Finalized financial movement</span><span className="mono">GHS {money(report.finalizedFinancialMovement)}</span></div>
+            <div className="kv-row"><span>Pending accrual</span><span className="mono">GHS {money(report.pendingAccrualAmount)}</span></div>
+            <div className="kv-row"><span>Swept accrual</span><span className="mono">GHS {money(report.sweptAccrualAmount)}</span></div>
+            <div className="kv-row"><span>Pending settlement</span><span className="mono">GHS {money(report.pendingSettlementAmount)}</span></div>
+            <div className="kv-row"><span>Settled</span><span className="mono">GHS {money(report.settledAmount)}</span></div>
+            <div className="kv-row"><span>Allocated</span><span className="mono">GHS {money(report.allocatedAmount)}</span></div>
             <div className="kv-row"><span>Unresolved reconciliation flags</span><span className="mono">{report.unresolvedFlagCount}</span></div>
             {report.reconciliationRequiresReview && (
               <div className="status-banner warning">

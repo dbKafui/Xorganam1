@@ -8,6 +8,7 @@ const {
   isValidPermissionType,
   hasPermission
 } = await import('../src/constants/permissions.js')
+const { normalizePermissionExpiry } = await import('../src/services/permissionPolicy.js')
 
 describe('permission contract', () => {
   it('accepts the canonical permission registry and rejects unknown values', () => {
@@ -28,5 +29,22 @@ describe('permission contract', () => {
     assert.equal(hasPermission('TENANT_MANAGER', [{ permissionType: PERMISSION_TYPES.MANAGE_MERCHANTS, resourceId: 'merchant-1' }], PERMISSION_TYPES.MANAGE_MERCHANTS, 'merchant-1'), true)
     assert.equal(hasPermission('TENANT_MANAGER', [{ permissionType: PERMISSION_TYPES.MANAGE_MERCHANTS, resourceId: 'merchant-2' }], PERMISSION_TYPES.MANAGE_MERCHANTS, 'merchant-1'), false)
     assert.equal(hasPermission('TENANT_MANAGER', [], PERMISSION_TYPES.VIEW_REPORTS), true)
+  })
+
+  it('does not authorize expired custom permissions', () => {
+    const expiresAt = new Date(Date.now() - 60_000).toISOString()
+    assert.equal(hasPermission('TENANT_VIEWER', [{
+      permissionType: PERMISSION_TYPES.MANAGE_MERCHANTS,
+      resourceId: null,
+      expiresAt
+    }], PERMISSION_TYPES.MANAGE_MERCHANTS), false)
+  })
+
+  it('accepts only future timezone-qualified permission expiry timestamps', () => {
+    const now = new Date('2026-10-08T00:00:00.000Z')
+    assert.equal(normalizePermissionExpiry(null, now), null)
+    assert.equal(normalizePermissionExpiry('2026-10-09T12:00:00.000Z', now), '2026-10-09T12:00:00.000Z')
+    assert.throws(() => normalizePermissionExpiry('2026-10-07T12:00:00.000Z', now), /future/)
+    assert.throws(() => normalizePermissionExpiry('2026-10-09T12:00:00', now), /timezone/)
   })
 })

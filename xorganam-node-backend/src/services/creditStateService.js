@@ -4,6 +4,7 @@ const CREDIT_PLAN_STATUS_TRANSITIONS = new Set([
   'OVERDUE->DEFAULTED',
   'ACTIVE->COMPLETED',
   'ACTIVE->DEFAULTED',
+  'DEFAULTED->COMPLETED',
   'ACTIVE->CANCELLED',
   'OVERDUE->CANCELLED'
 ])
@@ -17,6 +18,8 @@ export const PREVENTED_CREDIT_PLAN_CANCELLATION = {
 }
 
 const CREDIT_PLAN_STATUSES = new Set(['ACTIVE', 'COMPLETED', 'OVERDUE', 'DEFAULTED', 'CANCELLED'])
+export const CREDIT_PLAN_PAYMENT_STATUSES = Object.freeze(['ACTIVE', 'OVERDUE', 'DEFAULTED'])
+export const CREDIT_PLAN_CANCELLABLE_STATUSES = Object.freeze(['ACTIVE', 'OVERDUE'])
 const CREDIT_INSTALLMENT_STATUSES = new Set(['PENDING', 'PAID', 'OVERDUE'])
 const CREDIT_INSTALLMENT_TRANSITIONS = new Set([
   'PENDING->PAID',
@@ -64,7 +67,7 @@ export async function updateCreditPlanStatus(client, { id, currentStatus, nextSt
   const values = []
 
   for (const [column, value] of Object.entries(fields)) {
-    assignments.push(`${column} = $${values.length + 3}`)
+    assignments.push(`${column} = $${values.length + 4}`)
     values.push(value)
   }
 
@@ -89,7 +92,7 @@ export async function updateCreditInstallmentStatus(client, { id, currentStatus,
   const values = []
 
   for (const [column, value] of Object.entries(fields)) {
-    assignments.push(`${column} = $${values.length + 3}`)
+    assignments.push(`${column} = $${values.length + 4}`)
     values.push(value)
   }
 

@@ -69,6 +69,14 @@ export const api = {
     if (!response.ok) throw new ApiError('Backend health check failed.', response.status)
     return response.json()
   },
+  readiness: async () => {
+    const origin = BASE_URL.replace(/\/api\/v1\/?$/, '')
+    const response = await fetch(`${origin}/ready`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+    if (!response.ok) throw new ApiError('Backend dependencies are unavailable.', response.status)
+    return response.json()
+  },
+  listOperationalFailures: (params = {}) => request('/operations/failures', { params }),
+  resolveOperationalFailure: (failureId, resolutionNote) => request(`/operations/failures/${failureId}/resolve`, { method: 'POST', body: { resolutionNote } }),
   get: (path, params) => request(path, { method: 'GET', params }),
   post: (path, body) => request(path, { method: 'POST', body }),
   put: (path, body) => request(path, { method: 'PUT', body }),

@@ -29,6 +29,7 @@ import { ForbiddenError } from './middleware/auth.js'
 import { getRedisConnection } from './queue/queue.js'
 import { mfaRouter } from './routes/mfa.js'
 import { platformSecurityRouter } from './routes/platformSecurity.js'
+import { operationsRouter } from './routes/operations.js'
 import { sanitizeInput } from './middleware/sanitizeInput.js'
 import { defaultObservability } from './lib/observability.js'
 import './workers/eganowTokenRefreshWorker.js'
@@ -222,6 +223,7 @@ app.use('/api/v1/merchants', merchantsRouter)
 app.use('/api/v1/transactions', transactionsRouter)
 app.use('/api/v1/reports', reportsRouter)
 app.use('/api/v1/users', usersRouter)
+app.use('/api/v1/operations', operationsRouter)
 app.use('/api/v1/settlement-config', settlementConfigRouter)
 app.use('/api/v1/tenant-institution-links', tenantInstitutionLinksRouter)
 app.use('/api/v1/tenant-portal', tenantPortalRouter)

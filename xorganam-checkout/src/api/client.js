@@ -13,6 +13,13 @@ export class ApiError extends Error {
   }
 }
 
+async function checkReadiness() {
+  const origin = BASE_URL.replace(/\/api\/v1\/?$/, '')
+  const response = await fetch(`${origin}/ready`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+  if (!response.ok) throw new ApiError('Backend dependencies are unavailable.', response.status)
+  return response.json()
+}
+
 function getToken() {
   const legacyToken = localStorage.getItem(TOKEN_KEY)
   if (legacyToken) {
@@ -136,6 +143,7 @@ export const operatorAuth = {
 // Operator portal - everything a Tenant's staff can do once logged in.
 // =====================================================================
 export const operatorApi = {
+  checkReadiness,
   listInstitutionFinanceProducts: (tenantId) => request('/tenant-portal/institution-finance/products', { params: { tenantId }, auth: true }),
   listInstitutionFinanceCustomers: (tenantId) => request('/tenant-portal/institution-finance/customers', { params: { tenantId }, auth: true }),
   listInstitutionFinanceVendorLinks: (tenantId) => request('/tenant-portal/institution-finance/vendor-links', { params: { tenantId }, auth: true }),
@@ -167,6 +175,10 @@ export const operatorApi = {
   deactivateTenantInstitutionLink: (linkId, tenantId) => request(`/tenant-institution-links/${linkId}`, { method: 'DELETE', params: { tenantId }, auth: true }),
   listNotifications: () => request('/notifications', { auth: true }),
   markNotificationRead: (notificationId) => request(`/notifications/${notificationId}/read`, { method: 'PATCH', auth: true }),
+  getOperationalHealth: (tenantId) => request('/operations/health', { params: { tenantId }, auth: true }),
+  getFailedQueueJobs: (tenantId, limit = 20) => request('/operations/health/failures', { params: { tenantId, limit }, auth: true }),
+  getOperationalFailures: (tenantId, limit = 50) => request('/operations/failures', { params: { tenantId, limit }, auth: true }),
+  resolveOperationalFailure: (failureId, tenantId, resolutionNote) => request(`/operations/failures/${failureId}/resolve`, { method: 'POST', body: { tenantId, resolutionNote }, auth: true }),
   getSplitRules: (params) => request('/tenant-portal/split-rules', { params, auth: true }),
   saveDefaultSplitRule: (payload) => request('/tenant-portal/split-rules/default', { method: 'PUT', body: payload, auth: true }),
   saveSplitRule: (merchantId, payload) => request(`/tenant-portal/split-rules/${merchantId}`, { method: 'PUT', body: payload, auth: true }),
@@ -224,6 +236,8 @@ export const operatorApi = {
   assignMerchant: (userId, merchantId) => request(`/users/${userId}/assign-merchant`, { method: 'POST', body: { merchantId }, auth: true }),
   unassignMerchant: (userId) => request(`/users/${userId}/unassign-merchant`, { method: 'POST', auth: true }),
   listUserPermissions: (userId) => request(`/users/${userId}/permissions`, { auth: true }),
+  listUserPermissionHistory: (userId) => request(`/users/${userId}/permissions/history`, { auth: true }),
   grantPermission: (userId, payload) => request(`/users/${userId}/permissions`, { method: 'POST', body: payload, auth: true }),
+  grantPermissionBulk: (payload) => request('/users/permissions/bulk', { method: 'POST', body: payload, auth: true }),
   revokePermission: (userId, permissionId) => request(`/users/${userId}/permissions/${permissionId}`, { method: 'DELETE', auth: true })
 }

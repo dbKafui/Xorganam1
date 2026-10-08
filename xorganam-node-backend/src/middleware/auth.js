@@ -163,6 +163,7 @@ export async function userHasPermission(userId, permissionType, resourceId = nul
       WHERE user_id = $1
         AND permission_type = $2
         AND (resource_id IS NULL OR ($3::uuid IS NOT NULL AND resource_id = $3))
+        AND (expires_at IS NULL OR expires_at > now())
       LIMIT 1`,
     [userId, permissionType, resourceId]
   )

@@ -4,6 +4,8 @@ import { query, withTransaction } from '../db/pool.js'
 import { authenticate, requirePlatformAdmin } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { hashPassword } from '../security/password.js'
+import { writePlatformAudit } from '../services/auditService.js'
+import { hasCompleteInstitutionVerification, normalizeInstitutionVerificationChecks } from '../services/institutionOnboardingPolicy.js'
 
 export const institutionOnboardingPublicRouter = Router()
 export const institutionOnboardingAdminRouter = Router()
@@ -103,6 +105,10 @@ institutionOnboardingAdminRouter.post('/applications/:applicationId/approve', as
   if (!UUID.test(req.params.applicationId)) return res.status(400).json({ message: 'Invalid application ID.' })
   const reviewerNote = String(req.body?.reviewerNote || '').trim()
   if (reviewerNote.length > 2000) return res.status(400).json({ message: 'Reviewer notes must be at most 2000 characters.' })
+  const verificationChecks = normalizeInstitutionVerificationChecks(req.body?.verification)
+  if (!hasCompleteInstitutionVerification(verificationChecks)) {
+    return res.status(400).json({ message: 'Verify the legal entity, settlement account, and applicant authority independently before approval.' })
+  }
 
   try {
     const result = await withTransaction(async (tx) => {
@@ -139,6 +145,22 @@ institutionOnboardingAdminRouter.post('/applications/:applicationId/approve', as
                 reviewer_note = NULLIF($3, ''), reviewed_by_user_id = $4, reviewed_at = now()
           WHERE id = $1`, [application.id, institutionId, reviewerNote, req.user.id]
       )
+      await writePlatformAudit({
+        actorUserId: req.user.id,
+        action: 'institution.application.approved',
+        resourceType: 'institution_onboarding_application',
+        resourceId: String(application.id),
+        details: {
+          institutionId,
+          administratorStaffId: adminRows[0].id,
+          verificationChecks,
+          reviewerNote: reviewerNote || null
+        },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null,
+        client: tx
+      })
       return { institutionId, admin: adminRows[0] }
     })
     if (result.notFound) return res.status(404).json({ message: 'Application not found.' })
@@ -155,14 +177,33 @@ institutionOnboardingAdminRouter.post('/applications/:applicationId/reject', asy
   if (!UUID.test(req.params.applicationId)) return res.status(400).json({ message: 'Invalid application ID.' })
   const reason = String(req.body?.reason || '').trim()
   if (reason.length < 5 || reason.length > 2000) return res.status(400).json({ message: 'Provide a rejection reason between 5 and 2000 characters.' })
-  const { rows } = await query(
-    `UPDATE institution_onboarding_applications
-        SET status = 'REJECTED', reviewer_note = $2, admin_password_hash = NULL,
-            reviewed_by_user_id = $3, reviewed_at = now()
-      WHERE id = $1 AND status = 'PENDING'
-      RETURNING id, status, reviewer_note, reviewed_at`,
-    [req.params.applicationId, reason, req.user.id]
-  )
-  if (!rows.length) return res.status(404).json({ message: 'Pending application not found.' })
-  res.json(rows[0])
+  const result = await withTransaction(async (tx) => {
+    const { rows: applicationRows } = await tx.query(
+      `SELECT id FROM institution_onboarding_applications WHERE id = $1 AND status = 'PENDING' FOR UPDATE`,
+      [req.params.applicationId]
+    )
+    if (!applicationRows.length) return null
+    const { rows } = await tx.query(
+      `UPDATE institution_onboarding_applications
+          SET status = 'REJECTED', reviewer_note = $2, admin_password_hash = NULL,
+              reviewed_by_user_id = $3, reviewed_at = now()
+        WHERE id = $1 AND status = 'PENDING'
+        RETURNING id, status, reviewer_note, reviewed_at`,
+      [req.params.applicationId, reason, req.user.id]
+    )
+    await writePlatformAudit({
+      actorUserId: req.user.id,
+      action: 'institution.application.rejected',
+      resourceType: 'institution_onboarding_application',
+      resourceId: String(req.params.applicationId),
+      details: { reason },
+      ipAddress: req.ip || null,
+      userAgent: req.headers['user-agent'] || null,
+      requestId: req.id || null,
+      client: tx
+    })
+    return rows[0]
+  })
+  if (!result) return res.status(409).json({ message: 'Pending application not found or already reviewed.' })
+  res.json(result)
 }))

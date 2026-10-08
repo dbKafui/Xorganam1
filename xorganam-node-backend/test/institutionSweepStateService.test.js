@@ -45,4 +45,22 @@ describe('institution sweep status integrity', () => {
       /Illegal institution sweep status transition/
     )
   })
+
+  it('binds sweep update fields after the expected current status', async () => {
+    let call
+    const client = {
+      async query(sql, params) {
+        call = { sql, params }
+        return { rows: [{ id: 'sweep-1', status: 'SETTLED' }] }
+      }
+    }
+
+    await updateInstitutionSweepStatus(client, {
+      id: 'sweep-1', currentStatus: 'PENDING', nextStatus: 'SETTLED', fields: { failure_reason: null }
+    })
+
+    assert.match(call.sql, /WHERE id = \$1 AND status = \$3/)
+    assert.match(call.sql, /failure_reason = \$4/)
+    assert.deepEqual(call.params, ['sweep-1', 'SETTLED', 'PENDING', null])
+  })
 })

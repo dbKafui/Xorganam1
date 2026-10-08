@@ -10,7 +10,9 @@ import {
   isGatewayPending,
   queryTransactionStatus
 } from './eganowClient.js'
-import { updateTransactionStatus } from './transactionStateService.js'
+import { retryFailedSplitPayout, updateTransactionStatus } from './transactionStateService.js'
+import { updateInstitutionTransactionStatus } from './institutionStateService.js'
+import { resolveSplitParentStatus } from './splitSettlementState.js'
 
 export function calculateInstitutionAmount(collectionAmount, rule) {
   const amount = Number(collectionAmount)
@@ -35,7 +37,7 @@ async function findOrCreateLeg({ tenantId, merchantId, merchantName, parentTrans
           fee_charged_amount, fee_charged_payer, fee_eganow_cost, fee_platform_margin, fee_config_version_id)
        VALUES ($1, $2, $3, 'PAYOUT', $4, 'PENDING', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT ON CONSTRAINT uq_transactions_parent_type_leg DO NOTHING
-       RETURNING id, internal_reference, status, amount, payout_msisdn, institution_id, payout_leg, payment_gateway_status`,
+      RETURNING id, internal_reference, status, amount, payout_msisdn, institution_id, payout_leg, payment_gateway_status, payout_retry_count`,
       [
         tenantId,
         merchantId,
@@ -56,7 +58,7 @@ async function findOrCreateLeg({ tenantId, merchantId, merchantName, parentTrans
     )
 
     const leg = insert.rows[0] || (await client.query(
-      `SELECT id, internal_reference, status, amount, payout_msisdn, institution_id, payout_leg, payment_gateway_status
+      `SELECT id, internal_reference, status, amount, payout_msisdn, institution_id, payout_leg, payment_gateway_status, payout_retry_count
          FROM transactions
         WHERE parent_transaction_id = $1 AND type = 'PAYOUT' AND payout_leg = $2 FOR UPDATE`,
       [parentTransactionId, payoutLeg]
@@ -76,49 +78,101 @@ async function findOrCreateLeg({ tenantId, merchantId, merchantName, parentTrans
   })
 }
 
+async function reopenFailedSplitLeg(leg, merchantName) {
+  const internalReference = createVendorReference(merchantName, leg.payout_leg === 'INSTITUTION' ? 'INST' : 'PO')
+  return withTransaction(async (client) => {
+    const retry = await retryFailedSplitPayout(client, { id: leg.id, internalReference })
+    if (retry.exhausted) return retry
+
+    if (leg.payout_leg === 'INSTITUTION') {
+      const { rows } = await client.query(
+        `SELECT id, institution_id, status FROM institution_transactions
+          WHERE counterparty_transaction_id = $1 FOR UPDATE`,
+        [leg.id]
+      )
+      for (const institutionTransaction of rows) {
+        await updateInstitutionTransactionStatus(client, {
+          id: institutionTransaction.id,
+          institutionId: institutionTransaction.institution_id,
+          currentStatus: institutionTransaction.status,
+          nextStatus: 'PENDING',
+          fields: { eganow_reference: null }
+        })
+      }
+    }
+    return retry
+  })
+}
+
+async function claimSplitPayoutSubmission(legId) {
+  const { rows } = await query(
+    `UPDATE transactions
+        SET payment_gateway_status = 'SUBMISSION_STARTED', updated_at = now()
+      WHERE id = $1 AND type = 'PAYOUT' AND status = 'PENDING'
+        AND (payment_gateway_status IS NULL OR payment_gateway_status = 'READY')
+      RETURNING id`,
+    [legId]
+  )
+  return rows.length > 0
+}
+
 async function updateLeg(leg, result) {
   const success = isGatewaySuccess(result.status)
   const failed = isGatewayFailure(result.status)
   const status = success ? 'PAID_OUT' : failed ? 'FAILED' : 'PENDING'
+  const fields = {
+    eganow_reference: result.reference || null,
+    eganow_transaction_id: result.transactionId || null,
+    payment_gateway_status: result.status || null,
+    failure_reason: failed ? `Eganow payout returned ${result.status}.` : null,
+    completed_at: status === 'PENDING' ? null : new Date()
+  }
 
-  await query(
-    `UPDATE transactions
-        SET eganow_reference = COALESCE($2, eganow_reference),
-            eganow_transaction_id = COALESCE($3, eganow_transaction_id),
-            payment_gateway_status = COALESCE($4, payment_gateway_status),
-            failure_reason = $5,
-            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END,
-            updated_at = now()
-      WHERE id = $1`,
-    [
-      leg.id,
-      result.reference || null,
-      result.transactionId || null,
-      result.status || null,
-      failed ? `Eganow payout returned ${result.status}.` : null,
-      success
-    ]
-  )
-  if (status !== 'PENDING') {
+  if (status === 'PENDING') {
     await query(
       `UPDATE transactions
-          SET status = $2,
+          SET eganow_reference = COALESCE($2, eganow_reference),
+              eganow_transaction_id = COALESCE($3, eganow_transaction_id),
+              payment_gateway_status = COALESCE($4, payment_gateway_status),
+              failure_reason = $5,
               updated_at = now()
-        WHERE id = $1 AND status = $3`,
-      [leg.id, status, leg.status]
+        WHERE id = $1 AND status = 'PENDING'`,
+      [leg.id, fields.eganow_reference, fields.eganow_transaction_id, fields.payment_gateway_status, fields.failure_reason]
     )
+    return status
   }
-  if (leg.payout_leg === 'INSTITUTION') {
-    await query(
-      `UPDATE institution_transactions
-          SET status = CASE WHEN $2 = 'PAID_OUT' THEN 'RECEIVED'::institution_txn_status
-                            WHEN $2 = 'FAILED' THEN 'FAILED'::institution_txn_status
-                            ELSE 'PENDING'::institution_txn_status END,
-              eganow_reference = COALESCE($3, eganow_reference)
-        WHERE counterparty_transaction_id = $1`,
-      [leg.id, status, result.reference || null]
+
+  await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      'SELECT status FROM transactions WHERE id = $1 AND type = \'PAYOUT\' FOR UPDATE',
+      [leg.id]
     )
-  }
+    if (!rows.length) throw new Error('Split payout transaction was not found.')
+    await updateTransactionStatus(client, {
+      id: leg.id,
+      type: 'PAYOUT',
+      currentStatus: rows[0].status,
+      nextStatus: status,
+      fields
+    })
+
+    if (leg.payout_leg === 'INSTITUTION') {
+      const institutionTransactions = await client.query(
+        `SELECT id, institution_id, status FROM institution_transactions
+          WHERE counterparty_transaction_id = $1 FOR UPDATE`,
+        [leg.id]
+      )
+      for (const institutionTransaction of institutionTransactions.rows) {
+        await updateInstitutionTransactionStatus(client, {
+          id: institutionTransaction.id,
+          institutionId: institutionTransaction.institution_id,
+          currentStatus: institutionTransaction.status,
+          nextStatus: status === 'PAID_OUT' ? 'RECEIVED' : 'FAILED',
+          fields: { eganow_reference: result.reference || null }
+        })
+      }
+    }
+  })
   return status
 }
 
@@ -168,22 +222,20 @@ export async function refreshSplitParentStatus(collectionId, allowPartial = fals
   )
   const state = rows[0]
   const { rows: parentRows } = await query(`SELECT status FROM transactions WHERE id = $1`, [collectionId])
-  const exhaustedPartial = Number(state.failed) > 0 && Number(state.settled) > 0
-  const status = Number(state.expected) > 0 && Number(state.expected) === Number(state.settled)
-    ? 'PAID_OUT'
-    : exhaustedPartial && (allowPartial || parentRows[0]?.status === 'PARTIALLY_SETTLED')
-      ? 'PARTIALLY_SETTLED'
-      : 'SWEPT_INTERNAL'
+  const currentStatus = parentRows[0]?.status
+  const status = resolveSplitParentStatus({ ...state, currentStatus, allowPartial })
 
-  await updateTransactionStatus(query, {
-    id: collectionId,
-    type: 'COLLECTION',
-    currentStatus: parentRows[0]?.status,
-    nextStatus: status,
-    fields: {
-      completed_at: status === 'PAID_OUT' ? new Date() : null
-    }
-  })
+  if (currentStatus !== status) {
+    await updateTransactionStatus(query, {
+      id: collectionId,
+      type: 'COLLECTION',
+      currentStatus,
+      nextStatus: status,
+      fields: {
+        completed_at: status === 'PAID_OUT' ? new Date() : null
+      }
+    })
+  }
   return status
 }
 
@@ -453,11 +505,8 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
       continue
     }
 
-    if (!leg.created && (leg.status === 'PENDING' || leg.status === 'FAILED')) {
-      if (leg.payment_gateway_status === 'READY') {
-        await query(`UPDATE transactions SET payment_gateway_status = 'SUBMISSION_STARTED', updated_at = now() WHERE id = $1`, [leg.id])
-        leg.payment_gateway_status = 'SUBMISSION_STARTED'
-      } else {
+    if (!leg.created && (leg.status === 'PENDING' || leg.status === 'FAILED')
+      && !(leg.status === 'PENDING' && leg.payment_gateway_status === 'READY')) {
       let statusResult
       try {
         statusResult = await queryTransactionStatus(tenantId, leg.internal_reference, { merchantId })
@@ -467,20 +516,46 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
         continue
       }
       if (isGatewaySuccess(statusResult.status)) {
+        if (leg.status === 'FAILED') {
+          throw new EganowApiError('Provider status conflicts with the terminal split payout state. Manual reconciliation is required.', tenantId)
+        }
         results[legDefinition.payoutLeg] = await updateLeg(leg, statusResult)
         continue
       }
       if (isGatewayPending(statusResult.status)) {
         pending = true
         results[legDefinition.payoutLeg] = 'PENDING'
+        await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: leg.id })
         continue
       }
       if (!isGatewayFailure(statusResult.status)) {
         pending = true
         results[legDefinition.payoutLeg] = 'PENDING'
+        await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: leg.id })
         continue
       }
+
+      if (leg.status === 'PENDING') {
+        await updateLeg(leg, statusResult)
+        leg.status = 'FAILED'
       }
+      const retry = await reopenFailedSplitLeg(leg, merchant.display_name)
+      if (retry.exhausted) {
+        results[legDefinition.payoutLeg] = 'FAILED'
+        failure = failure || new EganowApiError('Split payout retry limit reached. Manual reconciliation is required.', tenantId)
+        continue
+      }
+      leg.status = 'PENDING'
+      leg.internal_reference = retry.internalReference
+      leg.payment_gateway_status = 'READY'
+      leg.payout_retry_count = retry.retryCount
+    }
+
+    if (leg.payment_gateway_status !== 'SUBMISSION_STARTED'
+      && !(await claimSplitPayoutSubmission(leg.id))) {
+      pending = true
+      results[legDefinition.payoutLeg] = 'PENDING'
+      continue
     }
 
     try {
@@ -496,7 +571,10 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
       })
       results[legDefinition.payoutLeg] = await updateLeg(leg, result)
       if (isGatewayFailure(result.status)) failure = failure || new EganowApiError(`Split ${legDefinition.payoutLeg} payout failed with status ${result.status}`, tenantId)
-      else if (!isGatewaySuccess(result.status)) pending = true
+      else if (!isGatewaySuccess(result.status)) {
+        pending = true
+        await enqueueCollectionStatusPollJob({ tenantId, merchantId, transactionId: leg.id })
+      }
     } catch (error) {
       pending = true
       failure = failure || error

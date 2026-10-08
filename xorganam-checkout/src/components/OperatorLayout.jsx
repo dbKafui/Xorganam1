@@ -6,6 +6,38 @@ import { operatorApi } from '../api/client'
 export default function OperatorLayout() {
   const { logout, user } = useOperatorAuth()
   const [notifications, setNotifications] = useState([])
+  const [connectionStatus, setConnectionStatus] = useState('checking')
+  const [checkingConnection, setCheckingConnection] = useState(false)
+
+  async function checkConnection() {
+    if (!navigator.onLine) {
+      setConnectionStatus('offline')
+      return
+    }
+    setCheckingConnection(true)
+    try {
+      await operatorApi.checkReadiness()
+      setConnectionStatus('online')
+    } catch {
+      setConnectionStatus('degraded')
+    } finally {
+      setCheckingConnection(false)
+    }
+  }
+
+  useEffect(() => {
+    const online = () => checkConnection()
+    const offline = () => setConnectionStatus('offline')
+    window.addEventListener('online', online)
+    window.addEventListener('offline', offline)
+    checkConnection()
+    const timer = window.setInterval(checkConnection, 30000)
+    return () => {
+      window.removeEventListener('online', online)
+      window.removeEventListener('offline', offline)
+      window.clearInterval(timer)
+    }
+  }, [])
 
   useEffect(() => {
     let mounted = true
@@ -53,6 +85,12 @@ export default function OperatorLayout() {
       <main className="portal-main">
         <header className="portal-topbar"><span>Business workspace <b>/</b> <strong>{user?.tenantCompanyName || user?.companyName || 'Vendor dashboard'}</strong></span><span className="portal-topbar-status"><i /> Account workspace</span></header>
       <div className="portal-body">
+        {connectionStatus !== 'online' && <div className={`connection-banner ${connectionStatus}`} role="status" aria-live="polite">
+          <span>{connectionStatus === 'offline' ? 'You are offline. Changes will not be submitted.' : connectionStatus === 'degraded' ? 'Backend services are unavailable. Check payment status before retrying any financial action.' : 'Checking service connection…'}</span>
+          <button type="button" onClick={checkConnection} disabled={checkingConnection}>
+            {checkingConnection ? 'Checking…' : 'Retry connection'}
+          </button>
+        </div>}
         {notifications.some((item) => !item.read_at) && <section id="notifications" className="notification-banner" aria-label="Unread notifications">
           <div><strong>Notifications</strong><span>{unreadCount} unread update{unreadCount === 1 ? '' : 's'}</span></div>
           <div className="notification-list">

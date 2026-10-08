@@ -5,6 +5,9 @@ import { authenticate, requireRole, requirePermission, resolveTenantScope, Forbi
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { isValidPermissionType } from '../constants/permissions.js'
 import { requestEmailVerification } from '../services/emailVerificationService.js'
+import { writePlatformAudit } from '../services/auditService.js'
+import { normalizePermissionExpiry } from '../services/permissionPolicy.js'
+import { withTransaction } from '../db/pool.js'
 
 export const usersRouter = Router()
 
@@ -12,6 +15,7 @@ usersRouter.use(authenticate)
 
 const ASSIGNABLE_ROLES = ['TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_OPERATOR', 'TENANT_VIEWER', 'TENANT_BRANCH_MANAGER']
 const ROLE_LEVEL = { TENANT_VIEWER: 10, TENANT_OPERATOR: 20, TENANT_BRANCH_MANAGER: 25, TENANT_MANAGER: 30, TENANT_ADMIN: 40, PLATFORM_ADMIN: 100 }
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function scopeOrRespond(req, res, requestedTenantId) {
   try {
@@ -265,6 +269,120 @@ usersRouter.post(
 // Permission Management Endpoints
 // =====================================================================
 
+usersRouter.post(
+  '/permissions/bulk',
+  requireRole('TENANT_ADMIN'),
+  requirePermission('MANAGE_PERMISSIONS'),
+  asyncHandler(async (req, res) => {
+    const { userIds, permissionType, resourceId, expiresAt } = req.body || {}
+    if (!Array.isArray(userIds) || userIds.length < 1 || userIds.length > 100
+      || userIds.some((id) => typeof id !== 'string' || !UUID_PATTERN.test(id))
+      || userIds.includes(req.user.id)) {
+      return res.status(400).json({ message: 'userIds must contain 1 to 100 valid user IDs.' })
+    }
+    if (!permissionType || !isValidPermissionType(permissionType)) {
+      return res.status(400).json({ message: 'A valid permissionType is required.' })
+    }
+    const uniqueUserIds = [...new Set(userIds)]
+    let normalizedExpiresAt
+    try {
+      normalizedExpiresAt = normalizePermissionExpiry(expiresAt)
+    } catch (error) {
+      return res.status(400).json({ message: error.message })
+    }
+
+    const tenantId = scopeOrRespond(req, res, req.body?.tenantId)
+    if (!tenantId) return
+    if (resourceId) {
+      if (typeof resourceId !== 'string' || !UUID_PATTERN.test(resourceId)) {
+        return res.status(400).json({ message: 'resourceId must be a valid merchant UUID.' })
+      }
+      const merchant = await query('SELECT 1 FROM merchants WHERE id = $1 AND tenant_id = $2', [resourceId, tenantId])
+      if (!merchant.rows.length) return res.status(400).json({ message: 'resourceId must identify a merchant in this tenant.' })
+    }
+
+    const result = await withTransaction(async (tx) => {
+      const { rows: users } = await tx(
+        'SELECT id, tenant_id, merchant_id FROM users WHERE tenant_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE',
+        [tenantId, uniqueUserIds]
+      )
+      if (users.length !== uniqueUserIds.length) {
+        return { invalidUsers: true }
+      }
+      if (req.user.merchantId && users.some((target) => String(target.merchant_id) !== String(req.user.merchantId))) {
+        return { forbiddenScope: true }
+      }
+
+      const counts = { granted: 0, renewed: 0, alreadyActive: 0 }
+      for (const target of users) {
+        const inserted = await tx(
+          `INSERT INTO user_permissions (user_id, tenant_id, permission_type, resource_id, granted_by_user_id, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT DO NOTHING
+           RETURNING id, expires_at`,
+          [target.id, tenantId, permissionType, resourceId || null, req.user.id, normalizedExpiresAt]
+        )
+        let permission = inserted.rows[0]
+        let action = 'permission.granted'
+        let previousExpiry = null
+        if (permission) {
+          counts.granted += 1
+        } else {
+          const existingGrant = await tx(
+            `SELECT id, expires_at FROM user_permissions
+              WHERE user_id = $1 AND permission_type = $2
+                AND resource_id IS NOT DISTINCT FROM $3::uuid FOR UPDATE`,
+            [target.id, permissionType, resourceId || null]
+          )
+          const existingPermission = existingGrant.rows[0]
+          if (existingPermission?.expires_at && new Date(existingPermission.expires_at) <= new Date()) {
+            previousExpiry = existingPermission.expires_at
+            const renewed = await tx(
+              `UPDATE user_permissions
+                  SET granted_at = now(), granted_by_user_id = $2, expires_at = $3
+                WHERE id = $1 AND expires_at <= now()
+                RETURNING id, expires_at`,
+              [existingPermission.id, req.user.id, normalizedExpiresAt]
+            )
+            permission = renewed.rows[0]
+            if (!permission) throw Object.assign(new Error('Permission changed while it was being renewed.'), { statusCode: 409 })
+            action = 'permission.renewed'
+            counts.renewed += 1
+          } else {
+            counts.alreadyActive += 1
+            continue
+          }
+        }
+
+        await writePlatformAudit({
+          actorUserId: req.user.id,
+          tenantId,
+          merchantId: target.merchant_id,
+          action,
+          resourceType: 'user_permission',
+          resourceId: String(permission.id),
+          details: {
+            permissionType,
+            resourceId: resourceId || null,
+            expiresAt: normalizedExpiresAt,
+            previousExpiry,
+            targetUserId: target.id
+          },
+          ipAddress: req.ip || null,
+          userAgent: req.headers['user-agent'] || null,
+          requestId: req.id || null,
+          client: tx
+        })
+      }
+      return counts
+    })
+
+    if (result.invalidUsers) return res.status(400).json({ message: 'All target users must belong to this tenant.' })
+    if (result.forbiddenScope) return res.status(403).json({ message: 'You can only grant permissions to users assigned to your merchant.' })
+    res.status(200).json(result)
+  })
+)
+
 usersRouter.get(
   '/:userId/permissions',
   requireRole('TENANT_ADMIN'),
@@ -276,7 +394,7 @@ usersRouter.get(
     if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
 
     const { rows } = await query(
-      `SELECT id, permission_type, resource_id, granted_at, granted_by_user_id
+      `SELECT id, permission_type, resource_id, granted_at, granted_by_user_id, expires_at
          FROM user_permissions
         WHERE user_id = $1
         ORDER BY permission_type, granted_at DESC`,
@@ -287,7 +405,8 @@ usersRouter.get(
       permissionType: p.permission_type,
       resourceId: p.resource_id,
       grantedAt: p.granted_at,
-      grantedByUserId: p.granted_by_user_id
+      grantedByUserId: p.granted_by_user_id,
+      expiresAt: p.expires_at
     })))
   })
 )
@@ -297,18 +416,23 @@ usersRouter.post(
   requireRole('TENANT_ADMIN'),
   requirePermission('MANAGE_PERMISSIONS'),
   asyncHandler(async (req, res) => {
-    const { permissionType, resourceId } = req.body || {}
+    const { permissionType, resourceId, expiresAt } = req.body || {}
     if (!permissionType) return res.status(400).json({ message: 'permissionType is required.' })
-    
-    // Validate permission type
+
     if (!isValidPermissionType(permissionType)) {
-      return res.status(400).json({ message: `Invalid permissionType. Must be one of the defined permission types.` })
+      return res.status(400).json({ message: 'Invalid permissionType. Must be one of the defined permission types.' })
+    }
+    let normalizedExpiresAt
+    try {
+      normalizedExpiresAt = normalizePermissionExpiry(expiresAt)
+    } catch (error) {
+      return res.status(400).json({ message: error.message })
     }
 
     const existing = await query('SELECT tenant_id, merchant_id FROM users WHERE id = $1', [req.params.userId])
     if (existing.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
     const user = existing.rows[0]
-    
+
     if (scopeOrRespond(req, res, user.tenant_id) === null) return
     if (resourceId) {
       const merchant = await query('SELECT 1 FROM merchants WHERE id = $1 AND tenant_id = $2', [resourceId, user.tenant_id])
@@ -316,27 +440,76 @@ usersRouter.post(
     }
 
     try {
-      const { rows } = await query(
-        `INSERT INTO user_permissions (user_id, tenant_id, permission_type, resource_id, granted_by_user_id)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (user_id, permission_type, resource_id) DO NOTHING
-         RETURNING id, permission_type, resource_id, granted_at, granted_by_user_id`,
-        [req.params.userId, user.tenant_id, permissionType, resourceId || null, req.user.id]
-      )
+      const p = await withTransaction(async (tx) => {
+        const inserted = await tx(
+          `INSERT INTO user_permissions (user_id, tenant_id, permission_type, resource_id, granted_by_user_id, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT DO NOTHING
+           RETURNING id, permission_type, resource_id, granted_at, granted_by_user_id, expires_at`,
+          [req.params.userId, user.tenant_id, permissionType, resourceId || null, req.user.id, normalizedExpiresAt]
+        )
 
-      if (rows.length === 0) {
-        return res.status(409).json({ message: 'This permission already exists.' })
-      }
+        let permission = inserted.rows[0]
+        let action = 'permission.granted'
+        let previousExpiry = null
+        if (!permission) {
+          const existingGrant = await tx(
+            `SELECT id, expires_at FROM user_permissions
+              WHERE user_id = $1 AND permission_type = $2
+                AND resource_id IS NOT DISTINCT FROM $3::uuid
+              FOR UPDATE`,
+            [req.params.userId, permissionType, resourceId || null]
+          )
+          const existingPermission = existingGrant.rows[0]
+          if (!existingPermission || !existingPermission.expires_at || new Date(existingPermission.expires_at) > new Date()) {
+            throw Object.assign(new Error('This permission already exists and is still active.'), { statusCode: 409 })
+          }
+          previousExpiry = existingPermission.expires_at
+          const renewed = await tx(
+            `UPDATE user_permissions
+                SET granted_at = now(), granted_by_user_id = $2, expires_at = $3
+              WHERE id = $1 AND expires_at <= now()
+              RETURNING id, permission_type, resource_id, granted_at, granted_by_user_id, expires_at`,
+            [existingPermission.id, req.user.id, normalizedExpiresAt]
+          )
+          permission = renewed.rows[0]
+          if (!permission) throw Object.assign(new Error('Permission changed while it was being renewed.'), { statusCode: 409 })
+          action = 'permission.renewed'
+        }
 
-      const p = rows[0]
+        await writePlatformAudit({
+          actorUserId: req.user.id,
+          tenantId: user.tenant_id,
+          merchantId: user.merchant_id,
+          action,
+          resourceType: 'user_permission',
+          resourceId: String(permission.id),
+          details: {
+            permissionType,
+            resourceId: resourceId || null,
+            expiresAt: normalizedExpiresAt,
+            previousExpiry,
+            targetUserId: req.params.userId
+          },
+          ipAddress: req.ip || null,
+          userAgent: req.headers['user-agent'] || null,
+          requestId: req.id || null,
+          client: tx
+        })
+
+        return permission
+      })
+
       res.status(201).json({
         id: p.id,
         permissionType: p.permission_type,
         resourceId: p.resource_id,
         grantedAt: p.granted_at,
-        grantedByUserId: p.granted_by_user_id
+        grantedByUserId: p.granted_by_user_id,
+        expiresAt: p.expires_at
       })
     } catch (err) {
+      if (err.statusCode === 409) return res.status(409).json({ message: err.message })
       console.error('Error granting permission', { code: err?.code || 'PERMISSION_ERROR' })
       res.status(400).json({ message: 'Failed to grant permission.', detail: err.message })
     }
@@ -354,7 +527,7 @@ usersRouter.delete(
     if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
 
     const perm = await query(
-      'SELECT user_id FROM user_permissions WHERE id = $1',
+      'SELECT user_id, tenant_id, permission_type, resource_id, expires_at FROM user_permissions WHERE id = $1',
       [req.params.permissionId]
     )
     if (perm.rows.length === 0) return res.status(404).json({ message: 'Permission not found.' })
@@ -362,8 +535,65 @@ usersRouter.delete(
       return res.status(403).json({ message: 'Permission does not belong to this user.' })
     }
 
-    await query('DELETE FROM user_permissions WHERE id = $1', [req.params.permissionId])
+    await withTransaction(async (tx) => {
+      await tx('DELETE FROM user_permissions WHERE id = $1', [req.params.permissionId])
+      await writePlatformAudit({
+        actorUserId: req.user.id,
+        tenantId: perm.rows[0].tenant_id,
+        merchantId: existing.rows[0].merchant_id,
+        action: 'permission.revoked',
+        resourceType: 'user_permission',
+        resourceId: String(req.params.permissionId),
+        details: {
+          permissionType: perm.rows[0].permission_type,
+          resourceId: perm.rows[0].resource_id,
+          expiresAt: perm.rows[0].expires_at,
+          targetUserId: req.params.userId
+        },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null,
+        client: tx
+      })
+    })
+
     res.json({ message: 'Permission revoked.', permissionId: req.params.permissionId })
+  })
+)
+
+usersRouter.get(
+  '/:userId/permissions/history',
+  requireRole('TENANT_ADMIN'),
+  requirePermission('MANAGE_PERMISSIONS'),
+  asyncHandler(async (req, res) => {
+    const existing = await query('SELECT tenant_id, merchant_id FROM users WHERE id = $1', [req.params.userId])
+    if (existing.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
+    if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
+    if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
+
+    const { rows } = await query(
+      `SELECT id, action, resource_id, details, actor_user_id, created_at
+         FROM platform_audit_log
+        WHERE tenant_id = $1
+          AND resource_type = 'user_permission'
+          AND details->>'targetUserId' = $2
+        ORDER BY created_at DESC
+        LIMIT 50`,
+      [existing.rows[0].tenant_id, req.params.userId]
+    )
+
+    res.json(rows.map((row) => ({
+      id: row.id,
+      action: row.action,
+      permissionId: row.resource_id,
+      permissionType: row.details?.permissionType || null,
+      resourceId: row.details?.resourceId || null,
+      expiresAt: row.details?.expiresAt || null,
+      previousExpiry: row.details?.previousExpiry || null,
+      targetUserId: row.details?.targetUserId || null,
+      actorUserId: row.actor_user_id,
+      createdAt: row.created_at
+    })))
   })
 )
 

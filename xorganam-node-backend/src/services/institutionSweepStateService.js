@@ -35,7 +35,7 @@ export async function updateInstitutionSweepStatus(client, {
   const assignments = []
   const values = []
   for (const [column, value] of Object.entries(fields)) {
-    assignments.push(`${column} = $${values.length + 3}`)
+    assignments.push(`${column} = $${values.length + 4}`)
     values.push(value)
   }
   const setClause = assignments.length ? `, ${assignments.join(', ')}` : ''

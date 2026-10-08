@@ -1,9 +1,68 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { authenticate, requirePlatformAdmin } from '../middleware/auth.js'
+import { buildPlatformAuditWhere, normalizePlatformAuditFilters } from '../services/platformAuditLogQuery.js'
 
 export const platformSecurityRouter = Router()
 platformSecurityRouter.use(authenticate, requirePlatformAdmin)
+
+platformSecurityRouter.get('/audit-log', async (req, res, next) => {
+  let filters
+  try {
+    filters = normalizePlatformAuditFilters(req.query)
+  } catch (error) {
+    return res.status(400).json({ message: error.message })
+  }
+
+  try {
+    const { whereClause, params } = buildPlatformAuditWhere(filters)
+    const count = await query(
+      `SELECT COUNT(*)::int AS total_count FROM platform_audit_log a WHERE ${whereClause}`,
+      params
+    )
+    const pageParams = [...params, filters.pageSize, (filters.page - 1) * filters.pageSize]
+    const { rows } = await query(
+      `SELECT a.id, a.actor_user_id, a.actor_institution_staff_id, a.tenant_id, a.merchant_id,
+              a.action, a.resource_type, a.resource_id, a.details, a.ip_address,
+              a.user_agent, a.request_id, a.created_at,
+              u.email AS actor_email, s.email AS institution_actor_email,
+              t.company_name AS tenant_name, m.display_name AS merchant_name
+         FROM platform_audit_log a
+         LEFT JOIN users u ON u.id = a.actor_user_id
+         LEFT JOIN institution_staff s ON s.id = a.actor_institution_staff_id
+         LEFT JOIN tenants t ON t.id = a.tenant_id
+         LEFT JOIN merchants m ON m.id = a.merchant_id AND m.tenant_id = a.tenant_id
+        WHERE ${whereClause}
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      pageParams
+    )
+    res.json({
+      events: rows.map((row) => ({
+        id: row.id,
+        actorUserId: row.actor_user_id,
+        actorInstitutionStaffId: row.actor_institution_staff_id,
+        actorEmail: row.actor_email || row.institution_actor_email || null,
+        tenantId: row.tenant_id,
+        tenantName: row.tenant_name,
+        merchantId: row.merchant_id,
+        merchantName: row.merchant_name,
+        action: row.action,
+        resourceType: row.resource_type,
+        resourceId: row.resource_id,
+        details: row.details,
+        ipAddress: row.ip_address,
+        userAgent: row.user_agent,
+        requestId: row.request_id,
+        createdAt: row.created_at
+      })),
+      totalCount: count.rows[0].total_count,
+      page: filters.page,
+      pageSize: filters.pageSize,
+      totalPages: Math.ceil(count.rows[0].total_count / filters.pageSize)
+    })
+  } catch (error) { next(error) }
+})
 
 platformSecurityRouter.get('/mfa-exemptions', async (req, res, next) => {
   try {

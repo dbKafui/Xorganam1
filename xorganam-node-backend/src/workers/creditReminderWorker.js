@@ -4,6 +4,7 @@ import { query, withTransaction } from '../db/pool.js'
 import { sendMerchantSms } from '../services/notificationService.js'
 import { issueInstallmentToken, installmentPaymentUrl } from '../services/creditInstallmentToken.js'
 import { recordCreditWebhookEvent } from '../services/creditWebhookOutbox.js'
+import { CREDIT_PLAN_PAYMENT_STATUSES, updateCreditInstallmentStatus, updateCreditPlanStatus } from '../services/creditStateService.js'
 
 const connection = getRedisConnection()
 const producerQueue = new Queue(CREDIT_REMINDER_QUEUE, { connection })
@@ -17,10 +18,10 @@ async function scanCreditInstallments() {
                  WHEN i.status = 'PENDING' AND i.due_date = CURRENT_DATE THEN 'DUE_TODAY'
                  ELSE 'OVERDUE' END AS reminder_type
        FROM credit_plan_installments i JOIN credit_plans p ON p.id = i.credit_plan_id
-      WHERE p.status <> 'COMPLETED' AND (
+      WHERE p.status = ANY($2::credit_plan_status[]) AND (
         (i.status = 'PENDING' AND i.due_date IN (CURRENT_DATE, CURRENT_DATE + $1::int)) OR
         (i.status = 'PENDING' AND i.due_date + p.late_fee_grace_days < CURRENT_DATE)
-      ) ORDER BY i.due_date LIMIT 5000`, [preDueDays]
+      ) ORDER BY i.due_date LIMIT 5000`, [preDueDays, CREDIT_PLAN_PAYMENT_STATUSES]
   )
   for (const row of rows) {
     if (row.reminder_type === 'OVERDUE') {
@@ -45,29 +46,36 @@ async function processOverdue(installmentId) {
               i.id AS installment_id, i.installment_number, i.amount_due, i.due_date::text AS due_date
          FROM credit_plans p JOIN credit_plan_installments i ON i.credit_plan_id = p.id
         WHERE i.id = $1 AND i.status = 'PENDING'
+          AND p.status = ANY($2::credit_plan_status[])
           AND i.due_date + p.late_fee_grace_days < CURRENT_DATE
-        FOR UPDATE OF p, i`, [installmentId]
+        FOR UPDATE OF p, i`, [installmentId, CREDIT_PLAN_PAYMENT_STATUSES]
     )
     const plan = rows[0]
     if (!plan) return { skipped: true }
-    const updated = await tx.query(
-      `UPDATE credit_plan_installments
-          SET status = 'OVERDUE', amount_due = amount_due + $2
-        WHERE id = $1 AND status = 'PENDING'
-        RETURNING amount_due`, [plan.installment_id, plan.late_fee_amount]
-    )
-    if (!updated.rows.length) return { skipped: true }
+    const updatedAmountDue = (Math.round(Number(plan.amount_due) * 100) + Math.round(Number(plan.late_fee_amount) * 100)) / 100
+    await updateCreditInstallmentStatus(tx, {
+      id: plan.installment_id,
+      currentStatus: 'PENDING',
+      nextStatus: 'OVERDUE',
+      fields: { amount_due: updatedAmountDue }
+    })
     const { rows: overdues } = await tx.query(
       `SELECT COUNT(*)::int AS count FROM credit_plan_installments
         WHERE credit_plan_id = $1 AND status = 'OVERDUE'`, [plan.plan_id]
     )
     const nextStatus = plan.plan_status === 'DEFAULTED' || overdues[0].count >= plan.missed_installment_threshold ? 'DEFAULTED' : 'OVERDUE'
-    await tx.query(`UPDATE credit_plans SET status = $2 WHERE id = $1 AND status <> 'COMPLETED'`, [plan.plan_id, nextStatus])
+    if (plan.plan_status !== nextStatus) {
+      await updateCreditPlanStatus(tx, {
+        id: plan.plan_id,
+        currentStatus: plan.plan_status,
+        nextStatus
+      })
+    }
     await recordCreditWebhookEvent(tx, {
       tenantId: plan.tenant_id, merchantId: plan.merchant_id,
       eventType: 'installment.overdue', eventKey: `installment.overdue:${plan.installment_id}`,
       payload: { planId: plan.plan_id, installmentId: plan.installment_id, installmentNumber: plan.installment_number,
-        merchantId: plan.merchant_id, dueDate: plan.due_date, amountDue: Number(updated.rows[0].amount_due),
+        merchantId: plan.merchant_id, dueDate: plan.due_date, amountDue: updatedAmountDue,
         status: 'OVERDUE', planStatus: nextStatus }
     })
     return { overdue: true, planStatus: nextStatus }
@@ -83,7 +91,7 @@ async function sendReminder({ installmentId, type, reminderDate }) {
        JOIN credit_plan_installments i ON i.credit_plan_id = p.id
        JOIN merchants m ON m.id = p.merchant_id AND m.tenant_id = p.tenant_id
        LEFT JOIN tenant_notification_settings n ON n.tenant_id = p.tenant_id
-      WHERE i.id = $1 AND p.status <> 'COMPLETED'`, [installmentId]
+      WHERE i.id = $1 AND p.status = ANY($2::credit_plan_status[])`, [installmentId, CREDIT_PLAN_PAYMENT_STATUSES]
   )
   const installment = rows[0]
   if (!installment || installment.status !== 'PENDING') return { skipped: true }

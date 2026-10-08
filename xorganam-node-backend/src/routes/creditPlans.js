@@ -6,6 +6,7 @@ import { recordCreditWebhookEvent } from '../services/creditWebhookOutbox.js'
 import { issueInstallmentToken, verifyInstallmentToken, installmentPaymentUrl } from '../services/creditInstallmentToken.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
 import { updateCreditInstallmentStatus, updateCreditPlanStatus } from '../services/creditStateService.js'
+import { createManualCreditCollectionTransaction } from '../services/creditInstallmentSettlement.js'
 
 export const creditPlansRouter = Router()
 export const creditPaymentsRouter = Router()
@@ -58,7 +59,7 @@ function amountCents(value, field) {
   return cents
 }
 
-creditPlansRouter.post('/', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'), asyncHandler(async (req, res) => {
+creditPlansRouter.post('/', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER'), asyncHandler(async (req, res) => {
   const tenantId = tenantScope(req, res)
   if (!tenantId) return
   const input = req.body || {}
@@ -250,7 +251,7 @@ function getInstallmentLinkExpiry(dueDate, graceDays) {
   return new Date(Math.max(expiry.getTime(), Date.now() + 30 * 86400000))
 }
 
-creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'), asyncHandler(async (req, res) => {
+creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER'), asyncHandler(async (req, res) => {
   const tenantId = tenantScope(req, res)
   if (!tenantId) return
   const result = await withTransaction(async (tx) => {
@@ -278,13 +279,21 @@ creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', re
       [plan.id]
     )
     if (completedPlans.length) return { conflict: true }
+    const collection = await createManualCreditCollectionTransaction(tx, {
+      tenantId,
+      merchantId: plan.merchant_id,
+      amount: Number(plan.amount_due),
+      planId: plan.id,
+      installmentId: plan.installment_id,
+      initiatedByUserId: req.user.id
+    })
     const paid = await updateCreditInstallmentStatus(tx, {
       id: plan.installment_id,
       currentStatus: plan.installment_status,
       nextStatus: 'PAID',
       fields: {
         paid_at: new Date(),
-        paid_transaction_id: null,
+        paid_transaction_id: collection.id,
         manually_recorded: true,
         manually_recorded_by_user_id: req.user.id
       }
@@ -312,7 +321,7 @@ creditPlansRouter.post('/:planId/installments/:installmentId/manual-payment', re
     const eventPayload = { planId: plan.id, installmentId: plan.installment_id, installmentNumber: plan.installment_number, merchantId: plan.merchant_id, amount: Number(plan.amount_due), status: 'PAID', manuallyRecorded: true }
     await recordCreditWebhookEvent(tx, { tenantId, merchantId: plan.merchant_id, eventType: 'installment.paid', eventKey: `installment.paid:${plan.installment_id}`, payload: eventPayload })
     if (completed) await recordCreditWebhookEvent(tx, { tenantId, merchantId: plan.merchant_id, eventType: 'plan.completed', eventKey: `plan.completed:${plan.id}`, payload: { planId: plan.id, merchantId: plan.merchant_id, status: 'COMPLETED' } })
-    return { installment: paid, planCompleted: completed }
+    return { transactionId: collection.id, internalReference: collection.internal_reference, installment: paid, planCompleted: completed }
   })
   if (result.notFound) return res.status(404).json({ message: 'Credit plan or installment not found.' })
   if (result.conflict) return res.status(409).json({ message: 'This installment is already paid or has a platform collection in progress.' })

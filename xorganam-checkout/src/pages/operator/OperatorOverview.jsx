@@ -12,6 +12,13 @@ export default function OperatorOverview() {
   const [tenant, setTenant] = useState(null)
   const [branch, setBranch] = useState(null)
   const [report, setReport] = useState(null)
+  const [health, setHealth] = useState(null)
+  const [failedJobs, setFailedJobs] = useState([])
+  const [failedJobsError, setFailedJobsError] = useState('')
+  const [operationalFailures, setOperationalFailures] = useState([])
+  const [operationalFailuresError, setOperationalFailuresError] = useState('')
+  const [failureNotes, setFailureNotes] = useState({})
+  const [resolvingFailureId, setResolvingFailureId] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
@@ -22,9 +29,38 @@ export default function OperatorOverview() {
       ? [operatorApi.getMerchant(user.merchantId).then(setBranch)]
       : [operatorApi.getTenant(user.tenantId).then(setTenant), operatorApi.tenantReport(user.tenantId).then(setReport)]
     Promise.all(requests)
+      .then(() => Promise.all([
+        operatorApi.getOperationalHealth(user.tenantId),
+        operatorApi.getFailedQueueJobs(user.tenantId),
+        operatorApi.getOperationalFailures(user.tenantId)
+      ]))
+      .then(([currentHealth, result, durableFailures]) => {
+        setHealth(currentHealth)
+        setFailedJobs(result.failures || [])
+        setOperationalFailures(durableFailures || [])
+      })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
   }, [user])
+
+  async function resolveFailure(failure) {
+    const resolutionNote = String(failureNotes[failure.id] || '').trim()
+    if (resolutionNote.length < 5) {
+      setOperationalFailuresError('Add a resolution note of at least five characters.')
+      return
+    }
+    setResolvingFailureId(failure.id)
+    setOperationalFailuresError('')
+    try {
+      await operatorApi.resolveOperationalFailure(failure.id, user.tenantId, resolutionNote)
+      setOperationalFailures((current) => current.filter((item) => item.id !== failure.id))
+      setFailureNotes((current) => { const next = { ...current }; delete next[failure.id]; return next })
+    } catch (requestError) {
+      setOperationalFailuresError(requestError.message)
+    } finally {
+      setResolvingFailureId('')
+    }
+  }
 
   return (
     <div>
@@ -50,6 +86,98 @@ export default function OperatorOverview() {
 
       {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {loading && <div className="empty-state">Loading…</div>}
+
+      {health && (
+        <section className="card" aria-labelledby="operations-status-heading">
+          <div className="section-heading" style={{ marginBottom: 12 }}>
+            <div>
+              <h2 id="operations-status-heading" style={{ margin: 0 }}>Operations status</h2>
+              <p className="subtle">Health of database, Redis, queued work, and configured integrations.</p>
+            </div>
+            <span className={`status-pill ${health.status === 'healthy' ? 'success' : 'pending'}`} aria-live="polite">
+              {health.status === 'healthy' ? 'Healthy' : 'Degraded'}
+            </span>
+          </div>
+          <div className="metrics-row">
+            <div className="metric vendor-metric">
+              <div className="label">Database</div>
+              <div className="value" aria-label={health.database.available ? 'Database available' : 'Database unavailable'}>{health.database.available ? 'Online' : 'Unavailable'}</div>
+            </div>
+            <div className="metric vendor-metric">
+              <div className="label">Redis</div>
+              <div className="value" aria-label={health.redis.available ? 'Redis available' : 'Redis unavailable'}>{health.redis.available ? 'Online' : 'Unavailable'}</div>
+            </div>
+            <div className="metric vendor-metric">
+              <div className="label">Queued work</div>
+              <div className="value">{health.queuedJobs}</div>
+            </div>
+            <div className="metric vendor-metric">
+              <div className="label">Failed jobs</div>
+              <div className="value">{health.failedJobs}</div>
+            </div>
+          </div>
+          {health.criticalIssues.length > 0 && <div className="status-banner pending" role="alert"><span className="status-icon">!</span><span>{health.criticalIssues.join(' ')}</span></div>}
+          <p className="subtle">{health.notice}</p>
+        </section>
+      )}
+
+      <section className="card" aria-labelledby="failed-queue-jobs-heading">
+        <div className="section-heading" style={{ marginBottom: 12 }}>
+          <div>
+            <h2 id="failed-queue-jobs-heading" style={{ margin: 0 }}>Failed queue jobs</h2>
+            <p className="subtle">Recent worker failures requiring review.</p>
+          </div>
+          <span className="status-pill pending" aria-live="polite">{failedJobs.length}</span>
+        </div>
+        {failedJobsError ? <div className="status-banner error"><span className="status-icon">⚠</span><span>{failedJobsError}</span></div> : null}
+        {failedJobs.length === 0 ? (
+          <div className="empty-state">No failed jobs recorded.</div>
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger">
+              <thead><tr><th>Queue</th><th>Job</th><th>Attempts</th><th>Failed</th><th>Reason</th></tr></thead>
+              <tbody>
+                {failedJobs.map((job) => (
+                  <tr key={`${job.queue}:${job.id}`}>
+                    <td>{job.queue}</td>
+                    <td className="mono">{job.name}</td>
+                    <td className="mono">{job.attemptsMade}</td>
+                    <td className="mono">{job.finishedAt ? new Date(job.finishedAt).toLocaleString() : 'Unknown'}</td>
+                    <td>{job.failedReason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="card" aria-labelledby="operational-failures-heading">
+        <div className="section-heading" style={{ marginBottom: 12 }}>
+          <div>
+            <h2 id="operational-failures-heading" style={{ margin: 0 }}>Unresolved operational alerts</h2>
+            <p className="subtle">Durable worker failures affecting tenant financial or order workflows.</p>
+          </div>
+          <span className="status-pill pending" aria-live="polite">{operationalFailures.length}</span>
+        </div>
+        {operationalFailuresError && <div className="status-banner error" role="alert">{operationalFailuresError}</div>}
+        {operationalFailures.length === 0 ? <div className="empty-state">No unresolved operational alerts.</div> : (
+          <div className="table-wrap"><table className="ledger">
+            <thead><tr><th>Created</th><th>Queue</th><th>Failure code</th><th>Attempts</th><th>Transaction</th><th>Resolution</th></tr></thead>
+            <tbody>{operationalFailures.map((failure) => <tr key={failure.id}>
+              <td>{new Date(failure.createdAt).toLocaleString()}</td>
+              <td>{failure.queueName}<small>{failure.jobName}</small></td>
+              <td className="mono">{failure.errorCode}</td>
+              <td className="mono">{failure.attemptsMade}</td>
+              <td>{failure.transactionId ? <Link to={`/operator/transactions/${failure.transactionId}`}>{failure.transactionId}</Link> : '—'}</td>
+              <td>{user.role === 'TENANT_BRANCH_MANAGER' ? 'Ask an account admin to review.' : <div className="operational-failure-resolution">
+                <input aria-label={`Resolution note for ${failure.queueName} job`} value={failureNotes[failure.id] || ''} onChange={(event) => setFailureNotes((current) => ({ ...current, [failure.id]: event.target.value }))} placeholder="Resolution note" maxLength={1000} />
+                <button type="button" className="btn btn-secondary btn-sm" disabled={resolvingFailureId === failure.id} onClick={() => resolveFailure(failure)}>{resolvingFailureId === failure.id ? 'Saving…' : 'Resolve'}</button>
+              </div>}</td>
+            </tr>)}</tbody>
+          </table></div>
+        )}
+      </section>
 
       <section className="vendor-actions" aria-label="Vendor tools">
         <Link to="/operator/institutions" className="vendor-action-card"><span className="vendor-action-icon finance">◇</span><span><small>FINANCIAL PARTNERS</small><strong>Loans & savings</strong><em>Browse packages, apply and manage repayments or savings.</em></span><b>→</b></Link>

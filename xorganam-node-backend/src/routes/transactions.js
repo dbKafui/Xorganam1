@@ -152,7 +152,7 @@ transactionsRouter.get(
     const { rows } = await query(
       `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.status, t.amount, t.fees, t.currency,
               t.internal_reference, t.eganow_reference, t.payment_gateway_status, t.failure_reason, t.notification_sent, t.manually_triggered,
-              t.collection_msisdn, t.kyc_msisdn, t.kyc_name, t.payout_msisdn, t.created_at, t.completed_at,
+              t.collection_msisdn, t.kyc_msisdn, t.kyc_name, t.payout_msisdn, t.payout_leg, t.payout_retry_count, t.created_at, t.completed_at,
               m.display_name AS merchant_display_name
               ,sr.vendor_leg_status, sr.vendor_failure_reason,
               sr.institution_leg_status, sr.institution_failure_reason,
@@ -178,9 +178,16 @@ transactionsRouter.get(
     }
 
     const children = await query(
-      `SELECT id, type, status, amount, fees, currency, internal_reference, payment_gateway_status, created_at
+      `SELECT id, type, status, payout_leg, payout_retry_count, amount, fees, currency, internal_reference, payment_gateway_status, failure_reason, created_at
          FROM transactions WHERE parent_transaction_id = $1`,
       [txn.id]
+    )
+    const history = await query(
+      `SELECT id, previous_status, next_status, payment_gateway_status, failure_reason, changed_at
+         FROM transaction_status_history
+        WHERE transaction_id = $1 AND tenant_id = $2
+        ORDER BY changed_at DESC, id DESC LIMIT 100`,
+      [txn.id, txn.tenant_id]
     )
 
     res.json({
@@ -193,7 +200,15 @@ transactionsRouter.get(
       institutionFailureReason: txn.institution_failure_reason || null,
       notificationSent: txn.notification_sent,
       manuallyTriggered: txn.manually_triggered,
-      childTransactions: children.rows.map(mapTransaction)
+      childTransactions: children.rows.map(mapTransaction),
+      statusHistory: history.rows.map((event) => ({
+        id: event.id,
+        previousStatus: event.previous_status,
+        status: event.next_status,
+        paymentGatewayStatus: event.payment_gateway_status,
+        failureReason: event.failure_reason,
+        changedAt: event.changed_at
+      }))
     })
   })
 )
@@ -320,6 +335,7 @@ transactionsRouter.post(
     try {
       const result = await sweepToPayoutAccount(source.tenant_id, {
         merchantId: source.merchant_id,
+        reference: internalReference,
         amount: transferAmount,
         network: source.network_provider,
         narration: source.display_name || `Internal transfer for ${internalReference}`
@@ -370,14 +386,20 @@ transactionsRouter.post(
       res.json({ id: transferId, internalReference, status: 'SWEPT_INTERNAL' })
     } catch (err) {
       const message = err instanceof EganowApiError ? err.message : err.message
-      await updateTransactionStatus(query, {
-        id: transferId,
-        type: 'INTERNAL_TRANSFER',
-        currentStatus: 'PENDING',
-        nextStatus: 'FAILED',
-        fields: { failure_reason: message }
-      })
-      res.status(502).json({ message: 'Internal transfer failed.', detail: message })
+      let reconciled
+      try {
+        reconciled = await reconcileTransaction(transferId, source.tenant_id)
+      } catch {
+        reconciled = null
+      }
+      if (reconciled?.status === 'SWEPT_INTERNAL') {
+        return res.json({ id: transferId, internalReference, status: 'SWEPT_INTERNAL', reconciled: true })
+      }
+      if (!reconciled || reconciled.status === 'PENDING') {
+        await enqueueCollectionStatusPollJob({ tenantId: source.tenant_id, merchantId: source.merchant_id, transactionId: transferId })
+        return res.status(202).json({ id: transferId, internalReference, status: 'PENDING', message: 'Transfer outcome is being verified before retry.' })
+      }
+      res.status(502).json({ message: 'Internal transfer failed.', detail: reconciled.failure_reason || message })
     }
   })
 )
@@ -632,6 +654,8 @@ function mapTransaction(row) {
     currency: row.currency,
     internalReference: row.internal_reference,
     eganowReference: row.eganow_reference,
+    payoutLeg: row.payout_leg || 'NONE',
+    payoutRetryCount: Number(row.payout_retry_count || 0),
       collectionMsisdn: row.collection_msisdn || null,
       kycMsisdn: row.kyc_msisdn || null,
       kycName: row.kyc_name || null,

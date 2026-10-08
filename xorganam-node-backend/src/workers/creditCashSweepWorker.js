@@ -1,6 +1,7 @@
 import { Queue, Worker } from 'bullmq'
 import { getRedisConnection, CREDIT_CASH_SWEEP_QUEUE } from '../queue/queue.js'
 import { runDueCreditCashSweeps } from '../services/creditCashSweepService.js'
+import { recordOperationalFailure } from '../services/operationalFailureService.js'
 
 const connection = getRedisConnection()
 const queue = new Queue(CREDIT_CASH_SWEEP_QUEUE, { connection })
@@ -16,5 +17,9 @@ export const creditCashSweepWorker = new Worker(CREDIT_CASH_SWEEP_QUEUE, async (
   connection, concurrency: 1
 })
 
-creditCashSweepWorker.on('failed', (_job, error) => console.error('[credit-cash-sweep] job failed', { code: error?.code || 'WORKER_ERROR' }))
+creditCashSweepWorker.on('failed', (job, error) => {
+  console.error('[credit-cash-sweep] job failed', { code: error?.code || 'WORKER_ERROR' })
+  recordOperationalFailure({ queueName: CREDIT_CASH_SWEEP_QUEUE, job, error })
+    .catch((persistError) => console.error('[credit-cash-sweep] failure alert persistence failed', { code: persistError?.code || 'DB_ERROR' }))
+})
 creditCashSweepWorker.on('error', (error) => console.error('[credit-cash-sweep] worker error', { code: error?.code || 'WORKER_ERROR' }))

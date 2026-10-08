@@ -1,9 +1,9 @@
 import { Queue, Worker } from 'bullmq'
 import { getRedisConnection } from '../queue/queue.js'
 import { withTransaction } from '../db/pool.js'
-import { isGatewayFailure, isGatewaySuccess, queryTransactionStatus } from '../services/eganowClient.js'
 import { cancelAndRestockOrder, markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
-import { updateTransactionStatus } from '../services/transactionStateService.js'
+import { reconcileTransaction } from '../services/reconciliationService.js'
+import { recordOperationalFailure } from '../services/operationalFailureService.js'
 
 const QUEUE_NAME = 'storefront-order-expiry'
 const connection = getRedisConnection()
@@ -17,7 +17,7 @@ queue.add('release-expired-orders', {}, {
 }).catch((error) => console.error('[order-expiry] initial scan failed', { code: error?.code || 'WORKER_ERROR' }))
 
 async function processExpiredOrder() {
-  return withTransaction(async (tx) => {
+  const decision = await withTransaction(async (tx) => {
     const { rows: candidateRows } = await tx.query(
       `SELECT o.id, t.id AS collection_id
          FROM orders o
@@ -60,46 +60,34 @@ async function processExpiredOrder() {
     if (collection.status !== 'PENDING' || !collection.internal_reference) {
       return { orderId: order.id, pendingReconciliation: true }
     }
-
-    // Keep the order row locked through the authoritative Eganow check and
-    // compare-and-swap cancellation, so a concurrent webhook cannot both
-    // place the order and release its stock.
-    const result = await queryTransactionStatus(order.tenant_id, collection.internal_reference, { merchantId: order.merchant_id })
-    if (isGatewaySuccess(result.status)) {
-      await updateTransactionStatus(tx, {
-        id: collection.id,
-        type: 'COLLECTION',
-        currentStatus: 'PENDING',
-        nextStatus: 'RECEIVED',
-        fields: {
-          payment_gateway_status: result.status,
-          completed_at: new Date()
-        }
-      })
-      await markStorefrontOrderPaid(tx, collection.id)
-      return { orderId: order.id, placed: true }
+    return {
+      orderId: order.id,
+      collectionId: collection.id,
+      tenantId: order.tenant_id,
+      merchantId: order.merchant_id,
+      reconcile: true
     }
-    if (isGatewayFailure(result.status)) {
-      await updateTransactionStatus(tx, {
-        id: collection.id,
-        type: 'COLLECTION',
-        currentStatus: 'PENDING',
-        nextStatus: 'FAILED',
-        fields: {
-          payment_gateway_status: result.status,
-          failure_reason: 'Eganow confirmed the order payment failed.',
-          completed_at: new Date()
-        }
-      })
-    } else if (!result.status || !['PENDING', 'PROCESSING', 'INITIATED'].includes(String(result.status).toUpperCase())) {
-      return { orderId: order.id, pendingReconciliation: true }
-    }
-    const cancelled = await cancelAndRestockOrder(tx, order.id, {
-      onlyPending: true,
-      reason: isGatewayFailure(result.status) ? 'Eganow declined the order payment.' : 'Payment prompt expired without a successful Eganow result.'
-    })
-    return { orderId: order.id, cancelled }
   })
+
+  if (!decision.reconcile) return decision
+
+  try {
+    const reconciled = await reconcileTransaction(decision.collectionId, decision.tenantId)
+    if (reconciled?.status === 'FAILED') {
+      const cancelled = await cancelAndRestockOrder(decision.orderId, {
+        onlyPending: true,
+        reason: 'Eganow confirmed the order payment failed.'
+      })
+      return { orderId: decision.orderId, cancelled }
+    }
+    if (['RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'PARTIALLY_SETTLED'].includes(reconciled?.status)) {
+      return { orderId: decision.orderId, placed: true }
+    }
+    return { orderId: decision.orderId, pendingReconciliation: true }
+  } catch (error) {
+    console.error('[order-expiry] payment outcome remains unconfirmed', { code: error?.code || 'RECONCILIATION_ERROR' })
+    return { orderId: decision.orderId, pendingReconciliation: true }
+  }
 }
 
 async function releaseExpiredOrders() {
@@ -118,5 +106,9 @@ export const orderExpiryWorker = new Worker(QUEUE_NAME, async (job) => {
   return releaseExpiredOrders()
 }, { connection, concurrency: 1 })
 
-orderExpiryWorker.on('failed', (_job, error) => console.error('[order-expiry] job failed', { code: error?.code || 'WORKER_ERROR' }))
+orderExpiryWorker.on('failed', (job, error) => {
+  console.error('[order-expiry] job failed', { code: error?.code || 'WORKER_ERROR' })
+  recordOperationalFailure({ queueName: QUEUE_NAME, job, error })
+    .catch((persistError) => console.error('[order-expiry] failure alert persistence failed', { code: persistError?.code || 'DB_ERROR' }))
+})
 orderExpiryWorker.on('error', (error) => console.error('[order-expiry] worker error', { code: error?.code || 'WORKER_ERROR' }))

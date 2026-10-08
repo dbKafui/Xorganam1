@@ -8,7 +8,9 @@ process.env.JWT_SECRET ??= 'test-secret'
 
 const {
   assertStorefrontOrderCancellationAllowed,
-  PREVENTED_ORDER_CANCELLATION_STATUS
+  PREVENTED_ORDER_CANCELLATION_STATUS,
+  isOrderPaymentSafeToCancel,
+  isOrderCancellationSafe
 } = await import('../src/services/storefrontOrderService.js')
 
 describe('storefront order policy integrity', () => {
@@ -23,5 +25,22 @@ describe('storefront order policy integrity', () => {
     assert.equal(PREVENTED_ORDER_CANCELLATION_STATUS.PENDING_PAYMENT, false)
     assert.equal(PREVENTED_ORDER_CANCELLATION_STATUS.FULFILLED, true)
     assert.equal(PREVENTED_ORDER_CANCELLATION_STATUS.CANCELLED, true)
+  })
+
+  it('releases stock only when no payment exists or payment failure is confirmed', () => {
+    assert.equal(isOrderPaymentSafeToCancel(null), true)
+    assert.equal(isOrderPaymentSafeToCancel(undefined), true)
+    assert.equal(isOrderPaymentSafeToCancel('FAILED'), true)
+    for (const status of ['PENDING', 'RECEIVED', 'SWEPT_INTERNAL', 'PARTIALLY_SETTLED', 'PAID_OUT', 'UNKNOWN']) {
+      assert.equal(isOrderPaymentSafeToCancel(status), false, `${status} must retain its reservation`)
+    }
+  })
+
+  it('requires a clean reconciliation and unpaid cancellable credit plan before release', () => {
+    assert.equal(isOrderCancellationSafe({ paymentStatus: null }), true)
+    assert.equal(isOrderCancellationSafe({ paymentStatus: 'FAILED', unresolvedReconciliation: true }), false)
+    assert.equal(isOrderCancellationSafe({ paymentStatus: null, creditPlanStatus: 'COMPLETED' }), false)
+    assert.equal(isOrderCancellationSafe({ paymentStatus: null, creditPlanStatus: 'ACTIVE', hasPaidInstallments: true }), false)
+    assert.equal(isOrderCancellationSafe({ paymentStatus: null, creditPlanStatus: 'ACTIVE', hasPaidInstallments: false }), true)
   })
 })

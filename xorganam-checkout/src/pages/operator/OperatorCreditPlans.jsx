@@ -7,6 +7,7 @@ const money = (value) => `GHS ${Number(value || 0).toFixed(2)}`
 
 export default function OperatorCreditPlans() {
   const { user } = useOperatorAuth()
+  const canManageCreditPlans = ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user?.role)
   const [merchants, setMerchants] = useState([])
   const [merchantId, setMerchantId] = useState(user?.merchantId || '')
   const [plans, setPlans] = useState([])
@@ -150,7 +151,7 @@ export default function OperatorCreditPlans() {
         </div>
       </section>
 
-      <form className="card" onSubmit={createPlan}>
+      {canManageCreditPlans ? <form className="card" onSubmit={createPlan}>
         <h2>Create credit plan</h2>
         <div className="two-col">
           <div className="field"><label htmlFor="credit-customer">Customer mobile number</label><input id="credit-customer" required value={form.customerIdentifier} onChange={(event) => setForm({ ...form, customerIdentifier: event.target.value })} placeholder="0551234567" /></div>
@@ -167,7 +168,7 @@ export default function OperatorCreditPlans() {
         </div>
         <p className="policy-hint">Installments are full payments. The financed balance plus markup is divided evenly, with any rounding remainder added to the final installment.</p>
         <button className="btn btn-primary" disabled={busy}>{busy ? 'Creating…' : 'Create credit plan'}</button>
-      </form>
+      </form> : <div className="status-banner pending" role="status">Branch managers can view assigned-merchant plans and create payment links. Ask a tenant admin or manager to originate plans or record cash payments.</div>}
 
       <section className="card"><h2>Credit plans</h2>
         {!plans.length ? <div className="empty-state">No credit plans for this merchant yet.</div> : plans.map((item) => <button type="button" className="credit-plan-row" key={item.id} onClick={() => operatorApi.getCreditPlan(item.id).then(setPlan).catch((requestError) => setError(requestError.message))}>
@@ -177,6 +178,7 @@ export default function OperatorCreditPlans() {
       </section>
 
       {plan && <section className="card"><div className="portal-header"><div><h2>{plan.customer_name || plan.customer_identifier}</h2><p>{plan.customer_identifier} · {plan.status.toLowerCase()}</p></div><button className="btn btn-secondary" onClick={() => setPlan(null)}>Close</button></div>
+        {plan.status === 'DEFAULTED' && <div className="status-banner warning" role="status">This plan is in default, but its unpaid installments remain collectible. The plan closes after the remaining balance is paid.</div>}
         <div className="kv-row"><span>Outstanding promised</span><strong>{money(plan.outstanding_promised ?? plan.installments.filter((item) => item.status !== 'PAID').reduce((sum, item) => sum + Number(item.amount_due), 0))}</strong></div>
         <div className="kv-row"><span>Actually collected</span><strong>{money(plan.actually_collected ?? plan.installments.filter((item) => item.status === 'PAID').reduce((sum, item) => sum + Number(item.amount_due), 0))}</strong></div>
         {plan.installments.map((item) => <div className="credit-plan-row" key={item.id}>
@@ -184,7 +186,7 @@ export default function OperatorCreditPlans() {
           <span className="credit-plan-actions"><span className={`status-pill ${item.status.toLowerCase()}`}>{item.status.toLowerCase()}</span>
             {['PENDING', 'OVERDUE'].includes(item.status) && <>
               <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => copyPaymentLink(item)}>Copy payment link</button>
-              <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => recordCash(item)}>Record cash</button>
+              {canManageCreditPlans && <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => recordCash(item)}>Record cash</button>}
             </>}
           </span>
         </div>)}

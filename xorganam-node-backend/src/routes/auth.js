@@ -229,14 +229,15 @@ authRouter.get('/me', authenticate, asyncHandler(async (req, res) => {
   if (rows.length === 0) return res.status(401).json({ message: 'Session no longer valid.' })
 
   const { rows: permissions } = await query(
-    `SELECT permission_type, resource_id FROM user_permissions WHERE user_id = $1`, [req.user.id]
+    `SELECT permission_type, resource_id, expires_at FROM user_permissions WHERE user_id = $1`, [req.user.id]
   )
 
   res.json({
     ...mapUser(rows[0]),
     permissions: permissions.map((permission) => ({
       permissionType: permission.permission_type,
-      resourceId: permission.resource_id
+      resourceId: permission.resource_id,
+      expiresAt: permission.expires_at
     }))
   })
 }))

@@ -37,8 +37,14 @@ export default function OperatorTeam() {
   const [creating, setCreating] = useState(false)
   const [selectedUser, setSelectedUser] = useState(null)
   const [selectedUserPermissions, setSelectedUserPermissions] = useState([])
+  const [permissionHistory, setPermissionHistory] = useState([])
+  const [permissionHistoryLoading, setPermissionHistoryLoading] = useState(false)
+  const [permissionHistoryError, setPermissionHistoryError] = useState('')
   const [newPermissionType, setNewPermissionType] = useState('')
   const [newPermissionResource, setNewPermissionResource] = useState('')
+  const [newPermissionExpiresAt, setNewPermissionExpiresAt] = useState('')
+  const [bulkPermissionUserIds, setBulkPermissionUserIds] = useState([])
+  const [bulkPermissionBusy, setBulkPermissionBusy] = useState(false)
   const [selectedEditUser, setSelectedEditUser] = useState(null)
   const [editForm, setEditForm] = useState({ firstName: '', lastName: '', phoneNumber: '', role: '' })
   const [merchantAssignmentUser, setMerchantAssignmentUser] = useState(null)
@@ -62,16 +68,26 @@ export default function OperatorTeam() {
 
   async function loadPermissionsFor(userId) {
     try {
-      if (!operatorApi.listUserPermissions) {
+      if (!operatorApi.listUserPermissions || !operatorApi.listUserPermissionHistory) {
         setError('Permission management is unavailable in this version.')
         setSelectedUserPermissions([])
+        setPermissionHistory([])
         return
       }
-      const perms = await operatorApi.listUserPermissions(userId)
+      setPermissionHistoryError('')
+      setPermissionHistoryLoading(true)
+      const [perms, history] = await Promise.all([
+        operatorApi.listUserPermissions(userId),
+        operatorApi.listUserPermissionHistory(userId)
+      ])
       setSelectedUserPermissions(perms || [])
+      setPermissionHistory(history || [])
     } catch (err) {
-      setError(`Failed to load permissions: ${err.message}`)
+      setPermissionHistoryError(`Failed to load permission history: ${err.message}`)
       setSelectedUserPermissions([])
+      setPermissionHistory([])
+    } finally {
+      setPermissionHistoryLoading(false)
     }
   }
 
@@ -169,6 +185,42 @@ export default function OperatorTeam() {
     }
   }
 
+  async function grantPermissionBulk() {
+    if (!newPermissionType || !bulkPermissionUserIds.length) {
+      setError('Select a permission and at least one team member.')
+      return
+    }
+    const expiryTimestamp = newPermissionExpiresAt ? new Date(newPermissionExpiresAt) : null
+    if (expiryTimestamp && (!Number.isFinite(expiryTimestamp.getTime()) || expiryTimestamp.getTime() <= Date.now())) {
+      setError('Permission expiry must be a future date and time.')
+      return
+    }
+    if (!window.confirm(`Grant ${getPermissionLabel(newPermissionType)} to ${bulkPermissionUserIds.length} team members?`)) return
+
+    setError('')
+    setNotice('')
+    setBulkPermissionBusy(true)
+    try {
+      const result = await operatorApi.grantPermissionBulk({
+        tenantId: user.tenantId,
+        userIds: bulkPermissionUserIds,
+        permissionType: newPermissionType,
+        resourceId: newPermissionResource || null,
+        expiresAt: expiryTimestamp?.toISOString() || null
+      })
+      setNotice(`Bulk permission update: ${result.granted} granted, ${result.renewed} renewed, ${result.alreadyActive} already active.`)
+      setBulkPermissionUserIds([])
+      setNewPermissionType('')
+      setNewPermissionResource('')
+      setNewPermissionExpiresAt('')
+      if (selectedUser) loadPermissionsFor(selectedUser.id)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBulkPermissionBusy(false)
+    }
+  }
+
   return (
     <div>
       <div className="portal-header">
@@ -178,7 +230,7 @@ export default function OperatorTeam() {
         </div>
       </div>
 
-      {error && <div className="status-banner error"><span className="status-icon">⚠</span><span>{error}</span></div>}
+      {error && <div className="status-banner error" role="alert"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
 
       {!canManage && (
@@ -248,6 +300,7 @@ export default function OperatorTeam() {
             <table className="ledger">
               <thead>
                 <tr>
+                  {user.role === 'TENANT_ADMIN' && <th scope="col">Bulk grant</th>}
                   <th>Name</th>
                   <th>Email</th>
                   <th>Email verification</th>
@@ -260,6 +313,24 @@ export default function OperatorTeam() {
               <tbody>
                 {members.map((m) => (
                   <tr key={m.id}>
+                    {user.role === 'TENANT_ADMIN' && <td>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${m.firstName} ${m.lastName} for bulk permission grant`}
+                        checked={bulkPermissionUserIds.includes(m.id)}
+                        disabled={m.id === user.id || bulkPermissionBusy}
+                        onChange={(event) => setBulkPermissionUserIds((current) => {
+                          if (event.target.checked) {
+                            if (current.length >= 100) {
+                              setError('Bulk permission grants are limited to 100 users per request.')
+                              return current
+                            }
+                            return [...current, m.id]
+                          }
+                          return current.filter((id) => id !== m.id)
+                        })}
+                      />
+                    </td>}
                     <td>{m.firstName} {m.lastName}</td>
                     <td className="mono">{m.email}</td>
                     <td><span className={`status-pill ${m.emailVerifiedAt ? 'approved' : 'pending'}`}>{m.emailVerifiedAt ? 'Verified' : 'Pending verification'}</span></td>
@@ -289,6 +360,37 @@ export default function OperatorTeam() {
                 ))}
               </tbody>
             </table>
+            {user.role === 'TENANT_ADMIN' && bulkPermissionUserIds.length > 0 && (
+              <section className="card" aria-label="Bulk permission grant" style={{ marginTop: 16 }}>
+                <h3>Grant one permission to {bulkPermissionUserIds.length} team members</h3>
+                <div className="two-col">
+                  <div className="field">
+                    <label htmlFor="bulk-permission-type">Permission</label>
+                    <select id="bulk-permission-type" value={newPermissionType} onChange={(event) => setNewPermissionType(event.target.value)}>
+                      <option value="">Select a permission…</option>
+                      {Object.values(PERMISSION_TYPES).map((permissionType) => (
+                        <option key={permissionType} value={permissionType}>{getPermissionLabel(permissionType)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="bulk-permission-scope">Merchant scope</label>
+                    <select id="bulk-permission-scope" value={newPermissionResource} onChange={(event) => setNewPermissionResource(event.target.value)}>
+                      <option value="">Tenant-wide</option>
+                      {merchants.map((merchant) => <option key={merchant.id} value={merchant.id}>{merchant.displayName}</option>)}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="bulk-permission-expiry">Expires (optional)</label>
+                    <input id="bulk-permission-expiry" type="datetime-local" value={newPermissionExpiresAt} onChange={(event) => setNewPermissionExpiresAt(event.target.value)} />
+                  </div>
+                </div>
+                <button className="btn btn-primary" type="button" disabled={bulkPermissionBusy} onClick={grantPermissionBulk}>
+                  {bulkPermissionBusy ? 'Applying…' : 'Grant to selected'}
+                </button>
+                <button className="btn btn-link" type="button" disabled={bulkPermissionBusy} onClick={() => setBulkPermissionUserIds([])}>Clear selection</button>
+              </section>
+            )}
             {/* Merchant assignment section */}
             {canManage && (
               <div style={{ marginTop: 16, padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
@@ -373,10 +475,14 @@ export default function OperatorTeam() {
                                 🌐 Tenant-wide permission
                               </div>
                             )}
+                            <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                              {p.expiresAt ? `Expires ${new Date(p.expiresAt).toLocaleString()}` : 'No expiry'}
+                            </div>
                           </div>
                           <button
                             className="btn btn-link btn-sm"
                             onClick={() => {
+                              if (!window.confirm(`Revoke ${getPermissionLabel(p.permissionType)}${p.resourceId ? ' for this merchant' : ' tenant-wide'}? The user may lose access immediately.`)) return
                               operatorApi.revokePermission(selectedUser.id, p.id)
                                 .then(() => {
                                   loadPermissionsFor(selectedUser.id)
@@ -393,11 +499,46 @@ export default function OperatorTeam() {
                     </ul>
                   )}
                 </div>
+
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <h4 style={{ margin: 0 }}>Permission History</h4>
+                    <button
+                      className="btn btn-link btn-sm"
+                      type="button"
+                      onClick={() => loadPermissionsFor(selectedUser.id)}
+                      disabled={permissionHistoryLoading}
+                    >
+                      {permissionHistoryLoading ? 'Refreshing…' : 'Refresh'}
+                    </button>
+                  </div>
+                  {permissionHistoryLoading ? (
+                    <div className="empty-state">Loading permission history…</div>
+                  ) : permissionHistoryError ? (
+                    <div className="empty-state" role="alert">
+                      {permissionHistoryError}
+                    </div>
+                  ) : permissionHistory.length === 0 ? (
+                    <div className="empty-state">No permission changes recorded.</div>
+                  ) : (
+                    <ol style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                      {permissionHistory.map((event) => (
+                        <li key={event.id} style={{ padding: '10px 0', borderBottom: '1px solid #eee' }}>
+                          <strong>{event.action === 'permission.granted' ? 'Granted' : event.action === 'permission.renewed' ? 'Renewed' : 'Revoked'}</strong>
+                          <span style={{ color: '#666' }}> — {event.permissionType ? getPermissionLabel(event.permissionType) : 'Permission'}</span>
+                          <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                            {new Date(event.createdAt).toLocaleString()} · {event.resourceId ? 'Scoped permission' : 'Tenant-wide permission'} · {event.expiresAt ? `Expires ${new Date(event.expiresAt).toLocaleString()}` : 'No expiry'}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
                 
                 {/* Grant new permission */}
                 <div style={{ padding: 12, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
                   <h4 style={{ marginTop: 0 }}>Grant Additional Permission</h4>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 12, alignItems: 'flex-end' }}>
+                  <div className="bulk-permission-grid">
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label htmlFor="permission-type">Permission Type</label>
                       <select
@@ -424,6 +565,15 @@ export default function OperatorTeam() {
                         ))}
                       </select>
                     </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label htmlFor="permission-expires-at">Expires (optional)</label>
+                      <input
+                        id="permission-expires-at"
+                        type="datetime-local"
+                        value={newPermissionExpiresAt}
+                        onChange={(event) => setNewPermissionExpiresAt(event.target.value)}
+                      />
+                    </div>
                     <button
                       className="btn btn-primary btn-sm"
                       onClick={() => {
@@ -431,14 +581,21 @@ export default function OperatorTeam() {
                           setError('Please select a permission type')
                           return
                         }
+                        const expiryTimestamp = newPermissionExpiresAt ? new Date(newPermissionExpiresAt) : null
+                        if (expiryTimestamp && (!Number.isFinite(expiryTimestamp.getTime()) || expiryTimestamp.getTime() <= Date.now())) {
+                          setError('Permission expiry must be a future date and time.')
+                          return
+                        }
                         operatorApi.grantPermission(selectedUser.id, {
                           permissionType: newPermissionType,
-                          resourceId: newPermissionResource || null
+                          resourceId: newPermissionResource || null,
+                          expiresAt: expiryTimestamp?.toISOString() || null
                         })
                           .then(() => {
                             setNotice(`Permission "${getPermissionLabel(newPermissionType)}" granted`)
                             setNewPermissionType('')
                             setNewPermissionResource('')
+                            setNewPermissionExpiresAt('')
                             loadPermissionsFor(selectedUser.id)
                           })
                           .catch((e) => {

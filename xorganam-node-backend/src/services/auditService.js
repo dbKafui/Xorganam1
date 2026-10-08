@@ -20,14 +20,16 @@ export async function writePlatformAudit({
   details = {},
   ipAddress = null,
   userAgent = null,
-  requestId = null
+  requestId = null,
+  client = null
 }) {
   if (!action || !resourceType) {
     throw new Error('Platform audit requires action and resourceType.')
   }
   validateAuditActor(actorUserId, actorInstitutionStaffId)
 
-  const { rows } = await query(
+  const runner = client || query
+  const result = await runner(
     `INSERT INTO platform_audit_log
        (actor_user_id, actor_institution_staff_id, tenant_id, merchant_id, action,
         resource_type, resource_id, details, ip_address, user_agent, request_id)
@@ -47,7 +49,7 @@ export async function writePlatformAudit({
       requestId
     ]
   )
-  return rows[0]
+  return result.rows[0]
 }
 
 export async function auditRequest(req, action, resourceType, resourceId, details = {}) {

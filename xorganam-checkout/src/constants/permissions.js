@@ -27,7 +27,6 @@ export const PERMISSION_TYPES = {
   MANAGE_ACCOUNT_SETTINGS: 'MANAGE_ACCOUNT_SETTINGS',
   MANAGE_KYC: 'MANAGE_KYC'
 }
-
 // Readable labels for permissions
 export const PERMISSION_LABELS = {
   [PERMISSION_TYPES.INITIATE_COLLECTION]: 'Initiate Collections',
@@ -141,12 +140,20 @@ export function getPermissionDescription(permissionType) {
  * Check if a permission is granted (or can be inferred from role)
  */
 export function hasPermission(userRole, grantedPermissions = [], permissionType, resourceId = null) {
+  const activePermissions = grantedPermissions.filter((permission) => (
+    !permission.expiresAt || new Date(permission.expiresAt).getTime() > Date.now()
+  ))
   // Check if it's a default role permission
   const roleDefaults = getDefaultPermissionsForRole(userRole)
-  if (roleDefaults.includes(permissionType)) return true
+  if (roleDefaults.includes(permissionType)) {
+    if (!resourceId) return true
+    return activePermissions.some((permission) => (
+      permission.permissionType === permissionType && permission.resourceId === resourceId
+    ))
+  }
   
   // Check if it's in the explicitly granted permissions
-  return grantedPermissions.some(
+  return activePermissions.some(
     (permission) => permission.permissionType === permissionType &&
       (!permission.resourceId || (resourceId && permission.resourceId === resourceId))
   )

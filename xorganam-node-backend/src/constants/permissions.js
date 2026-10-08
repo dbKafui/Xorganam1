@@ -101,6 +101,9 @@ export function getDefaultPermissionsForRole(role) {
 export function hasPermission(userRole, grantedPermissions = [], permissionType, resourceId = null) {
   // Admins always have all permissions
   if (userRole === 'TENANT_ADMIN') return true
+  const activePermissions = grantedPermissions.filter((permission) => (
+    !permission.expiresAt || new Date(permission.expiresAt).getTime() > Date.now()
+  ))
   
   // Check role-based default permissions
   const roleDefaults = getDefaultPermissionsForRole(userRole)
@@ -108,13 +111,13 @@ export function hasPermission(userRole, grantedPermissions = [], permissionType,
     // For scoped permissions, also check if they have it for the specific resource
     if (!resourceId) return true
     // If resourceId is specified, check if they have scoped permission
-    return grantedPermissions.some(
+    return activePermissions.some(
       p => p.permissionType === permissionType && p.resourceId === resourceId
     )
   }
   
   // Check explicitly granted permissions
-  return grantedPermissions.some(
+  return activePermissions.some(
     p => p.permissionType === permissionType && 
          (!resourceId || !p.resourceId || p.resourceId === resourceId)
   )

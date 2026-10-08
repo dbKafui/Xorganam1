@@ -171,6 +171,12 @@ export default function OperatorTransactionDetail() {
           <h2>Part of this payment went through, part did not</h2>
           <p>Your share: {txn.vendorLegStatus || 'Not available'}{txn.vendorFailureReason ? ` — ${txn.vendorFailureReason}` : ''}</p>
           <p>Institution share: {txn.institutionLegStatus || 'Not available'}{txn.institutionFailureReason ? ` — ${txn.institutionFailureReason}` : ''}</p>
+          {txn.childTransactions.filter((child) => child.type === 'PAYOUT' && child.payoutLeg !== 'NONE' && child.status === 'FAILED').map((child) => (
+            <p key={child.id} role="status">
+              {child.payoutLeg} payout retry {child.payoutRetryCount}/5 failed.
+              {child.payoutRetryCount >= 5 ? ' Automated retries are exhausted. Raise a dispute or contact support before another payout attempt.' : ' The system will verify the provider outcome before retrying.'}
+            </p>
+          ))}
           <form onSubmit={raiseDispute}>
             <div className="field"><label htmlFor="dispute-reason">Something wrong with this payout?</label>
               <textarea id="dispute-reason" required value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Tell us what you noticed." />
@@ -198,6 +204,25 @@ export default function OperatorTransactionDetail() {
         {txn.completedAt && <div className="kv-row"><span>Completed</span><span className="mono">{new Date(txn.completedAt).toLocaleString()}</span></div>}
       </div>
 
+      <div className="card">
+        <h2>Transaction history</h2>
+        {!txn.statusHistory?.length ? <div className="empty-state">No recorded status changes.</div> : (
+          <ol className="transaction-history" aria-label="Transaction status history">
+            {txn.statusHistory.map((event) => (
+              <li key={event.id}>
+                <span className="transaction-history-marker" aria-hidden="true" />
+                <div>
+                  <strong>{event.previousStatus ? `${event.previousStatus.replaceAll('_', ' ')} → ` : 'Created as '}{event.status.replaceAll('_', ' ')}</strong>
+                  {event.paymentGatewayStatus && <small>Provider: {event.paymentGatewayStatus}</small>}
+                  {event.failureReason && <small>{event.failureReason}</small>}
+                  <time dateTime={event.changedAt}>{new Date(event.changedAt).toLocaleString()}</time>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
       {txn.childTransactions.length > 0 && (
         <div className="card">
           <h2>Linked transactions</h2>
@@ -206,7 +231,10 @@ export default function OperatorTransactionDetail() {
             <tbody>
               {txn.childTransactions.map((c) => (
                 <tr key={c.id}>
-                  <td className="mono"><Link to={`/operator/transactions/${c.id}`}>{c.internalReference}</Link></td>
+                  <td className="mono">
+                    <Link to={`/operator/transactions/${c.id}`}>{c.internalReference}</Link>
+                    {c.failureReason && <small className="table-note">{c.failureReason}</small>}
+                  </td>
                   <td>{c.type.replace('_', ' ')}</td>
                   <td className="mono">{money(c.amount)} {c.currency}</td>
                   <td><span className={`status-pill ${c.status.toLowerCase()}`}>{c.status.replace('_', ' ')}</span></td>

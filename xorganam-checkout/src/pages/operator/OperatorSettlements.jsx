@@ -13,6 +13,14 @@ export default function OperatorSettlements() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const statusCounts = rows.reduce((counts, row) => {
+    const status = String(row.sweep_status || 'UNKNOWN')
+    counts[status] = (counts[status] || 0) + 1
+    return counts
+  }, {})
+  const pendingAccrual = rows.reduce((total, row) => total + Number(row.pending_accrual_amount || 0), 0)
+  const sweptAccrual = rows.reduce((total, row) => total + Number(row.swept_accrual_amount || 0), 0)
+  const maxAccrual = Math.max(pendingAccrual, sweptAccrual, 1)
 
   const refresh = useCallback(async () => {
     if (!user?.tenantId) return
@@ -42,6 +50,32 @@ export default function OperatorSettlements() {
     </header>
     {error && <div className="status-banner error" role="alert"><span className="status-icon">!</span><span>{error}</span></div>}
     {notice && <div className="status-banner pending" role="status"><span className="status-icon">✓</span><span>{notice}</span></div>}
+    {!loading && rows.length > 0 && <section className="settlement-visual-summary" aria-label="Settlement dashboard">
+      <div>
+        <h2>Sweep status</h2>
+        {['PENDING', 'ACCRUED_UNSWEPT', 'PARTIALLY_SETTLED', 'SETTLED'].map((status) => {
+          const count = statusCounts[status] || 0
+          return <div className="settlement-status-row" key={status}>
+            <span>{status.replaceAll('_', ' ')}</span>
+            <div className="settlement-bar-track" role="progressbar" aria-label={`${status.replaceAll('_', ' ')} sweeps`} aria-valuemin="0" aria-valuemax={rows.length} aria-valuenow={count}>
+              <span className={`settlement-bar ${status.toLowerCase()}`} style={{ width: `${count / rows.length * 100}%` }} />
+            </div>
+            <strong>{count}</strong>
+          </div>
+        })}
+      </div>
+      <div>
+        <h2>Accrual movement</h2>
+        <div className="settlement-accrual-row"><span>Pending</span><strong>GHS {amount(pendingAccrual)}</strong></div>
+        <div className="settlement-bar-track" role="progressbar" aria-label="Pending accrual amount" aria-valuemin="0" aria-valuemax={maxAccrual} aria-valuenow={pendingAccrual}>
+          <span className="settlement-bar pending" style={{ width: `${pendingAccrual / maxAccrual * 100}%` }} />
+        </div>
+        <div className="settlement-accrual-row"><span>Swept</span><strong>GHS {amount(sweptAccrual)}</strong></div>
+        <div className="settlement-bar-track" role="progressbar" aria-label="Swept accrual amount" aria-valuemin="0" aria-valuemax={maxAccrual} aria-valuenow={sweptAccrual}>
+          <span className="settlement-bar settled" style={{ width: `${sweptAccrual / maxAccrual * 100}%` }} />
+        </div>
+      </div>
+    </section>}
     <section className="card">
       <div className="section-heading"><div><h2>Sweep reconciliation</h2><p>Settlement legs recorded by the backend worker.</p></div><button className="btn btn-secondary" disabled={loading} onClick={refresh}>Refresh</button></div>
       {loading ? <div className="empty-state" aria-live="polite">Loading settlement history…</div> : rows.length === 0 ? <div className="empty-state">No periodic settlement records yet.</div> :

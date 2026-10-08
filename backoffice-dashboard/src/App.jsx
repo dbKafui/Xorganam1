@@ -15,6 +15,7 @@ import Reports from './pages/Reports'
 import StorefrontOperations from './pages/StorefrontOperations'
 import InstitutionApplications from './pages/InstitutionApplications'
 import SecuritySettings from './pages/SecuritySettings'
+import AuditLog from './pages/AuditLog'
 
 export default function App() {
   return (
@@ -42,6 +43,7 @@ export default function App() {
             <Route path="storefront-operations" element={<StorefrontOperations />} />
             <Route path="institution-applications" element={<InstitutionApplications />} />
             <Route path="security-settings" element={<SecuritySettings />} />
+            <Route path="audit-log" element={<AuditLog />} />
           </Route>
         </Routes>
       </AuthProvider>
