@@ -7,6 +7,7 @@ export default function Login() {
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [challenge, setChallenge] = useState('')
@@ -55,13 +56,13 @@ export default function Login() {
         {challenge ? <form onSubmit={handleMfa} style={{ marginTop: 20 }}>
           <h2>Verify your authenticator</h2>
           <p>Use an authenticator app. Enter the six digit code to continue.</p>
-          {secret && <div className="alert">Add this setup key to your authenticator app: <strong>{secret}</strong></div>}
-          {error && <div className="alert alert-error">{error}</div>}
+          {secret && <div className="alert alert-success">Add this setup key to your authenticator app: <strong>{secret}</strong></div>}
+          {error && <div className="alert alert-error" role="alert">{error}</div>}
           <label htmlFor="mfa-code">Authenticator code</label>
-          <input id="mfa-code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(e) => setCode(e.target.value)} />
+          <input id="mfa-code" className="mfa-code-input" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} />
           <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>{loading ? 'Verifying…' : 'Verify and continue'}</button>
         </form> : <form onSubmit={handleSubmit} style={{ marginTop: 20 }}>
-          {error && <div className="alert alert-error">{error}</div>}
+          {error && <div className="alert alert-error" role="alert">{error}</div>}
 
           <div className="field" style={{ marginBottom: 12 }}>
             <label htmlFor="email">Email</label>
@@ -77,17 +78,24 @@ export default function Login() {
 
           <div className="field" style={{ marginBottom: 18 }}>
             <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
+            <div className="password-field">
+              <input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                required
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <button type="button" className="password-toggle" aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={showPassword} onClick={() => setShowPassword((current) => !current)}>{showPassword ? 'Hide' : 'Show'}</button>
+            </div>
           </div>
 
           <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
             {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+          <button type="button" className="btn btn-secondary" style={{ width: '100%', marginTop: 10 }} onClick={() => navigate('/reset-password')}>
+            Forgot password?
           </button>
         </form>}
       </div>

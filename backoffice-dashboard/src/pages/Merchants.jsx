@@ -66,6 +66,7 @@ export default function Merchants() {
   }
 
   async function deleteMerchant(merchantId) {
+    if (!window.confirm('Delete this merchant permanently? This cannot be undone.')) return
     setError('')
     setNotice('')
     try {

@@ -3,8 +3,17 @@ const phonePattern = /^[+\d().\s-]+$/u
 const currencyPattern = /^\d+(?:\.\d{1,2})?$/u
 const accountPattern = /^\d{6,34}$/u
 const ghanaCardPattern = /^GHA-\d{9}-\d$/u
-const unsafeControls = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u
 const blockedKeys = new Set(['__proto__', 'prototype', 'constructor'])
+
+function hasUnsafeControlCharacter(value) {
+  for (const character of value) {
+    const code = character.codePointAt(0)
+    if (code <= 0x08 || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || code === 0x7f) {
+      return true
+    }
+  }
+  return false
+}
 
 export function isValidGhanaCardNumber(value) {
   return typeof value === 'string' && ghanaCardPattern.test(value.trim().toUpperCase())
@@ -40,7 +49,7 @@ function validateScalar(value, key, path, errors) {
       errors.push({ field: path, message: 'Text is too long.' })
       return value
     }
-    if (unsafeControls.test(value)) errors.push({ field: path, message: 'Control characters are not allowed.' })
+    if (hasUnsafeControlCharacter(value)) errors.push({ field: path, message: 'Control characters are not allowed.' })
 
     if (normalizedKey.includes('email')) {
       const email = value.trim().toLowerCase()

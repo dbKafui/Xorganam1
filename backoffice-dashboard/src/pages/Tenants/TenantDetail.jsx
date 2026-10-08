@@ -107,6 +107,7 @@ export default function TenantDetail() {
   }
 
   async function deleteTenant() {
+    if (!window.confirm(`Delete ${tenant.companyName} and all linked merchants permanently? This cannot be undone.`)) return
     setError('')
     setNotice('')
     try {
@@ -159,6 +160,7 @@ export default function TenantDetail() {
   }
 
   async function deleteMerchant(merchantId) {
+    if (!window.confirm('Delete this merchant permanently? This cannot be undone.')) return
     setError('')
     setNotice('')
     try {

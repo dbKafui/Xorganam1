@@ -4,6 +4,7 @@ import ProtectedRoute from './components/ProtectedRoute'
 import Layout from './components/Layout'
 
 import Login from './pages/Login'
+import ResetPassword from './pages/ResetPassword'
 import Overview from './pages/Overview'
 import TenantsList from './pages/Tenants/TenantsList'
 import TenantDetail from './pages/Tenants/TenantDetail'
@@ -21,6 +22,7 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
 
           <Route
             path="/"

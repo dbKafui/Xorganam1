@@ -108,6 +108,7 @@ export default function OperatorCreditPlans() {
   }
 
   async function disableWebhook() {
+    if (!window.confirm('Disable this credit webhook? Future payment status updates will no longer be delivered.')) return
     setError('')
     setBusy(true)
     try {

@@ -131,6 +131,14 @@ const tenantLoginLimiter = rateLimit({
   message: { message: 'Too many login attempts. Please try again later.' }
 })
 
+const passwordResetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many reset requests. Please try again later.' }
+})
+
 const institutionRegistrationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
@@ -148,6 +156,7 @@ app.use('/api/v1/public', publicLimiter, publicRouter)
 
 app.use('/api/v1/auth/login', tenantLoginLimiter)
 app.use('/api/v1/auth/mfa', mfaVerificationLimiter, mfaRouter)
+app.use('/api/v1/auth/password-reset', passwordResetLimiter)
 app.use('/api/v1/auth', authRouter)
 app.use('/api/v1/platform/security-settings', platformSecurityRouter)
 app.use('/api/v1/institution-auth/login', institutionLoginLimiter)

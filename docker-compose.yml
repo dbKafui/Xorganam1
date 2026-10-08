@@ -10,7 +10,9 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - type: volume
+        source: xorganam1_postgres_data
+        target: /var/lib/postgresql/data
       - ./xorganam-node-backend/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
     networks: [data]
     healthcheck:
@@ -25,7 +27,9 @@ services:
     ports:
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     volumes:
-      - redis_data:/data
+      - type: volume
+        source: xorganam1_redis_data
+        target: /data
     networks: [data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -147,8 +151,10 @@ services:
     networks: [app]
 
 volumes:
-  postgres_data:
-  redis_data:
+  xorganam1_postgres_data:
+    external: true
+  xorganam1_redis_data:
+    external: true
   kyc_uploads:
 
 networks:

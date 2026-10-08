@@ -1,8 +1,9 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { encrypt, decrypt } from '../security/encryption.js'
-import { signToken, verifyToken } from '../security/jwt.js'
+import { verifyToken } from '../security/jwt.js'
 import { createTotpSecret, verifyTotp, totpProvisioningUri } from '../security/totp.js'
+import { createSession } from '../services/sessionService.js'
 
 export const mfaRouter = Router()
 const ENCRYPTION_CONTEXT = 'xorganam-authenticator-mfa-v1'
@@ -29,7 +30,7 @@ async function loadPrincipal(challenge) {
       `SELECT s.id, s.institution_id, s.branch_id, i.name AS institution_name,
               s.email, s.first_name, s.last_name, s.role,
               s.is_active, s.mfa_enabled, s.mfa_secret_encrypted, s.mfa_pending_secret_encrypted,
-              i.status AS institution_status
+              s.token_version, i.status AS institution_status
          FROM institution_staff s JOIN institutions i ON i.id = s.institution_id
         WHERE s.id = $1 AND s.institution_id = $2`, [challenge.sub, challenge.institutionId]
     )
@@ -41,7 +42,7 @@ async function loadPrincipal(challenge) {
     `SELECT u.id, u.tenant_id, u.merchant_id, t.company_name AS tenant_company_name,
             u.email, u.first_name, u.last_name, u.role,
             u.is_active, u.mfa_enabled, u.mfa_secret_encrypted, u.mfa_pending_secret_encrypted,
-            t.status AS tenant_status
+            u.token_version, t.status AS tenant_status
        FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1`, [challenge.sub]
   )
   const user = rows[0]
@@ -87,8 +88,24 @@ mfaRouter.post('/verify', async (req, res, next) => {
     }
     const row = principal.row
     const session = principal.kind === 'INSTITUTION'
-      ? signToken({ id: row.id, institutionId: row.institution_id, institutionStaffId: row.id, role: row.role, mfa: true })
-      : signToken({ id: row.id, tenantId: row.tenant_id, role: row.role, mfa: true })
+      ? await createSession({
+          id: row.id,
+          institution_id: row.institution_id,
+          institution_staff_id: row.id,
+          tenant_id: null,
+          token_version: row.token_version,
+          role: row.role,
+          mfa: true
+        }, req)
+      : await createSession({
+          id: row.id,
+          institution_id: null,
+          institution_staff_id: null,
+          tenant_id: row.tenant_id,
+          token_version: row.token_version,
+          role: row.role,
+          mfa: true
+        }, req)
     if (principal.kind === 'INSTITUTION') {
       return res.json({ token: session, staff: { id: row.id, institutionId: row.institution_id, institutionName: row.institution_name, branchId: row.branch_id || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role } })
     }

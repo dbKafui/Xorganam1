@@ -75,3 +75,49 @@ export async function sendMerchantEmail(tenantId, toEmail, subject, body) {
   console.warn('[email] delivery skipped: no email provider is configured')
   return false
 }
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
+export async function sendPasswordResetEmail({ email, firstName, lastName, resetUrl }) {
+  const apiKey = process.env.RESEND_API_KEY
+  const fromEmail = process.env.RESEND_FROM_EMAIL
+  if (!apiKey || !fromEmail) {
+    console.warn('[password-reset] delivery skipped: Resend is not configured')
+    return false
+  }
+
+  const safeFirstName = escapeHtml(firstName)
+  const safeLastName = escapeHtml(lastName)
+  const safeResetUrl = escapeHtml(resetUrl)
+  const safeSubject = `Password reset request for ${safeFirstName} ${safeLastName}`.replace(/[\r\n]+/g, ' ')
+
+  try {
+    const response = await axios.post(
+      'https://api.resend.com/emails',
+      {
+        from: fromEmail,
+        to: [email],
+        subject: safeSubject,
+        html: `<p>Hello ${safeFirstName},</p><p>Use the secure link below to reset your password. This link expires in 30 minutes.</p><p><a href="${safeResetUrl}">Reset password</a></p>`
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15_000
+      }
+    )
+    return response.status >= 200 && response.status < 300
+  } catch (err) {
+    console.error('[password-reset] delivery failed', { code: err?.code || 'EMAIL_GATEWAY_ERROR' })
+    return false
+  }
+}

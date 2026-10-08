@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { publicApi } from '../api/client'
 
 const MSISDN_PATTERN = /^(?:0[0-9]{9}|233[0-9]{9})$/
+const MAX_PAYMENT_AMOUNT = 1_000_000
 
 function normalizeMsisdn(rawMsisdn) {
   if (!rawMsisdn) return ''
@@ -31,6 +32,7 @@ export default function Checkout() {
   const [card, setCard] = useState({ number: '', name: '', month: '', year: '', cvv: '' })
   const [redirectHtml, setRedirectHtml] = useState('')
   const [formError, setFormError] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
 
   // idle -> submitting -> success | failed
   const [stage, setStage] = useState('idle')
@@ -60,12 +62,20 @@ export default function Checkout() {
     }
 
     const numericAmount = Number(amount)
-    if (!numericAmount || numericAmount <= 0) {
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
       setFormError('Enter an amount greater than 0.')
+      return
+    }
+    if (numericAmount > MAX_PAYMENT_AMOUNT) {
+      setFormError(`Enter an amount no greater than GHS ${MAX_PAYMENT_AMOUNT.toLocaleString()}.`)
       return
     }
     if (collectionMethod === 'MOMO' && !MSISDN_PATTERN.test(msisdn)) {
       setFormError('Enter a valid mobile number in local or international format, e.g. 0551234567 or 233551234567.')
+      return
+    }
+    if (collectionMethod === 'CARD' && (!card.number || !card.name || !card.month || !card.year || !card.cvv)) {
+      setFormError('Complete all card details before continuing.')
       return
     }
 
@@ -235,13 +245,12 @@ export default function Checkout() {
               </div>
 
               {collectionMethod === 'CARD' && <div className="two-col">
-                <div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={card.number} onChange={(e) => setCard((v) => ({ ...v, number: e.target.value }))} /></div>
-                <div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={card.name} onChange={(e) => setCard((v) => ({ ...v, name: e.target.value }))} /></div>
-                <div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" autoComplete="cc-exp-month" value={card.month} onChange={(e) => setCard((v) => ({ ...v, month: e.target.value }))} /></div>
-                <div className="field"><label>Expiry year</label><input required inputMode="numeric" autoComplete="cc-exp-year" placeholder="2030" value={card.year} onChange={(e) => setCard((v) => ({ ...v, year: e.target.value }))} /></div>
-                <div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={card.cvv} onChange={(e) => setCard((v) => ({ ...v, cvv: e.target.value }))} /></div>
+                <div className="field"><label htmlFor="card-number">Card number</label><input id="card-number" required minLength="12" maxLength="19" autoComplete="cc-number" inputMode="numeric" value={card.number} onChange={(e) => setCard((v) => ({ ...v, number: e.target.value.replace(/\D/g, '').slice(0, 19) }))} /></div>
+                <div className="field"><label htmlFor="card-name">Cardholder name</label><input id="card-name" required minLength="2" maxLength="128" autoComplete="cc-name" value={card.name} onChange={(e) => setCard((v) => ({ ...v, name: e.target.value }))} /></div>
+                <div className="field"><label htmlFor="card-month">Expiry month</label><input id="card-month" required type="number" min="1" max="12" autoComplete="cc-exp-month" value={card.month} onChange={(e) => setCard((v) => ({ ...v, month: e.target.value.slice(0, 2) }))} /></div>
+                <div className="field"><label htmlFor="card-year">Expiry year</label><input id="card-year" required inputMode="numeric" min="2000" max="2099" autoComplete="cc-exp-year" placeholder="2030" value={card.year} onChange={(e) => setCard((v) => ({ ...v, year: e.target.value.replace(/\D/g, '').slice(0, 4) }))} /></div>
+                <div className="field"><label htmlFor="card-cvv">CVV</label><div className="password-field"><input id="card-cvv" required minLength="3" maxLength="4" type={showPassword ? 'text' : 'password'} inputMode="numeric" autoComplete="cc-csc" value={card.cvv} onChange={(e) => setCard((v) => ({ ...v, cvv: e.target.value.replace(/\D/g, '').slice(0, 4) }))} /><button type="button" className="password-toggle" aria-label={showPassword ? 'Hide CVV' : 'Show CVV'} aria-pressed={showPassword} onClick={() => setShowPassword((current) => !current)}>{showPassword ? 'Hide' : 'Show'}</button></div></div>
               </div>}
-
               {collectionMethod === 'MOMO' && <div className="field">
                 <label htmlFor="msisdn">Mobile money number</label>
                 <input
@@ -256,40 +265,43 @@ export default function Checkout() {
 
               {collectionMethod === 'MOMO' && <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0' }}>Payment via {merchant?.networkProvider || 'mobile money'}</p>}
 
-              <button type="submit" className="pay-btn">Pay now</button>
+              <button type="submit" className="pay-btn" disabled={stage === 'submitting'}>{stage === 'submitting' ? 'Starting payment…' : 'Pay now'}</button>
             </form>
           </>
         )}
 
-        {stage === 'auth' && <section><h2>Verify card payment</h2><iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={redirectHtml} style={{ width: '100%', minHeight: 520, border: 0 }} /><button className="secondary-btn" onClick={() => setStage('pending')}>I completed verification</button></section>}
+        {stage === 'auth' && <section className="payment-progress"><div className="payment-stepper" aria-label="Payment progress"><span className="complete">1</span><i /><span className="active">2</span><i /><span>3</span></div><h2>Verify card payment</h2><p>Complete the secure card verification shown below. Your payment details are not stored by XORGANAM.</p><iframe title="Card verification" sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation" srcDoc={redirectHtml} style={{ width: '100%', minHeight: 520, border: 0 }} /><button className="secondary-btn" onClick={() => setStage('pending')}>I completed verification</button></section>}
 
         {stage === 'submitting' && (
-          <div className="status-banner pending">
+          <div className="status-banner pending" role="status" aria-live="polite">
             <span className="spinner" />
-            <span>Starting your payment…</span>
+            <span><strong>Starting your payment…</strong><small>Do not close this page while the payment request is being sent.</small></span>
           </div>
         )}
 
         {stage === 'pending' && (
           <>
-            <div className="status-banner pending">
+            <div className="payment-stepper" aria-label="Payment progress"><span className="complete">1</span><i /><span className="active">2</span><i /><span>3</span></div>
+            <div className="status-banner pending" role="status" aria-live="polite">
               <span className="spinner" />
-              <span>{statusMessage || 'Payment prompt sent. Waiting for approval on your phone…'}</span>
+              <span><strong>Payment pending</strong><small>{statusMessage || 'Payment prompt sent. Waiting for approval on your phone…'}</small></span>
             </div>
             <div className="receipt">
               <div className="receipt-row"><span>Amount</span><span className="mono">GHS {Number(amount).toFixed(2)}</span></div>
               <div className="receipt-row"><span>Reference</span><span className="mono">{reference}</span></div>
               <div className="receipt-row"><span>Gateway status</span><span className="mono">{paymentGatewayStatus || 'PENDING'}</span></div>
             </div>
+            <p className="payment-security-note"><span>✓</span> For your security, do not share the payment reference or card details with anyone.</p>
             <button className="secondary-btn" onClick={reset}>Start another payment</button>
           </>
         )}
 
         {stage === 'success' && (
           <>
-            <div className="status-banner success">
+            <div className="payment-stepper" aria-label="Payment progress"><span className="complete">1</span><i /><span className="complete">2</span><i /><span className="complete">3</span></div>
+            <div className="status-banner success" role="status" aria-live="polite">
               <span className="status-icon">✓</span>
-              <span>{statusMessage || 'Payment completed successfully.'}</span>
+              <span><strong>Payment completed</strong><small>{statusMessage || 'Your payment was completed successfully.'}</small></span>
             </div>
             <div className="receipt">
               <div className="receipt-row"><span>Amount</span><span className="mono">GHS {Number(amount).toFixed(2)}</span></div>
@@ -302,9 +314,10 @@ export default function Checkout() {
 
         {stage === 'failed' && (
           <>
-            <div className="status-banner error">
+            <div className="payment-stepper" aria-label="Payment progress"><span className="complete">1</span><i /><span className="error-step">2</span><i /><span>3</span></div>
+            <div className="status-banner error" role="alert">
               <span className="status-icon">⚠</span>
-              <span>{statusMessage || 'Payment could not be started.'}</span>
+              <span><strong>Payment could not continue</strong><small>{statusMessage || 'Payment could not be started.'}</small></span>
             </div>
             {reference && (
               <div className="receipt">

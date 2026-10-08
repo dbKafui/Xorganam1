@@ -304,25 +304,20 @@ async function requestDeveloperJwtToken(ctx, tenantId, baseUrl, options = {}) {
     throw new TenantCredentialsError('Tenant Eganow x-Auth is not configured.', tenantId)
   }
 
-  let response
-  try {
-    response = await axios.get('/api/auth/token', {
-      baseURL: baseUrl,
-      timeout: 30_000,
-      maxRedirects: 0,
-      proxy: false,
-      auth: {
-        username: ctx.apiUsername,
-        password: ctx.apiPassword
-      },
-      headers: {
-        'x-Auth': ctx.xAuth,
-        'Content-Type': 'application/json'
-      }
-    })
-  } catch (err) {
-    throw err
-  }
+  const response = await axios.get('/api/auth/token', {
+    baseURL: baseUrl,
+    timeout: 30_000,
+    maxRedirects: 0,
+    proxy: false,
+    auth: {
+      username: ctx.apiUsername,
+      password: ctx.apiPassword
+    },
+    headers: {
+      'x-Auth': ctx.xAuth,
+      'Content-Type': 'application/json'
+    }
+  })
 
   const data = response.data
   const jwtToken = data?.developerJwtToken
@@ -387,7 +382,7 @@ export async function sweepToPayoutAccount(tenantId, { amount, network: _network
       }
 
       const response = await client.post('/api/transactions/collection-to-payout', payload)
-      
+
       return normalizeEganowResponse(response.data)
     },
     { tenantId, operation: 'InternalTransfer' }
@@ -409,8 +404,6 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
       let paypartnerCode = normalizePaypartnerCode(network)
       const inferredPaypartnerCode = isBank ? null : inferPaypartnerCodeFromMsisdn(normalizedDestination)
       if (inferredPaypartnerCode) {
-        if (paypartnerCode && paypartnerCode !== inferredPaypartnerCode) {
-        }
         paypartnerCode = inferredPaypartnerCode
       }
 

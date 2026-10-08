@@ -36,6 +36,7 @@ export default function CreditCustomerPlans() {
   async function requestCode(event) {
     event.preventDefault()
     setError('')
+    setNotice('')
     const normalized = normalizePhone(phone)
     if (!normalized) return setError('Enter a valid mobile number.')
     try {
@@ -49,6 +50,7 @@ export default function CreditCustomerPlans() {
   async function verifyCode(event) {
     event.preventDefault()
     setError('')
+    setNotice('')
     try {
       const session = await publicApi.verifyCreditCustomerCode(phone, code)
       creditCustomerApi.saveSession(session)
@@ -86,12 +88,12 @@ export default function CreditCustomerPlans() {
       {!creditCustomerApi.hasSession() && !codeRequested && <form className="pay-card" onSubmit={requestCode}>
         <h2>Verify your phone number</h2>
         <div className="field"><label htmlFor="credit-phone">Mobile number</label><input id="credit-phone" inputMode="tel" autoComplete="tel" required value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="0551234567" /></div>
-        <button className="pay-btn">Send verification code</button>
+        <button className="pay-btn" disabled={loading}>Send verification code</button>
       </form>}
       {!creditCustomerApi.hasSession() && codeRequested && <form className="pay-card" onSubmit={verifyCode}>
         <h2>Enter your code</h2><p>We sent a six-digit code if a plan matches {phone}.</p>
         <div className="field"><label htmlFor="credit-code">Verification code</label><input id="credit-code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value)} /></div>
-        <button className="pay-btn">Verify and continue</button>
+        <button className="pay-btn" disabled={loading}>{loading ? 'Verifying…' : 'Verify and continue'}</button>
       </form>}
       {creditCustomerApi.hasSession() && (loading ? <div className="empty-state">Loading your plans…</div> : !plans.length ? <div className="empty-state">No credit plans were found for this verified number.</div> : plans.map((plan) => {
         const next = plan.installments.find((item) => ['PENDING', 'OVERDUE'].includes(item.status))

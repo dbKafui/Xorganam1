@@ -1,6 +1,6 @@
-import { verifyToken } from '../security/jwt.js'
 import { query } from '../db/pool.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
+import { validateSessionToken } from '../services/sessionService.js'
 
 export const INSTITUTION_ROLE_RANK = Object.freeze({
   FIELD_OFFICER: 1,
@@ -16,7 +16,7 @@ export async function institutionAuthenticate(req, res, next) {
 
   let payload
   try {
-    payload = verifyToken(header.slice('Bearer '.length))
+    payload = await validateSessionToken(header.slice('Bearer '.length))
   } catch {
     return res.status(401).json({ message: 'Invalid or expired session.' })
   }
@@ -31,7 +31,7 @@ export async function institutionAuthenticate(req, res, next) {
   try {
     const { rows } = await query(
       `SELECT s.id, s.institution_id, s.branch_id, s.first_name, s.last_name,
-              s.email, s.role, s.is_active, i.status AS institution_status
+              s.email, s.role, s.is_active, s.token_version, i.status AS institution_status
          FROM institution_staff s
          JOIN institutions i ON i.id = s.institution_id
         WHERE s.id = $1 AND s.institution_id = $2`,
@@ -43,6 +43,9 @@ export async function institutionAuthenticate(req, res, next) {
     }
 
     const staff = rows[0]
+    if (staff.token_version !== payload.tokenVersion) {
+      return res.status(401).json({ message: 'Invalid or expired session.' })
+    }
     req.institutionAuth = {
       id: staff.id,
       institutionId: staff.institution_id,
@@ -50,7 +53,8 @@ export async function institutionAuthenticate(req, res, next) {
       role: staff.role,
       firstName: staff.first_name,
       lastName: staff.last_name,
-      email: staff.email
+      email: staff.email,
+      sessionId: payload.sessionId
     }
     req.institution = { id: staff.institution_id }
     next()

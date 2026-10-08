@@ -66,7 +66,12 @@ export function AuthProvider({ children }) {
 
   const setupMfa = useCallback((challengeToken) => authApi.setupMfa(challengeToken), [])
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout()
+    } catch {
+      // The browser state is still cleared so a stale token cannot remain usable.
+    }
     sessionStorage.removeItem('xorganam_token')
     sessionStorage.removeItem('xorganam_user')
     localStorage.removeItem('xorganam_token')

@@ -106,11 +106,13 @@ export default function InstitutionProfile() {
   }
 
   async function toggleBranch(branch) {
+    const willActivate = !branch.is_active
+    if (!window.confirm(`${willActivate ? 'Activate' : 'Deactivate'} ${branch.name}? ${willActivate ? 'The branch will become available for new activity.' : 'Existing staff assignments must be resolved first.'}`)) return
     setError('')
     setNotice('')
     setSaving(true)
     try {
-      await institutionApi.updateBranch(branch.id, { isActive: !branch.is_active })
+      await institutionApi.updateBranch(branch.id, { isActive: willActivate })
       setNotice(`Branch ${branch.is_active ? 'deactivated' : 'activated'}.`)
       await load()
     } catch (requestError) {

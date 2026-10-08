@@ -35,6 +35,12 @@ export default function OperatorInitiateCollection() {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    const numericAmount = Number(form.amount)
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0 || numericAmount > 1_000_000) {
+      setError('Enter an amount greater than 0 and no greater than GHS 1,000,000.')
+      return
+    }
+    if (!window.confirm(`Start a ${form.collectionMethod === 'MOMO' ? 'mobile money' : 'card'} collection for ${numericAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} GHS for ${form.merchantId}?`)) return
     setError('')
     setResult(null)
     setBusy(true)

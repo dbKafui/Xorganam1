@@ -9,6 +9,8 @@ import { signToken } from '../security/jwt.js'
 import { institutionDisputeScope, institutionLinkScope } from '../services/institutionScope.js'
 import { institutionMembershipAdapterInternals } from '../services/institutionMembershipAdapterService.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
+import { createSession, revokeCurrentSession } from '../services/sessionService.js'
+import { writePlatformAudit } from '../services/auditService.js'
 
 export const institutionAuthRouter = Router()
 export const institutionPortalRouter = Router()
@@ -61,12 +63,21 @@ institutionAuthRouter.post(
   asyncHandler(async (req, res) => {
     const { email, password } = req.body || {}
     if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+      await writePlatformAudit({
+        action: 'INSTITUTION_LOGIN_FAILED',
+        resourceType: 'institution_staff',
+        details: { reason: 'missing_credentials' },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
+      })
       return res.status(400).json({ message: 'Email and password are required.' })
     }
 
     const { rows } = await query(
       `SELECT s.id, s.institution_id, i.name AS institution_name, s.branch_id,
-              s.first_name, s.last_name, s.email, s.role, s.password_hash, s.is_active, s.created_at, s.mfa_enabled
+              s.first_name, s.last_name, s.email, s.role, s.password_hash, s.is_active,
+              s.created_at, s.mfa_enabled, s.token_version
          FROM institution_staff s
          JOIN institutions i ON i.id = s.institution_id AND i.status = 'ACTIVE'
         WHERE lower(s.email) = lower($1)`,
@@ -74,20 +85,52 @@ institutionAuthRouter.post(
     )
 
     if (!rows.length || !rows[0].is_active) {
+      await writePlatformAudit({
+        action: 'INSTITUTION_LOGIN_FAILED',
+        resourceType: 'institution_staff',
+        details: { reason: 'unknown_user' },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
+      })
       return res.status(401).json({ message: 'Invalid email or password.' })
     }
 
     const staff = rows[0]
     if (!(await verifyPassword(password, staff.password_hash))) {
+      await writePlatformAudit({
+        action: 'INSTITUTION_LOGIN_FAILED',
+        resourceType: 'institution_staff',
+        resourceId: staff.id,
+        tenantId: staff.institution_id,
+        details: { reason: 'invalid_password' },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
+      })
       return res.status(401).json({ message: 'Invalid email or password.' })
     }
 
     if (!(await isMfaRequired('INSTITUTION', staff.id))) {
-      const token = signToken({
+      const token = await createSession({
         id: staff.id,
-        institutionId: staff.institution_id,
-        institutionStaffId: staff.id,
-        role: staff.role
+        institution_id: staff.institution_id,
+        institution_staff_id: staff.id,
+        tenant_id: null,
+        token_version: staff.token_version,
+        role: staff.role,
+        mfa: true
+      }, req)
+      await writePlatformAudit({
+        actorInstitutionStaffId: staff.id,
+        tenantId: staff.institution_id,
+        action: 'INSTITUTION_LOGIN_SUCCEEDED',
+        resourceType: 'institution_staff',
+        resourceId: staff.id,
+        details: { mfaRequired: false },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
       })
       return res.json({ mfaRequired: false, token, staff: mapStaff(staff) })
     }
@@ -101,7 +144,34 @@ institutionAuthRouter.post(
       principalType: 'INSTITUTION'
     })
     await query('UPDATE institution_staff SET last_login_at = now(), updated_at = now() WHERE id = $1', [staff.id])
+    await writePlatformAudit({
+      actorInstitutionStaffId: staff.id,
+      tenantId: staff.institution_id,
+      action: 'INSTITUTION_LOGIN_MFA_REQUIRED',
+      resourceType: 'institution_staff',
+      resourceId: staff.id,
+      details: { mfaEnrollmentRequired: !staff.mfa_enabled },
+      ipAddress: req.ip || null,
+      userAgent: req.headers['user-agent'] || null,
+      requestId: req.id || null
+    })
     res.json({ mfaRequired: true, mfaEnrollmentRequired: !staff.mfa_enabled, challengeToken, staff: mapStaff(staff) })
+  })
+)
+
+institutionAuthRouter.post(
+  '/logout',
+  institutionAuthenticate,
+  asyncHandler(async (req, res) => {
+    const revoked = await revokeCurrentSession(
+      req.institutionAuth.sessionId,
+      req.institutionAuth.id,
+      'INSTITUTION',
+      req.institutionAuth.id,
+      'user_logout'
+    )
+    if (!revoked) return res.status(404).json({ message: 'Session no longer exists.' })
+    res.status(204).send()
   })
 )
 

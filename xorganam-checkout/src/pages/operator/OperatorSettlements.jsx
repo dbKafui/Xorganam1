@@ -27,6 +27,7 @@ export default function OperatorSettlements() {
   useEffect(() => { refresh() }, [refresh])
 
   async function runDue() {
+    if (!window.confirm('Queue all due periodic settlements for this tenant? This may create financial ledger entries and should only be done during an authorized settlement window.')) return
     setBusy(true); setError(''); setNotice('')
     try {
       const result = await operatorApi.runPeriodicSettlements(user.tenantId)

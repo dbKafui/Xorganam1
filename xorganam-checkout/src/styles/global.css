@@ -115,6 +115,35 @@ body {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 58px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mfa-code-input {
+  font-family: var(--font-mono);
+  letter-spacing: 0.3em;
+  text-align: center;
+}
+
 .field .prefix-input {
   position: relative;
 }
@@ -198,10 +227,88 @@ body {
   color: var(--red);
 }
 
+.status-banner strong,
+.status-banner small {
+  display: block;
+}
+
+.status-banner strong {
+  font-size: 13px;
+}
+
+.status-banner small {
+  margin-top: 3px;
+  color: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: .82;
+}
+
 .status-icon {
   font-size: 15px;
   line-height: 1;
   margin-top: 1px;
+}
+
+.payment-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 0 0 18px;
+}
+
+.payment-stepper span {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--muted-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.payment-stepper span.complete,
+.payment-stepper span.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.payment-stepper span.error-step {
+  border-color: var(--red);
+  background: var(--red);
+  color: #fff;
+}
+
+.payment-stepper i {
+  width: 32px;
+  height: 1px;
+  background: var(--line);
+}
+
+.payment-progress > p {
+  margin: -2px 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.payment-security-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 13px 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.payment-security-note span {
+  color: var(--accent);
 }
 
 .spinner {
@@ -641,6 +748,18 @@ button, .btn, a { transition: color .16s ease, background-color .16s ease, borde
 .portal-redesign .portal-nav a.active { color: #19352b; background: #c6ed83; font-weight: 650; }
 .nav-glyph { display: grid; place-items: center; width: 20px; color: #9eb8ad; font-size: 17px; line-height: 1; }
 .portal-redesign .portal-nav a.active .nav-glyph { color: #31563f; }
+.nav-badge { margin-left: auto; min-width: 20px; padding: 1px 5px; border-radius: 20px; background: #c6ed83; color: #18352b; font-family: var(--font-mono); font-size: 9px; font-weight: 700; text-align: center; }
+.notification-nav-link { position: relative; }
+.notification-banner { display: grid; gap: 12px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid #f0d99b; border-radius: 10px; background: #fff8e8; }
+.notification-banner > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.notification-banner > div:first-child strong { color: #72541f; }
+.notification-banner > div:first-child span { color: #8e6e2c; font-size: 10px; }
+.notification-list { display: grid; gap: 7px; }
+.notification-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-top: 7px; border-top: 1px solid #f0dfb7; }
+.notification-item strong, .notification-item small { display: block; }
+.notification-item strong { color: #4b3b20; font-size: 11px; }
+.notification-item small { margin-top: 3px; color: #7c6b4f; font-size: 10px; line-height: 1.45; }
+.notification-item button { flex: 0 0 auto; border: 0; background: transparent; color: #8c6520; font-size: 10px; font-weight: 650; text-decoration: underline; }
 .portal-sidebar-bottom { margin-top: auto; }
 .portal-secure { display: flex; align-items: center; gap: 8px; padding: 12px 9px; color: #9eb8ad; font-size: 10px; }
 .portal-secure i, .portal-topbar-status i { width: 7px; height: 7px; border-radius: 50%; background: #8fce61; }

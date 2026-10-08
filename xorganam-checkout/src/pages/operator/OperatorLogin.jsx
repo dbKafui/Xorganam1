@@ -8,6 +8,7 @@ export default function OperatorLogin() {
   const location = useLocation()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [challenge, setChallenge] = useState('')
@@ -52,14 +53,14 @@ export default function OperatorLogin() {
 
         {challenge ? <form onSubmit={submitMfa}>
           <p>Complete authenticator verification to continue.</p>
-          {secret && <p><strong>Authenticator setup key:</strong> {secret}</p>}
-          {error && <div className="status-banner error"><span>{error}</span></div>}
-          <div className="field"><label>Six digit code</label><input required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} /></div>
+          {secret && <div className="status-banner success"><span className="status-icon">✓</span><span><strong>Authenticator setup key:</strong> {secret}</span></div>}
+          {error && <div className="status-banner error" role="alert"><span className="status-icon">⚠</span><span>{error}</span></div>}
+          <div className="field"><label htmlFor="operator-mfa-code">Six digit code</label><input id="operator-mfa-code" className="mfa-code-input" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} /></div>
           <button type="submit" className="pay-btn" disabled={loading}>{loading ? 'Verifying…' : 'Verify and continue'}</button>
         </form> : <form onSubmit={handleSubmit}>
-          {location.state?.registered && <div className="status-banner">Registration complete. Sign in to enroll MFA.</div>}
+          {location.state?.registered && <div className="status-banner success"><span className="status-icon">✓</span><span>Registration complete. Sign in to enroll MFA.</span></div>}
           {error && (
-            <div className="status-banner error">
+            <div className="status-banner error" role="alert">
               <span className="status-icon">⚠</span>
               <span>{error}</span>
             </div>
@@ -71,8 +72,11 @@ export default function OperatorLogin() {
           </div>
 
           <div className="field">
-            <label>Password</label>
-            <input required type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <label htmlFor="operator-password">Password</label>
+            <div className="password-field">
+              <input id="operator-password" required type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <button type="button" className="password-toggle" aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={showPassword} onClick={() => setShowPassword((current) => !current)}>{showPassword ? 'Hide' : 'Show'}</button>
+            </div>
           </div>
 
           <button type="submit" className="pay-btn" disabled={loading}>

@@ -1,7 +1,7 @@
-import { verifyToken } from '../security/jwt.js'
 import { query } from '../db/pool.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
 import { ROLE_PERMISSIONS } from '../constants/permissions.js'
+import { validateSessionToken } from '../services/sessionService.js'
 
 /**
  * Verifies the Bearer token and attaches req.user = { id, tenantId, role }.
@@ -17,7 +17,7 @@ export async function authenticate(req, res, next) {
 
   let payload
   try {
-    payload = verifyToken(header.slice('Bearer '.length))
+    payload = await validateSessionToken(header.slice('Bearer '.length))
   } catch {
     return res.status(401).json({ message: 'Invalid or expired session.' })
   }
@@ -26,7 +26,8 @@ export async function authenticate(req, res, next) {
       return res.status(401).json({ message: 'A verified MFA session is required.' })
     }
     const { rows } = await query(
-      `SELECT u.id, u.tenant_id, u.merchant_id, u.role, u.is_active, u.first_name, u.last_name, u.email, t.status AS tenant_status
+      `SELECT u.id, u.tenant_id, u.merchant_id, u.role, u.is_active, u.first_name, u.last_name, u.email, t.status AS tenant_status,
+              u.token_version
          FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1`,
       [payload.sub]
     )
@@ -36,6 +37,9 @@ export async function authenticate(req, res, next) {
     }
 
     const user = rows[0]
+    if (user.token_version !== payload.tokenVersion) {
+      return res.status(401).json({ message: 'Invalid or expired session.' })
+    }
     if (user.tenant_id && user.tenant_status === 'SUSPENDED') {
       return res.status(403).json({ message: 'Tenant access is suspended.' })
     }
@@ -47,7 +51,8 @@ export async function authenticate(req, res, next) {
       firstName: user.first_name,
       lastName: user.last_name,
       email: user.email,
-      isPlatformAdmin: user.role === 'PLATFORM_ADMIN'
+      isPlatformAdmin: user.role === 'PLATFORM_ADMIN',
+      sessionId: payload.sessionId
     }
     next()
   } catch (err) {

@@ -22,6 +22,8 @@ export default function OperatorLayout() {
     setNotifications((current) => current.map((item) => item.id === id ? { ...item, read_at: new Date().toISOString() } : item))
   }
 
+  const unreadCount = notifications.filter((item) => !item.read_at).length
+
   return (
     <div className="portal portal-redesign">
       <aside className="portal-sidebar">
@@ -34,6 +36,7 @@ export default function OperatorLayout() {
           <NavLink to="/operator/transactions"><span className="nav-glyph">⇄</span> Transactions</NavLink>
           {user?.role !== 'TENANT_BRANCH_MANAGER' && <NavLink to="/operator/reports"><span className="nav-glyph">▥</span> Reports</NavLink>}
           {['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user?.role) && <NavLink to="/operator/settlements"><span className="nav-glyph">◷</span> Settlements</NavLink>}
+          <NavLink to="/operator/dashboard#notifications" className="notification-nav-link"><span className="nav-glyph">◌</span> Notifications {unreadCount > 0 && <span className="nav-badge" aria-label={`${unreadCount} unread notifications`}>{unreadCount}</span>}</NavLink>
         </nav>
         <div className="portal-nav-caption">GROW YOUR BUSINESS</div>
         <nav className="portal-nav">
@@ -50,12 +53,14 @@ export default function OperatorLayout() {
       <main className="portal-main">
         <header className="portal-topbar"><span>Business workspace <b>/</b> <strong>{user?.tenantCompanyName || user?.companyName || 'Vendor dashboard'}</strong></span><span className="portal-topbar-status"><i /> Account workspace</span></header>
       <div className="portal-body">
-        {notifications.some((item) => !item.read_at) && <section aria-label="Unread notifications" style={{ margin: '0 0 16px', padding: 16, background: '#fff8e8', border: '1px solid #f0d99b', borderRadius: 8 }}>
-          <strong>Notifications</strong>
-          {notifications.filter((item) => !item.read_at).slice(0, 5).map((item) => <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginTop: 10 }}>
-            <span><strong>{item.title}</strong><br />{item.body}</span>
-            <button type="button" onClick={() => markRead(item.id)}>Mark read</button>
-          </div>)}
+        {notifications.some((item) => !item.read_at) && <section id="notifications" className="notification-banner" aria-label="Unread notifications">
+          <div><strong>Notifications</strong><span>{unreadCount} unread update{unreadCount === 1 ? '' : 's'}</span></div>
+          <div className="notification-list">
+            {notifications.filter((item) => !item.read_at).slice(0, 5).map((item) => <div className="notification-item" key={item.id}>
+              <span><strong>{item.title}</strong><small>{item.body}</small></span>
+              <button type="button" onClick={() => markRead(item.id)}>Mark read</button>
+            </div>)}
+          </div>
         </section>}
         <Outlet />
       </div>

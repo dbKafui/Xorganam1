@@ -55,11 +55,17 @@ export default function OperatorTransactionDetail() {
 
   async function startTransfer(e) {
     e.preventDefault()
+    const amount = Number(transferAmount) || undefined
+    if (amount && amount > Number(txn.amount)) {
+      setError('Transfer amount cannot exceed the collection amount.')
+      return
+    }
+    if (!window.confirm(`Move ${amount ? money(amount) : 'the full collection'} from the collection wallet to the payout wallet?`)) return
     setError('')
     setNotice('')
     setBusy(true)
     try {
-      await operatorApi.internalTransfer({ sourceTransactionId: txn.id, merchantId: txn.merchantId, amount: Number(transferAmount) || undefined })
+      await operatorApi.internalTransfer({ sourceTransactionId: txn.id, merchantId: txn.merchantId, amount })
       setNotice('Internal transfer initiated.')
       load()
     } catch (err) {
@@ -71,6 +77,15 @@ export default function OperatorTransactionDetail() {
 
   async function startPayout(e) {
     e.preventDefault()
+    const amount = Number(payoutForm.amount) || undefined
+    const destination = payoutForm.destinationType === 'BANK'
+      ? `${payoutForm.bankCode} account ending in ${payoutForm.accountNoOrMsisdn.slice(-4) || 'unknown'}`
+      : payoutForm.accountNoOrMsisdn || 'merchant mobile number'
+    if (amount && amount > Number(txn.amount)) {
+      setError('Payout amount cannot exceed the collection amount.')
+      return
+    }
+    if (!window.confirm(`Start a payout for ${amount ? money(amount) : 'the full collection'} to ${destination}?`)) return
     setError('')
     setNotice('')
     setBusy(true)
@@ -78,7 +93,7 @@ export default function OperatorTransactionDetail() {
       await operatorApi.payout({
         sourceTransactionId: txn.id,
         merchantId: txn.merchantId,
-        amount: Number(payoutForm.amount) || undefined,
+        amount,
         accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined,
         destinationType: payoutForm.destinationType,
         bankCode: payoutForm.destinationType === 'BANK' ? payoutForm.bankCode : undefined,

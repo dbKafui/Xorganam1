@@ -93,10 +93,13 @@ export default function OperatorTeam() {
   }
 
   async function toggleActive(member) {
+    const willActivate = !member.isActive
+    if (!window.confirm(`${willActivate ? 'Activate' : 'Deactivate'} ${member.firstName} ${member.lastName}? They will ${willActivate ? 'be able to sign in again' : 'lose access immediately'}.`)) return
     setError('')
     setNotice('')
     try {
-      await operatorApi.updateUserStatus(member.id, !member.isActive, member.merchantId)
+      await operatorApi.updateUserStatus(member.id, willActivate, member.merchantId)
+      setNotice(`${member.firstName} ${member.lastName} ${willActivate ? 'activated' : 'deactivated'}.`)
       load()
     } catch (err) {
       setError(err.message)

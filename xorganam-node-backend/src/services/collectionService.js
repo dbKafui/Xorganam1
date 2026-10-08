@@ -251,6 +251,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     }
 
     if (String(callbackUrl).includes('localhost') || String(callbackUrl).includes('127.0.0.1') || String(callbackUrl).includes('::1')) {
+      throw new TenantCredentialsError('Tenant Eganow callback URL must not use a local address.', merchant.tenant_id)
     }
 
     if (normalizedCollectionMethod === 'MOMO' && (!normalizedMsisdn || !/^233[0-9]{9}$/.test(normalizedMsisdn))) {

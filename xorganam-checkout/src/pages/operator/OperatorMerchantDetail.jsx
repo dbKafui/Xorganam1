@@ -49,14 +49,19 @@ export default function OperatorMerchantDetail() {
   }
 
   async function toggleManualControl() {
+    const willEnable = !merchant.allowManualControl
+    if (!window.confirm(`${willEnable ? 'Enable' : 'Disable'} manual release for ${merchant.displayName}? Authorized staff will be able to trigger transfers manually.`)) return
     setError('')
     setNotice('')
+    setSaving(true)
     try {
-      await operatorApi.updateMerchantSettings(merchantId, { allowManualControl: !merchant.allowManualControl })
+      await operatorApi.updateMerchantSettings(merchantId, { allowManualControl: willEnable })
       setNotice('Manual control setting updated.')
       load()
     } catch (err) {
       setError(err.message)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -102,7 +107,7 @@ export default function OperatorMerchantDetail() {
           <span>Allow manual release even in automatic mode</span>
           {user?.role === 'TENANT_BRANCH_MANAGER'
             ? <strong>{merchant.allowManualControl ? 'Enabled' : 'Disabled'}</strong>
-            : <button className="btn btn-secondary btn-sm" onClick={toggleManualControl}>{merchant.allowManualControl ? 'Enabled — click to disable' : 'Disabled — click to enable'}</button>}
+            : <button className="btn btn-secondary btn-sm" disabled={saving} onClick={toggleManualControl}>{saving ? 'Updating…' : merchant.allowManualControl ? 'Enabled — click to disable' : 'Disabled — click to enable'}</button>}
         </div>
       </div>
 
@@ -150,6 +155,10 @@ export default function OperatorMerchantDetail() {
         <p style={{ fontSize: 13, marginBottom: 8 }}>Share this link for customers to pay {merchant.displayName} directly:</p>
         <div className="kv-row">
           <span className="mono" style={{ wordBreak: 'break-all' }}>{window.location.origin}/?merchant={merchant.id}</span>
+          <button className="btn btn-secondary btn-sm" type="button" onClick={async () => {
+            await navigator.clipboard.writeText(`${window.location.origin}/?merchant=${merchant.id}`)
+            setNotice('Payment link copied.')
+          }}>Copy link</button>
         </div>
       </div>
     </div>

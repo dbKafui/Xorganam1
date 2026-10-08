@@ -1,7 +1,6 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { authenticate, requirePlatformAdmin } from '../middleware/auth.js'
-import { isMfaRequired } from '../services/mfaPolicy.js'
 
 export const platformSecurityRouter = Router()
 platformSecurityRouter.use(authenticate, requirePlatformAdmin)
