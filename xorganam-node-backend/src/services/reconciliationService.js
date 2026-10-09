@@ -1,7 +1,7 @@
 import { query, withTransaction } from '../db/pool.js'
 import { queryTransactionStatus, EganowApiError, isGatewaySuccess, isGatewayFailure } from './eganowClient.js'
 import { enqueueCollectForMeJob } from '../queue/queue.js'
-import { sendMerchantSms } from './notificationService.js'
+import { notifyMerchant } from './notificationService.js'
 import { markCreditInstallmentCollected } from './creditInstallmentSettlement.js'
 import { markStorefrontOrderPaid } from './storefrontOrderService.js'
 import { updateTransactionStatus } from './transactionStateService.js'
@@ -149,7 +149,11 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
       )
       const merchant = merchantRow.rows[0]
       if (merchant) {
-        await sendMerchantSms(txn.tenant_id, txn.payout_msisdn || merchant.mobile_money_number, `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`)
+        await notifyMerchant(txn.tenant_id, txn.merchant_id, {
+          toMsisdn: txn.payout_msisdn || merchant.mobile_money_number,
+          message: `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`,
+          subject: 'Payout completed'
+        })
       }
       return { ...txn, status: 'PAID_OUT', payment_gateway_status: upstreamStatus }
     }
@@ -179,7 +183,11 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
     if (merchant?.payout_mode === 'AUTO_SWEEP') {
       await enqueueCollectForMeJob({ tenantId: txn.tenant_id, merchantId: txn.merchant_id, transactionId: txn.id })
     } else if (merchant) {
-      await sendMerchantSms(txn.tenant_id, merchant.mobile_money_number, `Payment of ${txn.amount} received. Ref: ${txn.internal_reference}.`)
+      await notifyMerchant(txn.tenant_id, txn.merchant_id, {
+        toMsisdn: merchant.mobile_money_number,
+        message: `Payment of ${txn.amount} received. Ref: ${txn.internal_reference}.`,
+        subject: 'Payment received'
+      })
     }
     return { ...txn, status: 'RECEIVED', payment_gateway_status: upstreamStatus }
   }

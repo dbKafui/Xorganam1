@@ -2,6 +2,8 @@ import express from 'express'
 import cors from 'cors'
 import rateLimit from 'express-rate-limit'
 import { env } from './config/env.js'
+import './config/tenantEmailConfig.js'
+import './config/emailDelivery.js'
 import { pool } from './db/pool.js'
 
 import { webhooksRouter } from './routes/webhooks.js'

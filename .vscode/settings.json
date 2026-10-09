@@ -32,6 +32,15 @@
         "/^node --test --test-concurrency=1 \\./test/\\*\\.test\\.js && npm run lint$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "/^node --test \\./test/creditWebhookReplay\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd xorganam-node-backend && node --test \\./test/creditWebhookReplay\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "npx eslint": true
     }
 }

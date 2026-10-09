@@ -193,7 +193,8 @@ merchantsRouter.get(
     const { rows } = await query(
       `SELECT m.id, m.tenant_id, m.display_name, m.vendor_reference, m.mobile_money_number, m.network_provider, m.payout_mode,
               m.eganow_collection_account_id, m.eganow_payout_account_id, m.account_setup_status, m.is_active, m.onboarded_at,
-              ms.allow_manual_control, ms.notify_sms, ms.notify_email, ms.contact_email
+              ms.allow_manual_control, COALESCE(ms.notify_sms, TRUE) AS notify_sms,
+              COALESCE(ms.notify_email, FALSE) AS notify_email, ms.contact_email
          FROM merchants m
          LEFT JOIN merchant_settings ms ON ms.tenant_id = m.tenant_id AND ms.merchant_id = m.id
         WHERE m.id = $1`,
@@ -281,22 +282,40 @@ merchantsRouter.put(
     if (existing.rows.length === 0) return res.status(404).json({ message: 'Merchant not found.' })
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
 
-    const { allowManualControl, notifySms, notifyEmail, contactEmail } = req.body || {}
+    const { allowManualControl, notifySms, notifyEmail } = req.body || {}
+    const contactEmailProvided = Object.prototype.hasOwnProperty.call(req.body || {}, 'contactEmail')
+    const contactEmail = typeof req.body?.contactEmail === 'string' ? req.body.contactEmail.trim().toLowerCase() : ''
+    if (contactEmailProvided && contactEmail && (contactEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail))) {
+      return res.status(400).json({ message: 'contactEmail must be a valid email address of at most 255 characters.' })
+    }
+    const { rows: currentSettings } = await query(
+      'SELECT notify_email, contact_email FROM merchant_settings WHERE tenant_id = $1 AND merchant_id = $2',
+      [existing.rows[0].tenant_id, req.params.merchantId]
+    )
+    const emailNotificationsEnabled = typeof notifyEmail === 'boolean' ? notifyEmail : currentSettings[0]?.notify_email === true
+    const resolvedContactEmail = contactEmailProvided ? contactEmail : currentSettings[0]?.contact_email
+    if (emailNotificationsEnabled && !resolvedContactEmail) {
+      return res.status(400).json({ message: 'Set a contact email before enabling email notifications.' })
+    }
 
     const { rows } = await query(
-      `UPDATE merchant_settings
-          SET allow_manual_control = COALESCE($2, allow_manual_control),
-              notify_sms = COALESCE($3, notify_sms),
-              notify_email = COALESCE($4, notify_email),
-              contact_email = COALESCE($5, contact_email)
-        WHERE merchant_id = $1
-        RETURNING allow_manual_control, notify_sms, notify_email, contact_email`,
+      `INSERT INTO merchant_settings (tenant_id, merchant_id, allow_manual_control, notify_sms, notify_email, contact_email)
+       VALUES ($1, $2, COALESCE($3, FALSE), COALESCE($4, TRUE), COALESCE($5, FALSE), NULLIF($7, ''))
+       ON CONFLICT (tenant_id, merchant_id) DO UPDATE SET
+         allow_manual_control = COALESCE($3, merchant_settings.allow_manual_control),
+         notify_sms = COALESCE($4, merchant_settings.notify_sms),
+         notify_email = COALESCE($5, merchant_settings.notify_email),
+         contact_email = CASE WHEN $6 THEN NULLIF($7, '') ELSE merchant_settings.contact_email END,
+         updated_at = now()
+       RETURNING allow_manual_control, notify_sms, notify_email, contact_email`,
       [
+        existing.rows[0].tenant_id,
         req.params.merchantId,
         typeof allowManualControl === 'boolean' ? allowManualControl : null,
         typeof notifySms === 'boolean' ? notifySms : null,
         typeof notifyEmail === 'boolean' ? notifyEmail : null,
-        contactEmail || null
+        contactEmailProvided,
+        contactEmail
       ]
     )
 

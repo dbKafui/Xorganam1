@@ -65,6 +65,27 @@ export default function OperatorMerchantDetail() {
     }
   }
 
+  async function saveNotificationSettings(event) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+    setSaving(true)
+    try {
+      const settings = await operatorApi.updateMerchantSettings(merchantId, {
+        notifySms: Boolean(editForm.notifySms),
+        notifyEmail: Boolean(editForm.notifyEmail),
+        contactEmail: editForm.contactEmail || ''
+      })
+      setMerchant((current) => ({ ...current, ...settings }))
+      setEditForm((current) => ({ ...current, ...settings }))
+      setNotice('Notification preferences updated.')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   if (!merchant || !editForm) {
     return <div className="empty-state">{error || 'Loading…'}</div>
   }
@@ -148,6 +169,21 @@ export default function OperatorMerchantDetail() {
           </select>
         </div>
         <button className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
+      </form>}
+
+      {user?.role !== 'TENANT_BRANCH_MANAGER' && <form className="card" onSubmit={saveNotificationSettings}>
+        <h2>Payment notifications</h2>
+        <div className="field">
+          <label><input type="checkbox" checked={Boolean(editForm.notifySms)} onChange={(event) => setEditForm((current) => ({ ...current, notifySms: event.target.checked }))} /> Send SMS payment updates</label>
+        </div>
+        <div className="field">
+          <label><input type="checkbox" checked={Boolean(editForm.notifyEmail)} onChange={(event) => setEditForm((current) => ({ ...current, notifyEmail: event.target.checked }))} /> Send email payment updates</label>
+        </div>
+        <div className="field">
+          <label htmlFor="merchant-notification-email">Notification email</label>
+          <input id="merchant-notification-email" type="email" maxLength={255} required={Boolean(editForm.notifyEmail)} disabled={!editForm.notifyEmail} value={editForm.contactEmail || ''} onChange={(event) => setEditForm((current) => ({ ...current, contactEmail: event.target.value }))} />
+        </div>
+        <button className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save notification preferences'}</button>
       </form>}
 
       <div className="card">

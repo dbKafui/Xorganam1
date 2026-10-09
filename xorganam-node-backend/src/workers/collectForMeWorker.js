@@ -2,7 +2,7 @@ import { Worker } from 'bullmq'
 import { getRedisConnection, COLLECT_FOR_ME_QUEUE, enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { query, withTransaction } from '../db/pool.js'
 import { sweepToPayoutAccount, disburseToMobileMoney, EganowApiError, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
-import { sendMerchantSms } from '../services/notificationService.js'
+import { notifyMerchant } from '../services/notificationService.js'
 import { loadVendorPackagePayoutRule, processSplitPayout } from '../services/splitPaymentService.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 import { reconcileTransaction } from '../services/reconciliationService.js'
@@ -145,11 +145,11 @@ async function processCollectForMeJob(job) {
     })
     if (!splitResult.skipped) {
       if (splitResult.status === 'PAID_OUT' && Number(splitResult.vendorAmount) > 0) {
-        await sendMerchantSms(
-          tenantId,
-          collectionTxn.payout_msisdn || merchant.mobile_money_number,
-          `GHS ${Number(splitResult.vendorAmount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${collectionTxn.internal_reference}.`
-        )
+        await notifyMerchant(tenantId, merchantId, {
+          toMsisdn: collectionTxn.payout_msisdn || merchant.mobile_money_number,
+          message: `GHS ${Number(splitResult.vendorAmount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${collectionTxn.internal_reference}.`,
+          subject: 'Payout completed'
+        })
       }
       return splitResult
     }
@@ -269,7 +269,11 @@ async function processCollectForMeJob(job) {
 
   // ---- Step 3: notify the merchant ------------------------------------
   const message = `GHS ${Number(collectionTxn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${payoutTxn.internal_reference}.`
-  await sendMerchantSms(tenantId, payoutDestination, message)
+  await notifyMerchant(tenantId, merchantId, {
+    toMsisdn: payoutDestination,
+    message,
+    subject: 'Payout completed'
+  })
 
   return { success: true, payoutTransactionId: payoutTxn.id }
 }

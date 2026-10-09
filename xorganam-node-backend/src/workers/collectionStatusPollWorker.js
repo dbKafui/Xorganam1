@@ -2,7 +2,7 @@ import { Worker } from 'bullmq'
 import { getRedisConnection, COLLECTION_STATUS_POLL_QUEUE, enqueueCollectForMeJob } from '../queue/queue.js'
 import { query, withTransaction } from '../db/pool.js'
 import { queryTransactionStatus, EganowApiError, isGatewayPending, isGatewaySuccess, isGatewayFailure } from '../services/eganowClient.js'
-import { sendMerchantSms } from '../services/notificationService.js'
+import { notifyMerchant } from '../services/notificationService.js'
 import { refreshSplitParentStatus } from '../services/splitPaymentService.js'
 import { markCreditInstallmentCollected } from '../services/creditInstallmentSettlement.js'
 import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
@@ -165,11 +165,11 @@ async function markPayoutSuccessful(txn, gatewayStatus) {
   }
 
   if (txn.payout_leg !== 'INSTITUTION') {
-    await sendMerchantSms(
-      txn.tenant_id,
-      txn.payout_msisdn || txn.mobile_money_number,
-      `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`
-    )
+    await notifyMerchant(txn.tenant_id, txn.merchant_id, {
+      toMsisdn: txn.payout_msisdn || txn.mobile_money_number,
+      message: `GHS ${Number(txn.amount).toFixed(2)} has been sent to your Mobile Money account. Ref: ${txn.internal_reference}.`,
+      subject: 'Payout completed'
+    })
   }
 }
 
@@ -278,7 +278,11 @@ async function processCollectionStatusPollJob(job) {
       if (txn.payout_mode === 'AUTO_SWEEP') {
         await enqueueCollectForMeJob({ tenantId, merchantId, transactionId })
       } else {
-        await sendMerchantSms(tenantId, txn.mobile_money_number, `Payment of GHS ${Number(txn.amount).toFixed(2)} received. Ref: ${txn.internal_reference}.`)
+        await notifyMerchant(tenantId, merchantId, {
+          toMsisdn: txn.mobile_money_number,
+          message: `Payment of GHS ${Number(txn.amount).toFixed(2)} received. Ref: ${txn.internal_reference}.`,
+          subject: 'Payment received'
+        })
       }
 
       return { status: 'RECEIVED', queuedAutoSweep: txn.payout_mode === 'AUTO_SWEEP' }

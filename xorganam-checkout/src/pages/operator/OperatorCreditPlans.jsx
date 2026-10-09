@@ -8,6 +8,7 @@ const money = (value) => `GHS ${Number(value || 0).toFixed(2)}`
 export default function OperatorCreditPlans() {
   const { user } = useOperatorAuth()
   const canManageCreditPlans = ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user?.role)
+  const canManageWebhooks = ['TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'].includes(user?.role)
   const [merchants, setMerchants] = useState([])
   const [merchantId, setMerchantId] = useState(user?.merchantId || '')
   const [plans, setPlans] = useState([])
@@ -16,6 +17,8 @@ export default function OperatorCreditPlans() {
   const [form, setForm] = useState(initialForm)
   const [webhookUrl, setWebhookUrl] = useState('')
   const [webhook, setWebhook] = useState(null)
+  const [webhookDeliveries, setWebhookDeliveries] = useState([])
+  const [webhookDeliveryPage, setWebhookDeliveryPage] = useState(1)
   const [newWebhookSecret, setNewWebhookSecret] = useState('')
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -32,19 +35,22 @@ export default function OperatorCreditPlans() {
 
   const loadMerchantData = useCallback(async () => {
     if (!user?.tenantId || !merchantId) return
-    const [planRows, exposureRow, webhookRow] = await Promise.all([
+    const [planRows, exposureRow, webhookRow, deliveryRows] = await Promise.all([
       operatorApi.listCreditPlans({ tenantId: user.tenantId, merchantId }),
       operatorApi.getCreditExposure({ tenantId: user.tenantId, merchantId }),
-      operatorApi.getCreditWebhook(merchantId, user.tenantId).catch((requestError) => requestError.status === 404 ? null : Promise.reject(requestError))
+      operatorApi.getCreditWebhook(merchantId, user.tenantId).catch((requestError) => requestError.status === 404 ? null : Promise.reject(requestError)),
+      operatorApi.listCreditWebhookDeliveries(merchantId, { tenantId: user.tenantId, page: webhookDeliveryPage, pageSize: 25 })
     ])
     setPlans(Array.isArray(planRows) ? planRows : [])
     setExposure(exposureRow)
     setWebhook(webhookRow)
+    setWebhookUrl(webhookRow?.url || '')
+    setWebhookDeliveries(Array.isArray(deliveryRows?.items) ? deliveryRows.items : [])
     if (plan) {
       const selected = await operatorApi.getCreditPlan(plan.id).catch(() => null)
       setPlan(selected)
     }
-  }, [user?.tenantId, merchantId, plan?.id])
+  }, [user?.tenantId, merchantId, plan?.id, webhookDeliveryPage])
 
   useEffect(() => { loadMerchants().catch((requestError) => setError(requestError.message)).finally(() => setLoading(false)) }, [loadMerchants])
   useEffect(() => { loadMerchantData().catch((requestError) => setError(requestError.message)) }, [loadMerchantData])
@@ -133,6 +139,18 @@ export default function OperatorCreditPlans() {
     } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
   }
 
+  async function replayWebhookDelivery(delivery) {
+    if (!window.confirm(`Replay ${delivery.event_type}? The receiving system may see this event more than once.`)) return
+    setError('')
+    setNotice('')
+    setBusy(true)
+    try {
+      await operatorApi.replayCreditWebhookDelivery(merchantId, delivery.id, user.tenantId)
+      setNotice('Webhook delivery queued for replay.')
+      await loadMerchantData()
+    } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
+  }
+
   return <div>
     <div className="portal-header"><div><h1>Hire-purchase & credit sales</h1><p>Create merchant-configured installment plans and track promised versus collected amounts.</p></div></div>
     {error && <div className="status-banner error" role="alert">{error}</div>}
@@ -140,7 +158,7 @@ export default function OperatorCreditPlans() {
     {loading ? <div className="empty-state">Loading credit sales…</div> : !merchants.length ? <div className="empty-state">Activate Eganow account setup for a merchant before creating credit plans.</div> : <>
       <section className="card">
         <div className="two-col"><div className="field"><label htmlFor="credit-merchant">Merchant</label>
-          <select id="credit-merchant" value={merchantId} onChange={(event) => { setMerchantId(event.target.value); setPlan(null) }}>
+          <select id="credit-merchant" value={merchantId} onChange={(event) => { setMerchantId(event.target.value); setWebhookDeliveryPage(1); setPlan(null) }}>
             {merchants.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}
           </select>
         </div></div>
@@ -198,6 +216,22 @@ export default function OperatorCreditPlans() {
           {webhook?.active && <button type="button" className="btn btn-secondary" disabled={busy} onClick={disableWebhook}>Disable webhook</button>}
         </form>
         {newWebhookSecret && <div className="status-banner success" style={{ marginTop: 12 }}><span>Signing secret (copy now): <code>{newWebhookSecret}</code></span><button className="btn btn-secondary btn-sm" onClick={() => navigator.clipboard.writeText(newWebhookSecret)}>Copy</button></div>}
+        <h3>Recent deliveries <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => loadMerchantData().catch((requestError) => setError(requestError.message))}>Refresh</button></h3>
+        {!webhookDeliveries.length ? <div className="empty-state">No webhook events have been recorded for this merchant.</div> : <div className="table-wrap"><table>
+          <thead><tr><th>Event</th><th>Created</th><th>Status</th><th>Last failure</th><th>Action</th></tr></thead>
+          <tbody>{webhookDeliveries.map((delivery) => <tr key={delivery.id}>
+            <td>{delivery.event_type}</td>
+            <td>{new Date(delivery.created_at).toLocaleString()}</td>
+            <td><span className={`status-pill ${delivery.status.toLowerCase()}`}>{delivery.status.toLowerCase()}</span></td>
+            <td>{delivery.last_error || '—'}</td>
+            <td>{delivery.status === 'FAILED' && canManageWebhooks ? <button type="button" className="btn btn-secondary btn-sm" disabled={busy || !webhook?.active} onClick={() => replayWebhookDelivery(delivery)}>Replay</button> : '—'}</td>
+          </tr>)}</tbody>
+        </table></div>}
+        {webhookDeliveries.length > 0 && <div className="credit-plan-actions" aria-label="Webhook delivery pages">
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy || webhookDeliveryPage === 1} onClick={() => setWebhookDeliveryPage((page) => page - 1)}>Previous</button>
+          <span>Page {webhookDeliveryPage}</span>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy || webhookDeliveries.length < 25} onClick={() => setWebhookDeliveryPage((page) => page + 1)}>Next</button>
+        </div>}
       </section>
     </>}
   </div>

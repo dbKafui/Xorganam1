@@ -111,6 +111,8 @@ export const storefrontCustomerApi = {
 export const operatorAuth = {
   register: (payload) => request('/public/tenants/register', { method: 'POST', body: payload }),
   login: (email, password) => request('/auth/login', { method: 'POST', body: { email, password } }),
+  requestPasswordReset: (email) => request('/auth/password-reset/request', { method: 'POST', body: { email } }),
+  confirmPasswordReset: (token, newPassword) => request('/auth/password-reset/confirm', { method: 'POST', body: { token, newPassword } }),
   requestEmailVerification: (email) => request('/auth/email-verification/request', { method: 'POST', body: { email } }),
   verifyEmail: (token) => request('/auth/email-verification/confirm', { method: 'POST', body: { token } }),
   rotateMfaRecoveryCodes: (code) => request('/auth/mfa/recovery-codes/rotate', { method: 'POST', body: { code }, auth: true }),
@@ -189,6 +191,8 @@ export const operatorApi = {
   createCreditPaymentLink: (planId, installmentId) => request(`/credit-plans/${encodeURIComponent(planId)}/installments/${encodeURIComponent(installmentId)}/payment-link`, { method: 'POST', auth: true }),
   getCreditExposure: (params) => request('/credit-plans/exposure', { params, auth: true }),
   getCreditWebhook: (merchantId, tenantId) => request(`/credit-webhooks/${encodeURIComponent(merchantId)}`, { params: { tenantId }, auth: true }),
+  listCreditWebhookDeliveries: (merchantId, params) => request(`/credit-webhooks/${encodeURIComponent(merchantId)}/deliveries`, { params, auth: true }),
+  replayCreditWebhookDelivery: (merchantId, eventId, tenantId) => request(`/credit-webhooks/${encodeURIComponent(merchantId)}/deliveries/${encodeURIComponent(eventId)}/replay`, { method: 'POST', body: { tenantId }, auth: true }),
   saveCreditWebhook: (merchantId, payload) => request(`/credit-webhooks/${encodeURIComponent(merchantId)}`, { method: 'PUT', body: payload, auth: true }),
   disableCreditWebhook: (merchantId, tenantId) => request(`/credit-webhooks/${encodeURIComponent(merchantId)}`, { method: 'DELETE', params: { tenantId }, auth: true }),
 

@@ -15,7 +15,7 @@ export function validateResetToken(token) {
   return typeof token === 'string' && RESET_TOKEN_PATTERN.test(token)
 }
 
-export async function requestPasswordReset({ email }) {
+export async function requestPasswordReset({ email, purpose = 'reset' }) {
   const normalizedEmail = String(email || '').trim().toLowerCase()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
     return { requested: false, reason: 'invalid-email' }
@@ -38,11 +38,14 @@ export async function requestPasswordReset({ email }) {
     [rows[0].id, tokenHash, expiresAt]
   )
 
+  const resetUrl = new URL('/reset-password', process.env.APP_URL || 'http://localhost:5174')
+  resetUrl.searchParams.set('token', token)
   const delivered = await sendPasswordResetEmail({
     email: rows[0].email,
     firstName: rows[0].first_name,
     lastName: rows[0].last_name,
-    resetUrl: `${process.env.APP_URL || ''}/reset-password?token=${encodeURIComponent(token)}`
+    resetUrl: resetUrl.toString(),
+    purpose
   })
 
   if (!delivered) {

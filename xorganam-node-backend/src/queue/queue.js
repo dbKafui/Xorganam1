@@ -2,6 +2,9 @@ import { Queue } from 'bullmq'
 import IORedis from 'ioredis'
 import { env } from '../config/env.js'
 import { filterQueueFailuresByTenant } from '../services/operationalHealthService.js'
+import { replayCreditWebhookJob } from '../services/creditWebhookReplay.js'
+import { query } from '../db/pool.js'
+import { serializeEmailMessageForQueue } from '../email/emailMessagePolicy.js'
 
 // One shared Redis connection, one shared queue, used by every tenant.
 // Tenant isolation for job PROCESSING happens at the job-data level
@@ -17,6 +20,7 @@ let creditWebhookQueue = null
 let creditReminderQueue = null
 let creditCashSweepQueue = null
 let institutionLoanRecoveryQueue = null
+let emailDeliveryQueue = null
 let connectError = null
 
 function createRedisConnection() {
@@ -54,6 +58,7 @@ export const CREDIT_WEBHOOK_QUEUE = 'credit-webhook-delivery'
 export const CREDIT_REMINDER_QUEUE = 'credit-installment-reminders'
 export const CREDIT_CASH_SWEEP_QUEUE = 'credit-cash-installment-sweeps'
 export const INSTITUTION_LOAN_RECOVERY_QUEUE = 'institution-loan-recovery'
+export const TENANT_EMAIL_DELIVERY_QUEUE = 'tenant-email-delivery'
 
 export function getRedisHealth() {
   return {
@@ -70,7 +75,8 @@ export async function getQueueHealth() {
     CREDIT_WEBHOOK_QUEUE,
     CREDIT_REMINDER_QUEUE,
     CREDIT_CASH_SWEEP_QUEUE,
-    INSTITUTION_LOAN_RECOVERY_QUEUE
+    INSTITUTION_LOAN_RECOVERY_QUEUE,
+    TENANT_EMAIL_DELIVERY_QUEUE
   ]
 
   const entries = {}
@@ -94,7 +100,8 @@ export async function getFailedQueueJobs(limit = 20, tenantId = null) {
     CREDIT_WEBHOOK_QUEUE,
     CREDIT_REMINDER_QUEUE,
     CREDIT_CASH_SWEEP_QUEUE,
-    INSTITUTION_LOAN_RECOVERY_QUEUE
+    INSTITUTION_LOAN_RECOVERY_QUEUE,
+    TENANT_EMAIL_DELIVERY_QUEUE
   ]
 
   const failures = []
@@ -228,6 +235,45 @@ export function getCreditWebhookQueue() {
   return creditWebhookQueue
 }
 
+export function getTenantEmailDeliveryQueue() {
+  if (!emailDeliveryQueue) emailDeliveryQueue = new Queue(TENANT_EMAIL_DELIVERY_QUEUE, { connection: getRedisConnection() })
+  return emailDeliveryQueue
+}
+
+export async function enqueueTenantEmail({ tenantId, message }) {
+  const { emailDeliveryPolicy } = await import('../config/emailDelivery.js')
+  const queue = getTenantEmailDeliveryQueue()
+  const { rows } = await query(
+    `INSERT INTO email_delivery_records (tenant_id, status, recipient_count)
+     VALUES ($1, 'PENDING', $2)
+     RETURNING id`,
+    [tenantId, emailRecipientCount(message)]
+  )
+  const deliveryId = rows[0].id
+  try {
+    await queue.add('send-tenant-email', { tenantId, message: serializeEmailMessageForQueue(message), deliveryId }, {
+      jobId: `tenant-email-${deliveryId}`,
+      attempts: emailDeliveryPolicy.retryAttempts,
+      backoff: { type: 'exponential', delay: emailDeliveryPolicy.retryBackoffMs },
+      removeOnComplete: { age: emailDeliveryPolicy.deliveryRecordRetentionDays * 24 * 60 * 60 },
+      removeOnFail: { age: emailDeliveryPolicy.deliveryRecordRetentionDays * 24 * 60 * 60 }
+    })
+  } catch (error) {
+    await query(
+      `UPDATE email_delivery_records SET status = 'FAILED', error_code = 'QUEUE_UNAVAILABLE', completed_at = now()
+        WHERE id = $1`,
+      [deliveryId]
+    )
+    throw error
+  }
+  return { deliveryId, status: 'QUEUED' }
+}
+
+function emailRecipientCount(message) {
+  const values = [message?.to, message?.cc, message?.bcc].flatMap((value) => value === undefined || value === null ? [] : Array.isArray(value) ? value : [value])
+  return values.length
+}
+
 export async function enqueueCreditWebhookDelivery(eventId) {
   const queue = getCreditWebhookQueue()
   return queue.add('deliver-credit-webhook', { eventId }, {
@@ -237,6 +283,10 @@ export async function enqueueCreditWebhookDelivery(eventId) {
     removeOnComplete: { age: 7 * 24 * 60 * 60 },
     removeOnFail: { age: 30 * 24 * 60 * 60 }
   })
+}
+
+export async function replayCreditWebhookDelivery(eventId) {
+  return replayCreditWebhookJob(getCreditWebhookQueue(), eventId)
 }
 
 export function getCreditReminderQueue() {

@@ -27,6 +27,7 @@ import Marketplace from './pages/Marketplace'
 import CustomerOrders from './pages/CustomerOrders'
 import OperatorStorefront from './pages/operator/OperatorStorefront'
 import VerifyEmail from './pages/operator/VerifyEmail'
+import OperatorResetPassword from './pages/operator/OperatorResetPassword'
 
 export default function App() {
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="/operator/register" element={<OperatorRegister />} />
           <Route path="/operator/login" element={<OperatorLogin />} />
           <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route path="/reset-password" element={<OperatorResetPassword />} />
 
           <Route
             path="/operator"

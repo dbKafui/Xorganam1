@@ -119,6 +119,7 @@ export default function OperatorLogin() {
             {loading ? 'Signing in…' : 'Log in'}
           </button>
           {emailVerificationRequired && <button type="button" className="secondary-btn" disabled={loading || !email} onClick={resendVerification}>{loading ? 'Requesting…' : 'Resend verification email'}</button>}
+          <Link to="/reset-password" className="secondary-btn" style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}>Forgot password?</Link>
         </form>}
 
         <div className="link-row">

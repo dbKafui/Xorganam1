@@ -18,7 +18,6 @@ const initialForm = {
   lastName: '',
   email: '',
   phoneNumber: '',
-  password: '',
   role: 'TENANT_OPERATOR',
   merchantId: ''
 }
@@ -98,9 +97,12 @@ export default function OperatorTeam() {
     setCreating(true)
     try {
       const result = await operatorApi.createUser({ tenantId: user.tenantId, ...form })
-      setNotice(result.emailVerificationSent
-        ? `${form.firstName} ${form.lastName} added. A verification email was sent to ${form.email}.`
-        : `${form.firstName} ${form.lastName} added, but their verification email was not sent. Configure email delivery before they sign in.`)
+      const verificationStatus = result.emailVerificationSent ? 'verification email sent' : 'verification email not delivered'
+      const setupStatus = result.passwordSetupSent ? 'password setup email sent' : 'password setup email not delivered'
+      setNotice(`${form.firstName} ${form.lastName} added; ${verificationStatus}; ${setupStatus}.`)
+      if (!result.emailVerificationSent || !result.passwordSetupSent) {
+        setError('The account was created, but one or more emails were not delivered. Configure email delivery or ask the new user to request the missing link.')
+      }
       setForm(initialForm)
       load()
     } catch (err) {
@@ -642,10 +644,6 @@ export default function OperatorTeam() {
             </div>
           </div>
           <div className="two-col">
-            <div className="field">
-              <label htmlFor="new-password">Temporary password</label>
-              <input id="new-password" required type="password" minLength={10} value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} />
-            </div>
             <div className="field">
               <label htmlFor="new-role">Role</label>
               <select id="new-role" value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>

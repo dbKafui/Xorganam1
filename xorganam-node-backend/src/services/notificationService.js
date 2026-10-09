@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { env } from '../config/env.js'
 import { query } from '../db/pool.js'
+import { resolveMerchantNotificationPreferences } from './notificationPolicy.js'
 
 /**
  * Looks up a tenant's SMS sender ID preference (e.g. a custom sender ID
@@ -66,14 +67,37 @@ export async function sendInstitutionSms(institutionId, toMsisdn, message) {
   }
 }
 
-/**
- * Email is unavailable until an email provider is configured. Never log
- * message contents or report a delivery that did not happen.
- */
-export async function sendMerchantEmail(tenantId, toEmail, subject, body) {
-  void tenantId; void toEmail; void subject; void body
-  console.warn('[email] delivery skipped: no email provider is configured')
-  return false
+export async function sendMerchantEmail(toEmail, subject, body) {
+  const apiKey = process.env.RESEND_API_KEY
+  const fromEmail = process.env.RESEND_FROM_EMAIL
+  if (!apiKey || !fromEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(toEmail || ''))) {
+    if (!apiKey || !fromEmail) console.warn('[email] merchant delivery skipped: Resend is not configured')
+    return false
+  }
+  const safeSubject = String(subject || '').replace(/[\r\n]+/g, ' ').slice(0, 200)
+  const safeBody = String(body || '').slice(0, 10000)
+  if (!safeSubject || !safeBody) return false
+
+  try {
+    const response = await axios.post(
+      'https://api.resend.com/emails',
+      {
+        from: fromEmail,
+        to: [toEmail],
+        subject: safeSubject,
+        text: safeBody,
+        html: `<p>${escapeHtml(safeBody).replaceAll('\n', '<br>')}</p>`
+      },
+      {
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 15_000
+      }
+    )
+    return response.status >= 200 && response.status < 300
+  } catch (err) {
+    console.error('[email] merchant delivery failed', { code: err?.code || 'EMAIL_GATEWAY_ERROR' })
+    return false
+  }
 }
 
 function escapeHtml(value) {
@@ -85,7 +109,32 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;')
 }
 
-export async function sendPasswordResetEmail({ email, firstName, lastName, resetUrl }) {
+export async function notifyMerchant(tenantId, merchantId, { toMsisdn, message, subject }) {
+  let preferences
+  try {
+    const { rows } = await query(
+      `SELECT notify_sms, notify_email, contact_email
+         FROM merchant_settings WHERE tenant_id = $1 AND merchant_id = $2`,
+      [tenantId, merchantId]
+    )
+    preferences = resolveMerchantNotificationPreferences(rows[0])
+  } catch (err) {
+    console.error('[notification] merchant preferences unavailable', { code: err?.code || 'DB_ERROR' })
+    return { smsDelivered: false, emailDelivered: false }
+  }
+
+  const [smsDelivered, emailDelivered] = await Promise.all([
+    preferences.notifySms && toMsisdn && message
+      ? sendMerchantSms(tenantId, toMsisdn, message)
+      : false,
+    preferences.notifyEmail && preferences.contactEmail && subject && message
+      ? sendMerchantEmail(tenantId, preferences.contactEmail, subject, message)
+      : false
+  ])
+  return { smsDelivered, emailDelivered }
+}
+
+export async function sendPasswordResetEmail({ email, firstName, resetUrl, purpose = 'reset' }) {
   const apiKey = process.env.RESEND_API_KEY
   const fromEmail = process.env.RESEND_FROM_EMAIL
   if (!apiKey || !fromEmail) {
@@ -94,9 +143,13 @@ export async function sendPasswordResetEmail({ email, firstName, lastName, reset
   }
 
   const safeFirstName = escapeHtml(firstName)
-  const safeLastName = escapeHtml(lastName)
   const safeResetUrl = escapeHtml(resetUrl)
-  const safeSubject = `Password reset request for ${safeFirstName} ${safeLastName}`.replace(/[\r\n]+/g, ' ')
+  const setup = purpose === 'setup'
+  const safeSubject = `${setup ? 'Set up your' : 'Password reset for your'} XORGANAM account`.replace(/[\r\n]+/g, ' ')
+  const actionText = setup ? 'Set password' : 'Reset password'
+  const instruction = setup
+    ? 'Use the secure link below to set your account password. This link expires in 30 minutes.'
+    : 'Use the secure link below to reset your password. This link expires in 30 minutes.'
 
   try {
     const response = await axios.post(
@@ -105,7 +158,7 @@ export async function sendPasswordResetEmail({ email, firstName, lastName, reset
         from: fromEmail,
         to: [email],
         subject: safeSubject,
-        html: `<p>Hello ${safeFirstName},</p><p>Use the secure link below to reset your password. This link expires in 30 minutes.</p><p><a href="${safeResetUrl}">Reset password</a></p>`
+        html: `<p>Hello ${safeFirstName},</p><p>${instruction}</p><p><a href="${safeResetUrl}">${actionText}</a></p>`
       },
       {
         headers: {

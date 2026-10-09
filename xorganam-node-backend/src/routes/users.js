@@ -1,10 +1,12 @@
 import { Router } from 'express'
+import crypto from 'node:crypto'
 import { query } from '../db/pool.js'
 import { hashPassword } from '../security/password.js'
 import { authenticate, requireRole, requirePermission, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { isValidPermissionType } from '../constants/permissions.js'
 import { requestEmailVerification } from '../services/emailVerificationService.js'
+import { requestPasswordReset } from '../services/passwordResetService.js'
 import { writePlatformAudit } from '../services/auditService.js'
 import { normalizePermissionExpiry } from '../services/permissionPolicy.js'
 import { withTransaction } from '../db/pool.js'
@@ -78,10 +80,10 @@ usersRouter.post(
   '/',
   requirePermission('MANAGE_TEAM'),
   asyncHandler(async (req, res) => {
-    const { firstName, lastName, email, phoneNumber, password, role, merchantId } = req.body || {}
+    const { firstName, lastName, email, phoneNumber, role, merchantId } = req.body || {}
 
-    if (!firstName || !lastName || !email || !password || !role) {
-      return res.status(400).json({ message: 'firstName, lastName, email, password, and role are required.' })
+    if (!firstName || !lastName || !email || !role) {
+      return res.status(400).json({ message: 'firstName, lastName, email, and role are required.' })
     }
     if (!ASSIGNABLE_ROLES.includes(role)) {
       return res.status(400).json({ message: `role must be one of: ${ASSIGNABLE_ROLES.join(', ')}` })
@@ -92,10 +94,6 @@ usersRouter.post(
     if (role === 'TENANT_BRANCH_MANAGER' && !merchantId) {
       return res.status(400).json({ message: 'A branch manager must be assigned to a merchant.' })
     }
-    if (String(password).length < 10) {
-      return res.status(400).json({ message: 'Password must be at least 10 characters.' })
-    }
-
     const tenantId = scopeOrRespond(req, res, req.body.tenantId)
     if (!tenantId) return
     if (req.user.merchantId && String(req.user.merchantId) !== String(merchantId || '')) {
@@ -122,17 +120,28 @@ usersRouter.post(
       return res.status(409).json({ message: 'A user with this email already exists.' })
     }
 
-    const passwordHash = await hashPassword(password)
+    const passwordHash = await hashPassword(crypto.randomBytes(32).toString('base64url'))
 
     const { rows } = await query(
-      `INSERT INTO users (tenant_id, merchant_id, first_name, last_name, email, phone_number, password_hash, role, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
+      `INSERT INTO users (tenant_id, merchant_id, first_name, last_name, email, phone_number, password_hash, password_reset_required, role, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, TRUE)
        RETURNING id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at`,
       [tenantId, merchantId || null, firstName, lastName, normalizedEmail, phoneNumber || null, passwordHash, role]
     )
 
-    const verification = await requestEmailVerification(normalizedEmail)
-    res.status(201).json({ ...mapUser(rows[0]), emailVerificationSent: verification.delivered })
+    let emailVerificationSent = false
+    let passwordSetupSent = false
+    try {
+      emailVerificationSent = (await requestEmailVerification(normalizedEmail)).delivered
+    } catch (error) {
+      console.error('[users] verification invitation failed', { code: error?.code || 'EMAIL_ERROR' })
+    }
+    try {
+      passwordSetupSent = (await requestPasswordReset({ email: normalizedEmail, purpose: 'setup' })).delivered
+    } catch (error) {
+      console.error('[users] password setup invitation failed', { code: error?.code || 'EMAIL_ERROR' })
+    }
+    res.status(201).json({ ...mapUser(rows[0]), emailVerificationSent, passwordSetupSent })
   })
 )
 
