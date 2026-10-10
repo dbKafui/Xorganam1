@@ -1,7 +1,8 @@
 import { query } from '../db/pool.js'
 
-// Only explicitly listed @xorganam.test demo accounts can bypass MFA. The
-// domain check here keeps an exemption from becoming a general user bypass.
+// Allow MFA bypass only for the platform admin created for local operations.
+// Every other account continues to require MFA, and the legacy demo exemption
+// still remains limited to @xorganam.test accounts.
 export async function isMfaRequired(principalType, principalId) {
   const { rows } = await query(
     `SELECT EXISTS (
@@ -16,8 +17,17 @@ export async function isMfaRequired(principalType, principalId) {
               SELECT 1 FROM institution_staff s WHERE s.id = e.principal_id AND s.email LIKE '%@xorganam.test'
             ))
           )
-     ) AS exempt`,
+     ) AS demo_exempt,
+     EXISTS (
+       SELECT 1
+         FROM users u
+        WHERE u.id = $2
+          AND u.role = 'PLATFORM_ADMIN'
+          AND u.email = 'eyramd75@gmail.com'
+     ) AS first_admin_exempt`,
     [principalType, principalId]
   )
-  return !rows[0]?.exempt
+
+  if (rows[0]?.first_admin_exempt && principalType === 'TENANT') return false
+  return !rows[0]?.demo_exempt
 }

@@ -27,16 +27,13 @@ describe('credit webhook replay', () => {
     assert.equal(retries, 1)
   })
 
-  it('leaves active jobs alone and creates a new attempt after a completed job', async () => {
+  it('leaves active jobs alone and refuses completed jobs', async () => {
     const queueFor = (state) => ({
       getJob: async () => ({ getState: async () => state }),
-      add: async (...args) => args
+      add: async () => assert.fail('unexpected duplicate job')
     })
 
     assert.ok(await replayCreditWebhookJob(queueFor('active'), 'event-1'))
-    const replay = await replayCreditWebhookJob(queueFor('completed'), 'event-1')
-    assert.equal(replay[0], 'deliver-credit-webhook')
-    assert.deepEqual(replay[1], { eventId: 'event-1' })
-    assert.match(replay[2].jobId, /^credit-webhook-event-1-replay-/)
+    assert.equal(await replayCreditWebhookJob(queueFor('completed'), 'event-1'), null)
   })
 })

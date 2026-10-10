@@ -53,6 +53,24 @@ describe('transaction status integrity', () => {
       actualCurrency: 'GHS',
       actualReference: 'TX-456'
     }), { valid: false, mismatches: ['reference'] })
+
+    assert.deepEqual(validateProviderResult({
+      expectedAmount: '90071992547409.91',
+      expectedCurrency: 'GHS',
+      expectedReference: 'TX-LARGE',
+      actualAmount: '90071992547409.91',
+      actualCurrency: 'GHS',
+      actualReference: 'TX-LARGE'
+    }), { valid: true, mismatches: [] })
+
+    assert.deepEqual(validateProviderResult({
+      expectedAmount: '12.34',
+      expectedCurrency: 'GHS',
+      expectedReference: 'TX-123',
+      actualAmount: '12.345',
+      actualCurrency: 'GHS',
+      actualReference: 'TX-123'
+    }), { valid: false, mismatches: ['amount'] })
   })
 
   it('rejects illegal state transitions and duplicate terminal writes', () => {

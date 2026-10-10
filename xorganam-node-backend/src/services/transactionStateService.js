@@ -1,3 +1,5 @@
+import { paymentRecoveryPolicy } from '../config/paymentRecoveryPolicy.js'
+
 const LEGAL_STATUS_TRANSITIONS = {
   COLLECTION: new Set([
     'PENDING->RECEIVED',
@@ -18,7 +20,7 @@ const LEGAL_STATUS_TRANSITIONS = {
   ])
 }
 
-export const MAX_SPLIT_PAYOUT_RETRIES = 5
+export const MAX_SPLIT_PAYOUT_RETRIES = paymentRecoveryPolicy.splitPayoutMaxRetries
 
 const TRANSACTION_STATUSES = new Set([
   'PENDING', 'RECEIVED', 'SWEPT_INTERNAL', 'PARTIALLY_SETTLED', 'PAID_OUT', 'FAILED'

@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi } from '../../api/client'
+import { decimalToMinorUnits, formatCurrencyAmount } from '../../../../shared/currency.js'
 import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../../lib/idempotency'
+import { MOMO_CHANNELS } from '../../constants/paymentOptions.js'
 
 const PAYPARTNER_OPTIONS = [
   { value: '', label: 'Auto-detect from merchant profile' },
-  { value: 'MTN', label: 'MTN' },
-  { value: 'TCELGH', label: 'TCELGH (Vodafone)' },
-  { value: 'ATGH', label: 'ATGH (AirtelTigo)' }
+  ...MOMO_CHANNELS.map((channel) => ({ value: channel.code, label: channel.label }))
 ]
 
 function normalizeMsisdn(rawMsisdn) {
@@ -37,12 +37,12 @@ export default function OperatorInitiateCollection() {
 
   async function handleSubmit(e) {
     e.preventDefault()
-    const numericAmount = Number(form.amount)
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0 || numericAmount > 1_000_000) {
+    const amountCents = decimalToMinorUnits(form.amount)
+    if (amountCents === null || BigInt(amountCents) <= 0n || BigInt(amountCents) > BigInt(decimalToMinorUnits(1_000_000) || '0')) {
       setError('Enter an amount greater than 0 and no greater than GHS 1,000,000.')
       return
     }
-    if (!window.confirm(`Start a ${form.collectionMethod === 'MOMO' ? 'mobile money' : 'card'} collection for ${numericAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} GHS for ${form.merchantId}?`)) return
+    if (!window.confirm(`Start a ${form.collectionMethod === 'MOMO' ? 'mobile money' : 'card'} collection for ${formatCurrencyAmount(form.amount, 'GHS')} for ${form.merchantId}?`)) return
     setError('')
     setResult(null)
     setBusy(true)
@@ -55,7 +55,7 @@ export default function OperatorInitiateCollection() {
       if (!idempotencyKeyRef.current) idempotencyKeyRef.current = getOrCreateIdempotencyKey(storageKey)
       const response = await operatorApi.collectForTenant(user.tenantId, {
         merchantId: form.merchantId,
-        amount: Number(form.amount),
+        amount: form.amount,
         msisdn: normalizedMsisdn || undefined,
         collectionMethod: form.collectionMethod,
         ...(form.collectionMethod === 'CARD' ? { cardNumber: form.cardNumber, cardholderName: form.cardholderName, expiryDateMonth: Number(form.expiryDateMonth), expiryDateYear: form.expiryDateYear.slice(-2), cvv: form.cvv } : {}),

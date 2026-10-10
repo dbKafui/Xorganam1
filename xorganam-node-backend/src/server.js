@@ -10,6 +10,7 @@ import { webhooksRouter } from './routes/webhooks.js'
 import { publicRouter } from './routes/public.js'
 import { authRouter } from './routes/auth.js'
 import { tenantsRouter } from './routes/tenants.js'
+import { tenantEmailConfigRouter } from './routes/tenantEmailConfig.js'
 import { merchantsRouter } from './routes/merchants.js'
 import { transactionsRouter } from './routes/transactions.js'
 import { reportsRouter } from './routes/reports.js'
@@ -220,6 +221,7 @@ app.use('/api/v1/institution-portal', institutionPortalRouter)
 app.use('/api/v1/institution-portal/finance', institutionFinanceRouter)
 app.use('/api/v1/institution-portal/notifications', institutionNotificationsRouter)
 app.use('/api/v1/tenant-portal/institution-finance', tenantInstitutionFinanceRouter)
+app.use('/api/v1/tenants/:tenantId/email-config', tenantEmailConfigRouter)
 app.use('/api/v1/tenants', tenantsRouter)
 app.use('/api/v1/merchants', merchantsRouter)
 app.use('/api/v1/transactions', transactionsRouter)
@@ -259,7 +261,8 @@ app.use((err, req, res, _next) => {
     name: err?.name || 'Error',
     code: err?.code || 'UNEXPECTED',
     route: req.originalUrl,
-    method: req.method
+    method: req.method,
+    stack: err?.stack
   })
   res.status(500).json({ message: 'Internal server error.' })
 })

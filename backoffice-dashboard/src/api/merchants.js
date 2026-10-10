@@ -6,6 +6,9 @@ export const merchantsApi = {
   detail: (merchantId) => api.get(`/merchants/${merchantId}`),
   create: (payload) => api.post('/merchants', payload),
   update: (merchantId, payload) => api.put(`/merchants/${merchantId}`, payload),
+  listDestinationChanges: (tenantId) => api.get('/merchants/payout-destination-change-requests', { tenantId }),
+  requestDestinationChange: (merchantId, mobileMoneyNumber) => api.post(`/merchants/${merchantId}/payout-destination-change-requests`, { mobileMoneyNumber }),
+  reviewDestinationChange: (requestId, decision, reason) => api.post(`/merchants/payout-destination-change-requests/${requestId}/review`, { decision, reason }),
   setEganowAccounts: (merchantId, payload) => api.patch(`/merchants/${merchantId}/eganow-accounts`, payload),
-  remove: (merchantId) => api.del(`/merchants/${merchantId}`)
+  remove: (merchantId, reason) => api.del(`/merchants/${merchantId}`, { reason })
 }

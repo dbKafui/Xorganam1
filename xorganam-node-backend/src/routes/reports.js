@@ -179,7 +179,7 @@ reportsRouter.get(
       merchants: perMerchant.rows.map((r) => ({
         merchantId: r.id,
         displayName: r.display_name,
-        totalCollected: Number(r.total_collected),
+        totalCollected: String(r.total_collected),
         transactionCount: Number(r.transaction_count)
       }))
     })
@@ -223,7 +223,7 @@ reportsRouter.get(
       topTenantsByVolume: topTenants.rows.map((r) => ({
         tenantId: r.id,
         companyName: r.company_name,
-        totalVolume: Number(r.total_volume),
+      totalVolume: String(r.total_volume),
         transactionCount: Number(r.transaction_count)
       }))
     })
@@ -232,10 +232,10 @@ reportsRouter.get(
 
 function mapTotals(row) {
   return {
-    totalCollected: Number(row.total_collected),
-    totalPaidOut: Number(row.total_paid_out),
-    totalFees: Number(row.total_fees),
-    netRevenue: Number(row.total_platform_margin),
+    totalCollected: String(row.total_collected),
+    totalPaidOut: String(row.total_paid_out),
+    totalFees: String(row.total_fees),
+    netRevenue: String(row.total_platform_margin),
     feeDataUnavailableTransactions: Number(row.fee_data_unavailable_count),
     collectionCount: Number(row.collection_count),
     successfulCount: Number(row.successful_count),

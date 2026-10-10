@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi } from '../../api/client'
+import { decimalToMinorUnits, formatCurrencyAmount, formatCurrencyMinorUnits } from '../../../../shared/currency.js'
 
 function optionFrequencyModes(option) {
   if (option.frequencyMode?.minimum === 'PERIODIC') return ['PERIODIC']
@@ -256,7 +257,7 @@ export default function OperatorInstitutions() {
     event.preventDefault(); setError(''); setNotice(''); setSaving(true)
     try {
       await operatorApi.requestInstitutionFinanceAccount({ tenantId: user.tenantId, customerId: financeRequest.customerId,
-        vendorLinkId: financeRequest.vendorLinkId, productId: financeRequest.productId, requestedAmountCents: Math.round(Number(financeRequest.amount) * 100),
+        vendorLinkId: financeRequest.vendorLinkId, productId: financeRequest.productId, requestedAmountCents: decimalToMinorUnits(financeRequest.amount),
         termMonths: financeRequest.termMonths ? Number(financeRequest.termMonths) : undefined,
         termDays: financeRequest.termDays ? Number(financeRequest.termDays) : undefined })
       setFinanceRequest({ customerId: '', vendorLinkId: '', productId: '', amount: '', termMonths: '', termDays: '' })
@@ -281,9 +282,9 @@ export default function OperatorInstitutions() {
         merchantId: account.merchant_id,
         triggerMode: form.triggerMode,
         frequency: form.frequency,
-        minimumPayoutCents: Math.round(Number(form.minimumPayout || 0) * 100),
+        minimumPayoutCents: decimalToMinorUnits(form.minimumPayout || 0),
         calculationType: form.calculationType,
-        calculationValue: Math.round(Number(form.calculationValue) * 100),
+        calculationValue: decimalToMinorUnits(form.calculationValue),
         active: Boolean(form.active)
       })
       setNotice('Payout contribution rule saved. It applies only when this vendor payout is triggered.')
@@ -295,7 +296,7 @@ export default function OperatorInstitutions() {
     event.preventDefault(); setError(''); setNotice(''); setSaving(true)
     try {
       await operatorApi.createInstitutionFinanceTransaction({ tenantId: user.tenantId, accountId: financePayment.accountId,
-        transactionType: financePayment.transactionType, amountCents: Math.round(Number(financePayment.amount) * 100), externalReference: financePayment.externalReference,
+        transactionType: financePayment.transactionType, amountCents: decimalToMinorUnits(financePayment.amount), externalReference: financePayment.externalReference,
         phoneNumber: financePayment.phoneNumber, note: 'Started by tenant operator through the institution Eganow account.' })
       setFinancePayment({ accountId: '', transactionType: 'LOAN_REPAYMENT', amount: '', externalReference: '', phoneNumber: '' })
       setNotice(financePayment.transactionType === 'WITHDRAWAL' ? 'Savings withdrawal request sent to the institution for approval.' : 'Eganow collection started. Approve the prompt on the customer mobile.')
@@ -367,8 +368,8 @@ export default function OperatorInstitutions() {
             <h2>Institution loan and savings packages</h2>
             <p className="subtle">Active packages are available after the institution approves your link and associates a verified member customer with this tenant.</p>
             {!financeProducts.length ? <div className="empty-state">No active financial packages are available on your approved institution links.</div> : financeProducts.map((product) => <div className="kv-row" key={product.id}>
-              <span><strong>{product.institution_name} · {product.name}</strong><small>{product.product_type} · GHS {(Number(product.min_amount_cents) / 100).toFixed(2)}–{(Number(product.max_amount_cents) / 100).toFixed(2)} · {(Number(product.annual_rate_basis_points) / 100).toFixed(2)}% annual</small></span>
-              <span>{product.product_type === 'LOAN' ? `${product.tenor_options_months?.length ? `${product.tenor_options_months.join(', ')} months` : `${product.min_term_days}–${product.max_term_days} days`} · ${product.loan_interest_model || ''} · late fee ${(Number(product.late_fee_basis_points || 0) / 100).toFixed(2)}%` : `Min balance GHS ${(Number(product.min_balance_cents) / 100).toFixed(2)} · ${product.contribution_frequency || 'PER_TRANSACTION'}`}</span>
+              <span><strong>{product.institution_name} · {product.name}</strong><small>{product.product_type} · {formatCurrencyMinorUnits(product.min_amount_cents, 'GHS')}–{formatCurrencyMinorUnits(product.max_amount_cents, 'GHS')} · {(Number(product.annual_rate_basis_points) / 100).toFixed(2)}% annual</small></span>
+              <span>{product.product_type === 'LOAN' ? `${product.tenor_options_months?.length ? `${product.tenor_options_months.join(', ')} months` : `${product.min_term_days}–${product.max_term_days} days`} · ${product.loan_interest_model || ''} · late fee ${(Number(product.late_fee_basis_points || 0) / 100).toFixed(2)}%` : `Min balance ${formatCurrencyMinorUnits(product.min_balance_cents, 'GHS')} · ${product.contribution_frequency || 'PER_TRANSACTION'}`}</span>
             </div>)}
             {financeProducts.length > 0 && ['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user.role) && <form onSubmit={requestFinancialAccount}>
               <h3>Apply for a member account</h3>
@@ -386,7 +387,7 @@ export default function OperatorInstitutions() {
               const split = account.split_allocations?.[0]
               const rule = payoutRuleForms[account.id] || {}
               return <div key={account.id}>
-                <div className="kv-row"><span><strong>{account.account_number} · {account.product_name}</strong><small>{account.institution_name} · {account.product_type} · GHS {(Number(account.product_type === 'LOAN' ? account.outstanding_cents : account.balance_cents) / 100).toFixed(2)} balance</small>{next && <small>Next payment {next.dueDate} · GHS {((Number(next.amountDueCents) - Number(next.amountPaidCents)) / 100).toFixed(2)}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · GHS {(Number(split.amountCents) / 100).toFixed(2)}</small>}</span><span className={`status-pill ${String(account.status).toLowerCase()}`}>{account.status.replaceAll('_', ' ').toLowerCase()}</span></div>
+                <div className="kv-row"><span><strong>{account.account_number} · {account.product_name}</strong><small>{account.institution_name} · {account.product_type} · {formatCurrencyMinorUnits(account.product_type === 'LOAN' ? account.outstanding_cents : account.balance_cents, 'GHS')} balance</small>{next && <small>Next payment {next.dueDate} · {formatCurrencyMinorUnits(BigInt(next.amountDueCents) - BigInt(next.amountPaidCents), 'GHS')}</small>}{split && <small>Latest split {split.type.replaceAll('_', ' ').toLowerCase()} · {formatCurrencyMinorUnits(split.amountCents, 'GHS')}</small>}</span><span className={`status-pill ${String(account.status).toLowerCase()}`}>{account.status.replaceAll('_', ' ').toLowerCase()}</span></div>
                 {['SAVINGS', 'INVESTMENT'].includes(account.product_type) && account.merchant_id && ['TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER'].includes(user.role) && ['APPROVED', 'ACTIVE'].includes(account.status) && <form className="subform" onSubmit={(event) => savePayoutRule(event, account)}>
                   <h4>Payout contribution</h4>
                   <p className="subtle">Enable an optional contribution for this vendor. The rule runs only when a manual or automatic payout is triggered.</p>
@@ -412,8 +413,8 @@ export default function OperatorInstitutions() {
                 <div className="field"><label>Transaction reference (optional)</label><input minLength="3" maxLength="160" value={financePayment.externalReference} onChange={(e) => setFinancePayment({ ...financePayment, externalReference: e.target.value })} placeholder="Generated if left blank" /></div>
               </div><button className="btn btn-primary" disabled={saving}>{saving ? 'Submitting…' : financePayment.transactionType === 'WITHDRAWAL' ? 'Request savings withdrawal' : 'Start Eganow collection'}</button>
             </form>}
-            {financeFees.length > 0 && <><h3>Institution fees</h3>{financeFees.map((fee) => <div className="kv-row" key={`${fee.institution_id}-${fee.operation}`}><span>{fee.institution_name} · {fee.operation.replaceAll('_', ' ').toLowerCase()}</span><strong>{fee.fee_type === 'NONE' ? 'No fee' : fee.fee_type === 'PERCENTAGE' ? `${fee.fee_value}%` : `GHS ${Number(fee.fee_value).toFixed(2)}`}</strong></div>)}</>}
-            {financeTransactions.length > 0 && <><h3>Submitted ledger entries</h3>{financeTransactions.map((entry) => <div className="kv-row" key={entry.id}><span>{entry.institution_name} · {entry.external_reference}<small>{entry.product_name} · {entry.transaction_type} · GHS {(Number(entry.amount_cents) / 100).toFixed(2)}</small></span><span className={`status-pill ${String(entry.status).toLowerCase()}`}>{entry.status.toLowerCase().replaceAll('_', ' ')}</span></div>)}</>}
+            {financeFees.length > 0 && <><h3>Institution fees</h3>{financeFees.map((fee) => <div className="kv-row" key={`${fee.institution_id}-${fee.operation}`}><span>{fee.institution_name} · {fee.operation.replaceAll('_', ' ').toLowerCase()}</span><strong>{fee.fee_type === 'NONE' ? 'No fee' : fee.fee_type === 'PERCENTAGE' ? `${fee.fee_value}%` : formatCurrencyAmount(fee.fee_value, 'GHS')}</strong></div>)}</>}
+            {financeTransactions.length > 0 && <><h3>Submitted ledger entries</h3>{financeTransactions.map((entry) => <div className="kv-row" key={entry.id}><span>{entry.institution_name} · {entry.external_reference}<small>{entry.product_name} · {entry.transaction_type} · {formatCurrencyMinorUnits(entry.amount_cents, 'GHS')}</small></span><span className={`status-pill ${String(entry.status).toLowerCase()}`}>{entry.status.toLowerCase().replaceAll('_', ' ')}</span></div>)}</>}
           </section>
 
           <form className="card" onSubmit={submit}>

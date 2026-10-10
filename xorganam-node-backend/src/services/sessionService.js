@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
 import { signToken, verifyToken } from '../security/jwt.js'
+import { authPolicy } from '../config/authPolicy.js'
+import { writePlatformAudit } from './auditService.js'
 
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -47,22 +49,55 @@ export function createSessionToken(user) {
 export async function createSession(user, request) {
   const { token, sessionId: newSessionId, expiresAt } = createSessionToken(user)
   const payload = verifyToken(token)
-  await query(
-    `INSERT INTO sessions
-       (id, user_id, institution_staff_id, tenant_id, token_version, expires_at,
-        user_agent, ip_address)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [
-      newSessionId,
-      user.id,
-      user.institution_staff_id || null,
-      user.tenant_id || null,
-      payload.tokenVersion,
-      expiresAt,
-      request.headers['user-agent'] || null,
-      request.ip || null
-    ]
-  )
+  const institutionPrincipal = Boolean(user.institution_staff_id)
+  const principalTable = institutionPrincipal ? 'institution_staff' : 'users'
+  await withTransaction(async (client) => {
+    await client.query(`SELECT id FROM ${principalTable} WHERE id = $1 FOR UPDATE`, [user.id])
+    const { rows: activeSessions } = await client.query(
+      `SELECT id FROM sessions
+        WHERE ${institutionPrincipal ? 'institution_staff_id' : 'user_id'} = $1
+          AND revoked_at IS NULL AND expires_at > now()
+        ORDER BY created_at DESC, id`,
+      [user.id]
+    )
+    const sessionsToRevoke = activeSessions.slice(Math.max(authPolicy.maxActiveSessions - 1, 0))
+    if (sessionsToRevoke.length) {
+      const revokedIds = sessionsToRevoke.map((session) => session.id)
+      await client.query(
+        'UPDATE sessions SET revoked_at = now() WHERE id = ANY($1::uuid[]) AND revoked_at IS NULL',
+        [revokedIds]
+      )
+      await writePlatformAudit({
+        actorUserId: institutionPrincipal ? null : user.id,
+        actorInstitutionStaffId: institutionPrincipal ? user.id : null,
+        tenantId: user.tenant_id || user.institution_id || null,
+        action: 'SESSION_LIMIT_ENFORCED',
+        resourceType: 'session',
+        resourceId: newSessionId,
+        details: { revokedSessionIds: revokedIds, maximumActiveSessions: authPolicy.maxActiveSessions },
+        ipAddress: request.ip || null,
+        userAgent: request.headers['user-agent'] || null,
+        requestId: request.id || null,
+        client: client.query.bind(client)
+      })
+    }
+    await client.query(
+      `INSERT INTO sessions
+         (id, user_id, institution_staff_id, tenant_id, token_version, expires_at,
+          user_agent, ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        newSessionId,
+        institutionPrincipal ? null : user.id,
+        institutionPrincipal ? user.id : null,
+        user.tenant_id || null,
+        payload.tokenVersion,
+        expiresAt,
+        request.headers['user-agent'] || null,
+        request.ip || null
+      ]
+    )
+  })
   return token
 }
 
@@ -149,7 +184,7 @@ export async function revokeCurrentSession(sessionId, principalId, principalType
     await client.query(
       `INSERT INTO platform_audit_log
          (${actorColumn}, action, resource_type, resource_id, details)
-       VALUES ($1, 'SESSION_REVOKED', 'session', $2, jsonb_build_object('reason', $3))`,
+      VALUES ($1, 'SESSION_REVOKED', 'session', $2, jsonb_build_object('reason', $3::text))`,
       [actorUserId, sessionId, reason]
     )
     return true

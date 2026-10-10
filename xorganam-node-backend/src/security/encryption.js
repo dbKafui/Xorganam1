@@ -18,6 +18,20 @@ function deriveLegacyKey(tenantSalt) {
   return crypto.scryptSync(env.encryptionMasterKey, tenantSalt, 32)
 }
 
+function encryptLegacyFormat(plainText, tenantSalt) {
+  const key = deriveLegacyKey(tenantSalt)
+  const iv = crypto.randomBytes(IV_LENGTH)
+
+  try {
+    const cipher = crypto.createCipheriv(ALGORITHM, key, iv)
+    const ciphertext = Buffer.concat([cipher.update(String(plainText), 'utf8'), cipher.final()])
+    const authTag = cipher.getAuthTag()
+    return Buffer.concat([iv, authTag, ciphertext]).toString('base64')
+  } finally {
+    zeroize(key)
+  }
+}
+
 function zeroize(...buffers) {
   for (const buf of buffers) {
     if (Buffer.isBuffer(buf)) buf.fill(0)
@@ -134,7 +148,11 @@ export async function decrypt(payload, tenantSalt) {
 
   try {
     if (payload.startsWith(ENVELOPE_PREFIX)) {
-      return await decryptEnvelope(payload, tenantSalt)
+      try {
+        return await decryptEnvelope(payload, tenantSalt)
+      } catch {
+        return decryptLegacyFormat(payload, tenantSalt)
+      }
     }
     return decryptLegacyFormat(payload, tenantSalt)
   } catch (error) {

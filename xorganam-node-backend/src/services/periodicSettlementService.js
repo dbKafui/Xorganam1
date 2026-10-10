@@ -10,6 +10,8 @@ import { applyInstitutionSplitRepayments } from './creditCashSweepService.js'
 import { createVendorReference } from './referenceIds.js'
 import { updateInstitutionSweepStatus } from './institutionSweepStateService.js'
 import { updateTransactionStatus } from './transactionStateService.js'
+import { normalizeAmountMinorUnits, formatMinorUnits } from './providerResultValidation.js'
+import { amountForRule } from '../lib/periodicSettlementMoney.js'
 
 const RETRY_WINDOW_MS = 10 * 60 * 1000
 
@@ -90,16 +92,6 @@ function completedPeriod(anchor, schedule, now = new Date()) {
   }
 }
 
-function amountForRule(amount, rule) {
-  const value = rule.type === 'PERCENTAGE'
-    ? Number(amount) * Number(rule.amount) / 100
-    : Number(rule.amount)
-  if (!Number.isFinite(value) || value < 0 || value > Number(amount)) {
-    throw new Error(`Invalid periodic split rule ${rule.id}.`)
-  }
-  return Math.round(value * 100) / 100
-}
-
 async function loadDueConfigurations(now) {
   const { rows } = await query(
     `SELECT c.*, i.name AS institution_name, i.settlement_msisdn,
@@ -172,12 +164,16 @@ async function createSweep(config) {
         AND a.period_key = $4`,
     [config.tenant_id, config.merchant_id, config.institution_id, config.period.key]
   )
-  const institutionAmount = Number(totals[0].institution_amount)
-  if (institutionAmount <= 0) return null
+  const institutionCents = normalizeAmountMinorUnits(totals[0].institution_amount)
+  if (institutionCents === null || institutionCents <= 0n) return null
 
-  const vendorAmount = config.vendor_payout_mode === 'PERIODIC'
-    ? Math.round(Number(totals[0].vendor_amount) * 100) / 100
-    : 0
+  const vendorCents = config.vendor_payout_mode === 'PERIODIC'
+    ? normalizeAmountMinorUnits(totals[0].vendor_amount)
+    : 0n
+  if (vendorCents === null) throw new Error('Periodic vendor amount has unsupported precision.')
+  const institutionAmount = formatMinorUnits(institutionCents)
+  const vendorAmount = formatMinorUnits(vendorCents)
+  const totalAmount = formatMinorUnits(institutionCents + vendorCents)
 
   return withTransaction(async (client) => {
     const parent = await client.query(
@@ -187,7 +183,7 @@ async function createSweep(config) {
        VALUES ($1, $2, $3, 'SWEEP_PAYOUT', 'PENDING', $4, 'GHS', $5, $6)
        ON CONFLICT ON CONSTRAINT uq_transactions_periodic_sweep DO NOTHING
        RETURNING id`,
-      [config.tenant_id, config.merchant_id, config.institution_id, institutionAmount + vendorAmount, config.period.key, createVendorReference(config.display_name, 'PS')]
+      [config.tenant_id, config.merchant_id, config.institution_id, totalAmount, config.period.key, createVendorReference(config.display_name, 'PS')]
     )
     if (!parent.rows[0]) {
       const existing = await client.query(
@@ -205,9 +201,9 @@ async function createSweep(config) {
       )
       return {
         ...existing.rows[0],
-        institutionAmount: Number(existingLedger[0]?.institution_amount || 0),
-        vendorAmount: Number(existingLedger[0]?.vendor_amount || 0),
-        amount: Number(existing.rows[0].amount)
+        institutionAmount: existingLedger[0]?.institution_amount || '0.00',
+        vendorAmount: existingLedger[0]?.vendor_amount || '0.00',
+        amount: existing.rows[0].amount
       }
     }
 
@@ -220,7 +216,7 @@ async function createSweep(config) {
        ON CONFLICT (sweep_transaction_id) DO NOTHING`,
       [config.institution_id, config.tenant_id, config.merchant_id, sweep.id, vendorAmount, institutionAmount, config.period.key]
     )
-    return { ...sweep, institutionAmount, vendorAmount, amount: institutionAmount + vendorAmount }
+    return { ...sweep, institutionAmount, vendorAmount, amount: totalAmount }
   })
 }
 
@@ -354,7 +350,11 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
       ? await createLeg(parent, periodConfig, 'VENDOR', parent.vendorAmount, periodConfig.mobile_money_number)
       : null
     const pendingLegs = [institutionLeg, vendorLeg].filter((leg) => leg && leg.status !== 'PAID_OUT' && leg.status !== 'FAILED')
-    const outstandingAmount = pendingLegs.reduce((total, leg) => total + Number(leg.amount), 0)
+    const outstandingCents = pendingLegs.reduce((total, leg) => {
+      const cents = normalizeAmountMinorUnits(leg.amount)
+      if (cents === null) throw new Error(`Sweep leg ${leg.id} has unsupported amount precision.`)
+      return total + cents
+    }, 0n)
     let balance
     try {
       balance = await getPayoutWalletBalance(periodConfig.tenant_id, periodConfig.eganow_payout_account_id, periodConfig.merchant_id)
@@ -369,7 +369,8 @@ export async function runDuePeriodicSettlements({ now = new Date(), tenantId = n
       continue
     }
 
-    if (Number(balance) < outstandingAmount) {
+    const balanceCents = normalizeAmountMinorUnits(balance)
+    if (balanceCents === null || balanceCents < outstandingCents) {
       await updateInstitutionSweepStatus(query, {
         id: parent.id,
         currentStatus: parent.status,

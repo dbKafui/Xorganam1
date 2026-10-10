@@ -52,28 +52,88 @@ export default function InstitutionApplications() {
     finally { setBusy('') }
   }
 
-  return <div>
-    <header className="page-header"><div><h1>Institution applications</h1><p>Review applications before creating institution workspaces and their first administrator account.</p></div></header>
+  const summaryCounts = {
+    PENDING: applications.filter((application) => application.status === 'PENDING').length,
+    APPROVED: applications.filter((application) => application.status === 'APPROVED').length,
+    REJECTED: applications.filter((application) => application.status === 'REJECTED').length,
+  }
+
+  return <div className="institution-applications-page">
+    <header className="page-header institution-header">
+      <div>
+        <div className="eyebrow">INSTITUTION OPERATIONS</div>
+        <h1>Institution applications</h1>
+        <p>Review onboarding requests, verify applicant details, and activate or reject new institutional workspaces.</p>
+      </div>
+    </header>
+
+    <div className="summary-grid">
+      <div className="summary-card summary-card-highlight">
+        <span className="summary-label">Pending review</span>
+        <strong>{summaryCounts.PENDING}</strong>
+        <small>Needs verification</small>
+      </div>
+      <div className="summary-card">
+        <span className="summary-label">Approved</span>
+        <strong>{summaryCounts.APPROVED}</strong>
+        <small>Live institutions</small>
+      </div>
+      <div className="summary-card">
+        <span className="summary-label">Rejected</span>
+        <strong>{summaryCounts.REJECTED}</strong>
+        <small>Needs follow-up</small>
+      </div>
+    </div>
+
     {error && <div className="alert alert-error" role="alert">{error}</div>}
     {notice && <div className="alert alert-success" role="status">{notice}</div>}
-    <section className="panel">
-      <div className="filter-tabs">{STATUS_TABS.map((item) => <button key={item} className={`filter-tab${status === item ? ' selected' : ''}`} onClick={() => { setStatus(item); setError('') }}>{item}</button>)}</div>
-      <p className="subtle">For pending applications, verify the institution’s legal identity, settlement account, and applicant authority using a contact source independent of this application before approving.</p>
-      {applications.length ? <div className="table-wrap"><table><thead><tr><th>Institution</th><th>Settlement details</th><th>Initial administrator</th><th>Submitted / decision</th><th>Review note</th><th>Actions</th></tr></thead><tbody>
+
+    <section className="panel institution-applications-panel">
+      <div className="panel-toolbar">
+        <div className="filter-tabs">{STATUS_TABS.map((item) => <button key={item} className={`filter-tab${status === item ? ' selected' : ''}`} onClick={() => { setStatus(item); setError('') }}>{item}</button>)}</div>
+        <div className="panel-badge">{applications.length} visible</div>
+      </div>
+
+      <p className="subtle">For pending applications, verify the institution’s legal identity, settlement account, and applicant authority using a contact source independent from the application before approving.</p>
+
+      {applications.length ? <div className="table-wrap institution-applications-table"><table><thead><tr><th>Institution</th><th>Settlement details</th><th>Initial administrator</th><th>Submitted / decision</th><th>Review note</th><th>Actions</th></tr></thead><tbody>
         {applications.map((application) => <tr key={application.id}>
-          <td><strong>{application.institution_name}</strong><small>{application.institution_type.replaceAll('_', ' ')}</small><small className="mono">{application.id}</small></td>
-          <td>{application.settlement_account_name}<small>{application.settlement_msisdn}</small></td>
-          <td>{application.admin_first_name} {application.admin_last_name}<small>{application.admin_email}</small></td>
-          <td>{new Date(application.created_at).toLocaleString()}<small>{application.reviewed_at ? `Reviewed ${new Date(application.reviewed_at).toLocaleString()}` : 'Awaiting review'}</small></td>
-          <td>{application.status === 'PENDING' ? <>
-            <textarea rows="2" maxLength="2000" value={notes[application.id] || ''} onChange={(event) => setNotes({ ...notes, [application.id]: event.target.value })} placeholder="Optional approval note; required rejection reason" />
-            <div className="onboarding-verification-checks">
-              <label><input type="checkbox" checked={!!verification[application.id]?.legalEntity} onChange={(event) => setVerification((current) => ({ ...current, [application.id]: { ...current[application.id], legalEntity: event.target.checked } }))} /> Legal entity independently checked</label>
-              <label><input type="checkbox" checked={!!verification[application.id]?.settlementAccount} onChange={(event) => setVerification((current) => ({ ...current, [application.id]: { ...current[application.id], settlementAccount: event.target.checked } }))} /> Settlement account independently checked</label>
-              <label><input type="checkbox" checked={!!verification[application.id]?.applicantAuthority} onChange={(event) => setVerification((current) => ({ ...current, [application.id]: { ...current[application.id], applicantAuthority: event.target.checked } }))} /> Applicant authority independently checked</label>
+          <td className="application-cell">
+            <div className="institution-stack">
+              <strong>{application.institution_name}</strong>
+              <span>{application.institution_type.replaceAll('_', ' ')}</span>
             </div>
-          </> : application.reviewer_note || '—'}</td>
-          <td>{application.status === 'PENDING' && <><button className="btn btn-primary" disabled={!!busy} onClick={() => review(application, 'APPROVED')}>Approve</button> <button className="btn btn-secondary" disabled={!!busy} onClick={() => review(application, 'REJECTED')}>Reject</button></>}</td>
+            <small className="mono">{application.id}</small>
+          </td>
+          <td className="application-cell">
+            <span>{application.settlement_account_name || '—'}</span>
+            <small>{application.settlement_msisdn || 'No settlement number'}</small>
+          </td>
+          <td className="application-cell">
+            <span>{application.admin_first_name} {application.admin_last_name}</span>
+            <small>{application.admin_email}</small>
+          </td>
+          <td className="application-cell timeline-cell">
+            <span>{new Date(application.created_at).toLocaleString()}</span>
+            <small>{application.reviewed_at ? `Reviewed ${new Date(application.reviewed_at).toLocaleString()}` : 'Awaiting review'}</small>
+            {application.status !== 'PENDING' && <span className={`chip ${application.status === 'APPROVED' ? 'chip-success' : 'chip-failed'}`}>{application.status}</span>}
+          </td>
+          <td className="application-cell review-cell">
+            {application.status === 'PENDING' ? <>
+              <textarea rows="2" maxLength="2000" value={notes[application.id] || ''} onChange={(event) => setNotes({ ...notes, [application.id]: event.target.value })} placeholder="Optional approval note; required rejection reason" />
+              <div className="onboarding-verification-checks">
+                <label><input type="checkbox" checked={!!verification[application.id]?.legalEntity} onChange={(event) => setVerification((current) => ({ ...current, [application.id]: { ...current[application.id], legalEntity: event.target.checked } }))} /> Legal entity independently checked</label>
+                <label><input type="checkbox" checked={!!verification[application.id]?.settlementAccount} onChange={(event) => setVerification((current) => ({ ...current, [application.id]: { ...current[application.id], settlementAccount: event.target.checked } }))} /> Settlement account independently checked</label>
+                <label><input type="checkbox" checked={!!verification[application.id]?.applicantAuthority} onChange={(event) => setVerification((current) => ({ ...current, [application.id]: { ...current[application.id], applicantAuthority: event.target.checked } }))} /> Applicant authority independently checked</label>
+              </div>
+            </> : application.reviewer_note || '—'}
+          </td>
+          <td className="application-actions">
+            {application.status === 'PENDING' ? <>
+              <button className="btn btn-primary" disabled={!!busy} onClick={() => review(application, 'APPROVED')}>Approve</button>
+              <button className="btn btn-secondary" disabled={!!busy} onClick={() => review(application, 'REJECTED')}>Reject</button>
+            </> : <span className="chip chip-neutral">{application.status}</span>}
+          </td>
         </tr>)}
       </tbody></table></div> : <p className="empty-state">No {status.toLowerCase()} institution applications.</p>}
     </section>

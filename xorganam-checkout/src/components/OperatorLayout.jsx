@@ -79,6 +79,7 @@ export default function OperatorLayout() {
         {user?.role !== 'TENANT_BRANCH_MANAGER' && <><div className="portal-nav-caption">ADMINISTRATION</div><nav className="portal-nav">
           <NavLink to="/operator/team"><span className="nav-glyph">♧</span> Team access</NavLink>
           <NavLink to="/operator/account"><span className="nav-glyph">⚙</span> Account & KYC</NavLink>
+          {['TENANT_ADMIN', 'TENANT_MANAGER'].includes(user?.role) && <NavLink to="/operator/email-settings"><span className="nav-glyph">✉</span> Email delivery</NavLink>}
         </nav></>}
         <div className="portal-sidebar-bottom"><span className="portal-secure"><span /> Secure vendor workspace</span><button className="logout-link" onClick={logout}>↪ <span>Log out</span></button></div>
       </aside>

@@ -4,8 +4,9 @@ import { transactionsApi } from '../../api/transactions'
 import StatusChip from '../../components/StatusChip'
 import { maskAccount } from '../../lib/mask'
 
+import { formatCurrencyAmount } from '../../../../shared/currency.js'
 function money(n) {
-  return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(n ?? 0, 'GHS')
 }
 
 export default function TransactionDetail() {

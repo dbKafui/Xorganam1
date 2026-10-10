@@ -13,6 +13,8 @@ import { reconcileInstitutionTransaction } from '../services/institutionFinancia
 import { dispatchInstitutionNotification } from '../services/institutionNotificationService.js'
 import { writeInstitutionAudit } from '../services/institutionAuditService.js'
 import { updateInstitutionFinancialTransactionStatus, updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
+import { normalizeAmountMinorUnits } from '../services/providerResultValidation.js'
+import { isInstitutionBankPartner, normalizeInstitutionMomoNetwork, validateInstitutionBankPayout, validateInstitutionCardDetails } from '../services/institutionPaymentMethods.js'
 
 export const institutionFinanceRouter = Router()
 export const tenantInstitutionFinanceRouter = Router()
@@ -66,15 +68,22 @@ async function savingsContributionHistory(tx, institutionId, customerId) {
       ) contribution`,
     [institutionId, customerId]
   )
-  return Number(rows[0].total_cents)
+  return BigInt(rows[0].total_cents)
 }
 
 async function configuredFee(institutionId, operation, amountCents) {
   const { rows } = await query('SELECT fee_type, fee_value FROM institution_financial_fee_rules WHERE institution_id = $1 AND operation = $2', [institutionId, operation])
   const rule = rows[0]
-  if (!rule || rule.fee_type === 'NONE') return 0
-  if (rule.fee_type === 'FIXED') return Math.round(Number(rule.fee_value) * 100)
-  return Math.round(amountCents * Number(rule.fee_value) / 100)
+  if (!rule || rule.fee_type === 'NONE') return 0n
+  if (rule.fee_type === 'FIXED') {
+    const fixed = normalizeAmountMinorUnits(rule.fee_value)
+    if (fixed === null) throw new Error('Configured institution fee has unsupported precision.')
+    return fixed
+  }
+  const rate = normalizeAmountMinorUnits(rule.fee_value)
+  if (rate === null) throw new Error('Configured institution fee rate has unsupported precision.')
+  const numerator = BigInt(amountCents) * rate
+  return (numerator + 5000n) / 10000n
 }
 function isDefinitiveEganowRejection(error) {
   return error instanceof InstitutionCredentialsError ||
@@ -550,11 +559,11 @@ institutionFinanceRouter.post('/accounts', requireInstitutionPermission('account
     )
     const product = products[0]
     if (!product) return { error: 'Active institution product was not found.' }
-    if (amount < Number(product.min_amount_cents) || amount > Number(product.max_amount_cents)) return { error: 'Requested amount is outside this product’s configured bounds.' }
+    if (BigInt(amount) < BigInt(product.min_amount_cents) || BigInt(amount) > BigInt(product.max_amount_cents)) return { error: 'Requested amount is outside this product’s configured bounds.' }
     const term = resolveTermDays(product, termDays, termMonths)
     if (product.product_type === 'LOAN' && !term) return { error: 'Select a configured loan tenor that is within the product’s term boundaries.' }
-    if (product.product_type === 'LOAN' && Number(product.min_contribution_history_cents) > 0 &&
-        await savingsContributionHistory(tx, req.institutionAuth.institutionId, customerId) < Number(product.min_contribution_history_cents)) {
+    if (product.product_type === 'LOAN' && BigInt(product.min_contribution_history_cents) > 0n &&
+        await savingsContributionHistory(tx, req.institutionAuth.institutionId, customerId) < BigInt(product.min_contribution_history_cents)) {
       return { error: 'Customer contribution history is below this loan product’s eligibility minimum.' }
     }
     const { rows: existing } = await tx.query(
@@ -589,7 +598,7 @@ institutionFinanceRouter.patch('/accounts/:accountId/decision', requireInstituti
          AND EXISTS (SELECT 1 FROM institution_customers c WHERE c.id = a.customer_id AND c.branch_id IS NOT DISTINCT FROM $3)`,
       [req.params.accountId, req.institutionAuth.institutionId, req.institutionAuth.branchId]
     )
-    if (accounts.length && Number(accounts[0].requested_amount_cents) > Number(accounts[0].supervisor_approval_limit_cents)) return res.status(403).json({ message: 'This loan exceeds your approval limit and requires institution admin review.' })
+    if (accounts.length && BigInt(accounts[0].requested_amount_cents) > BigInt(accounts[0].supervisor_approval_limit_cents)) return res.status(403).json({ message: 'This loan exceeds your approval limit and requires institution admin review.' })
   }
   const { rows } = await query(
     `UPDATE institution_financial_accounts a
@@ -620,15 +629,27 @@ institutionFinanceRouter.get('/transactions', requireInstitutionPermission('fina
 
 institutionFinanceRouter.post('/transactions', requireInstitutionPermission('transaction:create'), asyncHandler(async (req, res) => {
   const { accountId, transactionType, amountCents, externalReference, note, phoneNumber } = req.body || {}
+  const collectionMethod = transactionType === 'DEPOSIT' ? String(req.body?.collectionMethod || 'MOMO').toUpperCase() : 'MOMO'
+  const payoutDestinationType = transactionType === 'DEPOSIT' ? 'MOMO' : String(req.body?.payoutDestinationType || 'MOMO').toUpperCase()
+  const networkProvider = req.body?.networkProvider ? normalizeInstitutionMomoNetwork(req.body.networkProvider) : null
+  const payoutBankCode = String(req.body?.payoutBankCode || '').trim().toUpperCase() || null
   const allowed = new Set(['DEPOSIT', 'WITHDRAWAL', 'LOAN_DISBURSEMENT'])
-  if (!uuid.test(accountId || '') || !allowed.has(transactionType) || !/^233[0-9]{9}$/.test(String(phoneNumber || '').replace(/\D/g, ''))) return badRequest(res, 'Provide a valid account, transaction type, and Ghana customer mobile number in 233XXXXXXXXX format.')
+  if (!uuid.test(accountId || '') || !allowed.has(transactionType)) return badRequest(res, 'Provide a valid account and transaction type.')
+  if (transactionType === 'DEPOSIT' && !['MOMO', 'CARD'].includes(collectionMethod)) return badRequest(res, 'Choose MoMo or Card for collection.')
+  if (transactionType !== 'DEPOSIT' && !['MOMO', 'BANK'].includes(payoutDestinationType)) return badRequest(res, 'Choose MoMo or Bank for payout.')
+  if (transactionType === 'DEPOSIT' && collectionMethod === 'MOMO' && !/^233[0-9]{9}$/.test(String(phoneNumber || '').replace(/\D/g, ''))) return badRequest(res, 'Provide a Ghana mobile number in 233XXXXXXXXX format.')
+  if (req.body?.networkProvider && !networkProvider) return badRequest(res, 'Choose MTN, Telecel, or AT/AirtelTigo.')
+  if (transactionType !== 'DEPOSIT' && payoutDestinationType === 'BANK' && !isInstitutionBankPartner(payoutBankCode)) return badRequest(res, 'Choose a supported bank partner.')
   const amount = Number(amountCents)
   if (!Number.isSafeInteger(amount) || amount < 1 || !/^[\w.-]{3,160}$/.test(String(externalReference || ''))) return badRequest(res, 'Amount must be positive cents and a transaction reference from the institution is required.')
   const { rows } = await query(
     `INSERT INTO institution_financial_transactions
-      (institution_id, account_id, transaction_type, amount_cents, external_reference, note, created_by_staff_id, payer_phone_number)
+      (institution_id, account_id, transaction_type, amount_cents, external_reference, note, created_by_staff_id,
+       payer_phone_number, collection_method, network_provider, payout_destination_type, payout_bank_code)
      SELECT $1, a.id, $3, $4, $5, $6, $7,
-            CASE WHEN $3 IN ('LOAN_DISBURSEMENT','WITHDRAWAL') THEN c.phone_number ELSE $10 END
+              CASE WHEN $3 IN ('LOAN_DISBURSEMENT','WITHDRAWAL') THEN c.phone_number
+                WHEN $11 = 'MOMO' THEN $10 ELSE NULL END,
+              $11, $12, $13, $14
        FROM institution_financial_accounts a JOIN institution_customers c ON c.id = a.customer_id AND c.institution_id = a.institution_id
       WHERE a.id = $2 AND a.institution_id = $1
         AND a.status IN ('APPROVED','ACTIVE')
@@ -636,7 +657,9 @@ institutionFinanceRouter.post('/transactions', requireInstitutionPermission('tra
           SELECT 1 FROM institution_customers c WHERE c.id = a.customer_id AND c.branch_id IS NOT DISTINCT FROM $9
         )) RETURNING *`,
     [req.institutionAuth.institutionId, accountId, transactionType, amount, externalReference, String(note || '').slice(0, 1000) || null,
-      req.institutionAuth.id, req.institutionAuth.role, req.institutionAuth.branchId, String(phoneNumber).replace(/\D/g, '')]
+      req.institutionAuth.id, req.institutionAuth.role, req.institutionAuth.branchId,
+      transactionType === 'DEPOSIT' && collectionMethod === 'MOMO' ? String(phoneNumber).replace(/\D/g, '') : null,
+      collectionMethod, networkProvider, payoutDestinationType, payoutBankCode]
   )
   if (!rows.length) return res.status(404).json({ message: 'Active account not found in your branch.' })
   res.status(201).json(rows[0])
@@ -662,7 +685,7 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
   if (!item) return res.status(404).json({ message: 'Pending transaction not found in your approval scope.' })
   if (decision === 'POSTED' && req.institutionAuth.role === 'SUPERVISOR') {
     const { rows: limits } = await query('SELECT supervisor_approval_limit_cents FROM institutions WHERE id = $1', [req.institutionAuth.institutionId])
-    if (Number(item.amount_cents) > Number(limits[0]?.supervisor_approval_limit_cents || 0)) return res.status(403).json({ message: 'This transaction exceeds your approval limit and requires institution admin review.' })
+    if (BigInt(item.amount_cents) > BigInt(limits[0]?.supervisor_approval_limit_cents || 0)) return res.status(403).json({ message: 'This transaction exceeds your approval limit and requires institution admin review.' })
   }
   if (decision === 'REJECTED') {
     const result = await withTransaction(async (tx) => {
@@ -692,18 +715,38 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
     })
     return res.json(result)
   }
+  let cardDetails = null
+  let bankPayout = null
+  if (item.transaction_type === 'DEPOSIT' && item.collection_method === 'CARD') {
+    try {
+      cardDetails = validateInstitutionCardDetails(req.body)
+    } catch (error) {
+      return badRequest(res, error.message)
+    }
+  }
+  if (['WITHDRAWAL', 'LOAN_DISBURSEMENT'].includes(item.transaction_type) && item.payout_destination_type === 'BANK') {
+    try {
+      bankPayout = validateInstitutionBankPayout({
+        bankCode: item.payout_bank_code,
+        bankAccountNumber: req.body?.bankAccountNumber,
+        bankAccountName: req.body?.bankAccountName
+      })
+    } catch (error) {
+      return badRequest(res, error.message)
+    }
+  }
   if (item.transaction_type === 'LOAN_REPAYMENT') {
     return res.status(409).json({ message: 'Loan recovery is allocated from vendor payout funds and cannot be collected from the customer phone.' })
   }
-  const amount = Number(item.amount_cents)
+  const amount = BigInt(item.amount_cents)
   const isBalanceAccount = balanceProductTypes.has(item.product_type)
-  const available = isBalanceAccount ? Number(item.balance_cents) : Number(item.outstanding_cents)
-  if (item.transaction_type === 'LOAN_DISBURSEMENT' && (item.product_type !== 'LOAN' || amount !== Number(item.requested_amount_cents))) return res.status(409).json({ message: 'Loan disbursement must match an approved loan principal.' })
+  const available = BigInt(isBalanceAccount ? item.balance_cents : item.outstanding_cents)
+  if (item.transaction_type === 'LOAN_DISBURSEMENT' && (item.product_type !== 'LOAN' || amount !== BigInt(item.requested_amount_cents))) return res.status(409).json({ message: 'Loan disbursement must match an approved loan principal.' })
   if (['DEPOSIT', 'WITHDRAWAL'].includes(item.transaction_type) && !isBalanceAccount) return res.status(409).json({ message: 'Deposit and withdrawal require a savings or investment account.' })
-  if (item.transaction_type === 'DEPOSIT' && amount < Number(item.min_amount_cents)) return res.status(409).json({ message: 'Deposit is below the product minimum.' })
+  if (item.transaction_type === 'DEPOSIT' && amount < BigInt(item.min_amount_cents)) return res.status(409).json({ message: 'Deposit is below the product minimum.' })
   if (item.transaction_type === 'LOAN_REPAYMENT' && (item.product_type !== 'LOAN' || amount > available)) return res.status(409).json({ message: 'Loan repayment exceeds the remaining principal or does not match a loan account.' })
   if (item.transaction_type === 'WITHDRAWAL' && amount > available) return res.status(409).json({ message: 'Withdrawal exceeds the available savings balance.' })
-  if (item.transaction_type === 'WITHDRAWAL' && available - amount < Number(item.min_balance_cents || 0)) return res.status(409).json({ message: 'Withdrawal would leave the savings account below its minimum balance.' })
+  if (item.transaction_type === 'WITHDRAWAL' && available - amount < BigInt(item.min_balance_cents || 0)) return res.status(409).json({ message: 'Withdrawal would leave the savings account below its minimum balance.' })
   if (item.transaction_type === 'WITHDRAWAL' && item.withdrawals_per_month) {
     const { rows: count } = await query(
       `SELECT count(*)::int AS count FROM institution_financial_transactions
@@ -716,12 +759,13 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
   const feeOperation = { LOAN_REPAYMENT: 'LOAN_REPAYMENT', DEPOSIT: 'SAVINGS_CONTRIBUTION', WITHDRAWAL: 'SAVINGS_WITHDRAWAL' }[item.transaction_type]
   const fee = feeOperation ? await configuredFee(req.institutionAuth.institutionId, feeOperation, amount) : 0
   const penalty = item.transaction_type === 'WITHDRAWAL' && item.is_early_withdrawal
-    ? Math.round(amount * Number(item.early_withdrawal_penalty_basis_points || 0) / 10000) : 0
+    ? (amount * BigInt(item.early_withdrawal_penalty_basis_points || 0) + 5000n) / 10000n : 0n
   const payout = item.transaction_type === 'WITHDRAWAL' || item.transaction_type === 'LOAN_DISBURSEMENT'
   // Fees are recorded locally for reconciliation. Eganow is responsible for
   // applying them; only the separate early-withdrawal penalty changes principal.
-  const gatewayAmount = payout ? amount - penalty : amount
-  if (gatewayAmount <= 0) return res.status(409).json({ message: 'Configured penalty leaves no positive amount to pay out.' })
+  const gatewayAmountCents = payout ? amount - penalty : amount
+  if (gatewayAmountCents <= 0n || gatewayAmountCents > BigInt(Number.MAX_SAFE_INTEGER)) return res.status(409).json({ message: 'Configured amount is outside the supported payment range.' })
+  const gatewayAmount = Number(gatewayAmountCents)
 
   const startResult = await withTransaction(async (tx) => {
     const { rows: accounts } = await tx.query(
@@ -746,10 +790,10 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
           AND status IN ('PENDING_APPROVAL','PENDING_GATEWAY')`,
       [item.account_id, item.id, item.transaction_type]
     )
-    const balance = Number(balanceProductTypes.has(accountRow.product_type) ? accountRow.balance_cents : accountRow.outstanding_cents)
-    const availableNow = balance - Number(reservations[0].reserved_cents)
+    const balance = BigInt(balanceProductTypes.has(accountRow.product_type) ? accountRow.balance_cents : accountRow.outstanding_cents)
+    const availableNow = balance - BigInt(reservations[0].reserved_cents)
     if (['LOAN_REPAYMENT', 'WITHDRAWAL'].includes(item.transaction_type) && amount > availableNow) return { error: 'Other pending transactions reserve the available balance.' }
-    if (item.transaction_type === 'WITHDRAWAL' && availableNow - amount < Number(accountRow.min_balance_cents || 0)) return { error: 'Withdrawal would leave the savings account below its minimum balance.' }
+    if (item.transaction_type === 'WITHDRAWAL' && availableNow - amount < BigInt(accountRow.min_balance_cents || 0)) return { error: 'Withdrawal would leave the savings account below its minimum balance.' }
     if (item.transaction_type === 'WITHDRAWAL' && item.withdrawals_per_month) {
       const { rows: count } = await tx.query(
         `SELECT count(*)::int AS count FROM institution_financial_transactions
@@ -767,9 +811,9 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
       fields: {
         approved_by_staff_id: req.institutionAuth.id,
         approved_at: new Date(),
-        fee_cents: fee,
-        penalty_cents: penalty,
-        payout_amount_cents: payout ? gatewayAmount : null
+        fee_cents: String(fee),
+        penalty_cents: String(penalty),
+        payout_amount_cents: payout ? String(gatewayAmountCents) : null
       }
     })
     await writeInstitutionAudit(tx, {
@@ -781,7 +825,7 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
         fromStatus: 'PENDING_APPROVAL',
         toStatus: 'PENDING_GATEWAY',
         transactionType: item.transaction_type,
-        amountCents: Number(item.amount_cents)
+        amountCents: String(item.amount_cents)
       }
     })
     return started.length ? { transaction: started[0] } : { error: 'Transaction was already reviewed.' }
@@ -792,16 +836,30 @@ institutionFinanceRouter.patch('/transactions/:transactionId/decision', requireI
        (institution_id, type, amount, internal_reference)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (internal_reference) DO NOTHING`,
-    [req.institutionAuth.institutionId, payout ? 'PAYOUT' : 'COLLECTION', gatewayAmount / 100, item.external_reference]
+    [req.institutionAuth.institutionId, payout ? 'PAYOUT' : 'COLLECTION', (gatewayAmountCents / 100n).toString() + '.' + String(gatewayAmountCents % 100n).padStart(2, '0'), item.external_reference]
   )
   try {
     const initiate = payout ? initiateInstitutionPayout : initiateInstitutionCollection
-    const gateway = await initiate(req.institutionAuth.institutionId, {
-      reference: item.external_reference, amount: gatewayAmount, msisdn: item.payer_phone_number,
-      narration: `${item.transaction_type.replaceAll('_', ' ')} ${item.external_reference}`
-    })
+    const gateway = payout
+      ? await initiate(req.institutionAuth.institutionId, {
+          reference: item.external_reference, amount: gatewayAmount,
+          msisdn: item.payer_phone_number, network: item.network_provider,
+          destinationType: item.payout_destination_type,
+          bankCode: bankPayout?.bankCode,
+          bankAccountNumber: bankPayout?.bankAccountNumber,
+          bankAccountName: bankPayout?.bankAccountName,
+          narration: `${item.transaction_type.replaceAll('_', ' ')} ${item.external_reference}`
+        })
+      : await initiate(req.institutionAuth.institutionId, {
+          reference: item.external_reference, amount: gatewayAmount,
+          msisdn: item.payer_phone_number, network: item.network_provider,
+          collectionMethod: item.collection_method, cardDetails,
+          narration: `${item.transaction_type.replaceAll('_', ' ')} ${item.external_reference}`
+        })
     const result = await reconcileInstitutionTransaction(req.institutionAuth.institutionId, item.id, gateway)
-    return res.status(result.pending ? 202 : 200).json(result.transaction || { id: item.id, status: 'PENDING_GATEWAY', message: 'Awaiting Eganow result; reconcile by reference if callback is delayed.' })
+    const response = result.transaction || { id: item.id, status: 'PENDING_GATEWAY', message: 'Awaiting Eganow result; reconcile by reference if callback is delayed.' }
+    if (gateway.redirectHtml) response.redirectHtml = gateway.redirectHtml
+    return res.status(result.pending ? 202 : 200).json(response)
   } catch (error) {
     const definitive = isDefinitiveEganowRejection(error)
     if (definitive) {

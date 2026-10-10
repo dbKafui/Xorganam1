@@ -27,12 +27,12 @@ describe('report financial reconciliation', () => {
       }
     })
 
-    assert.equal(summary.totalCollected, 1250)
-    assert.equal(summary.totalPaidOut, 300)
-    assert.equal(summary.totalFees, 50)
-    assert.equal(summary.netRevenue, 20)
-    assert.equal(summary.pendingFinancialMovement, 120)
-    assert.equal(summary.finalizedFinancialMovement, 1550)
+    assert.equal(summary.totalCollected, '1250')
+    assert.equal(summary.totalPaidOut, '300')
+    assert.equal(summary.totalFees, '50')
+    assert.equal(summary.netRevenue, '20')
+    assert.equal(summary.pendingFinancialMovement, '120')
+    assert.equal(summary.finalizedFinancialMovement, '1550')
     assert.equal(summary.reconciliationRequiresReview, true)
     assert.equal(summary.unresolvedFlagCount, 2)
     assert.deepEqual(summary.reconciliationWarnings, ['Two financial reconciliation flags are unresolved.'])
@@ -61,19 +61,29 @@ describe('report financial reconciliation', () => {
       }
     })
 
-    assert.equal(summary.totalCollected, 1250)
-    assert.equal(summary.totalPaidOut, 300)
-    assert.equal(summary.totalFees, 50)
-    assert.equal(summary.netRevenue, 20)
+    assert.equal(summary.totalCollected, '1250.00')
+    assert.equal(summary.totalPaidOut, '300.00')
+    assert.equal(summary.totalFees, '50.00')
+    assert.equal(summary.netRevenue, '20.00')
     assert.equal(summary.feeDataUnavailableTransactions, 2)
     assert.equal(summary.collectionCount, 4)
     assert.equal(summary.successfulCount, 3)
     assert.equal(summary.failedCount, 1)
     assert.equal(summary.pendingCount, 1)
-    assert.equal(summary.pendingFinancialMovement, 120)
-    assert.equal(summary.sweptAccrualAmount, 700)
-    assert.equal(summary.settledAmount, 600)
-    assert.equal(summary.allocatedAmount, 500)
+    assert.equal(summary.pendingFinancialMovement, '120.00')
+    assert.equal(summary.sweptAccrualAmount, '700.00')
+    assert.equal(summary.settledAmount, '600.00')
+    assert.equal(summary.allocatedAmount, '500.00')
     assert.equal(summary.unresolvedFlagCount, 1)
+  })
+
+  it('preserves exact money beyond JavaScript integer precision while adding report totals', () => {
+    const summary = buildReportSummary({
+      transactionTotals: { total_collected: '9007199254740993.21', total_paid_out: '0.79' },
+      ledgerTotals: { pending_accrual_amount: '0.10', pending_settlement_amount: '0.20' }
+    })
+    assert.equal(summary.totalCollected, '9007199254740993.21')
+    assert.equal(summary.pendingFinancialMovement, '0.30')
+    assert.equal(summary.finalizedFinancialMovement, '9007199254740994.00')
   })
 })

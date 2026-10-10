@@ -15,7 +15,7 @@ import { validateProviderResult } from './providerResultValidation.js'
 export async function reconcileTransaction(transactionId, callerTenantId) {
   const { rows } = await query(
     `SELECT t.id, t.tenant_id, t.merchant_id, t.parent_transaction_id, t.type, t.status, t.amount, t.currency,
-            t.internal_reference, t.payout_msisdn, p.status AS parent_status
+            t.internal_reference, t.eganow_reference, t.payout_msisdn, p.status AS parent_status
        FROM transactions t
        LEFT JOIN transactions p ON p.id = t.parent_transaction_id
       WHERE t.id = $1`,
@@ -48,7 +48,7 @@ export async function reconcileTransaction(transactionId, callerTenantId) {
   const validation = validateProviderResult({
     expectedAmount: String(txn.amount),
     expectedCurrency: txn.currency,
-    expectedReference: txn.internal_reference,
+    expectedReference: txn.eganow_reference || txn.internal_reference,
     actualAmount: providerResult?.amount ?? providerResult?.transactionAmount ?? providerResult?.TransactionAmount,
     actualCurrency: providerResult?.currency ?? providerResult?.transCurrencyIso ?? providerResult?.currencyCode,
     actualReference: providerResult?.reference ?? providerResult?.eganowReference

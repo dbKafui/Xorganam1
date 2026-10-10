@@ -22,18 +22,19 @@ export default function TenantDetail() {
     eganowPayoutAccountId: ''
   })
   const [editMerchantForm, setEditMerchantForm] = useState(null)
+  const [destinationRequestNumber, setDestinationRequestNumber] = useState('')
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [rejectReasons, setRejectReasons] = useState({})
 
   async function viewKycDocument(documentUrl) {
-    // The API now protects KYC downloads, so fetch with the operator's bearer token.
+    // The API now protects KYC downloads, so fetch with the admin session cookie.
     const tab = window.open('about:blank', '_blank')
     try {
-      const token = sessionStorage.getItem('xorganam_token')
       const response = await fetch(new URL(documentUrl, BASE_URL), {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+        headers: { 'X-Xorganam-Request': '1' },
+        credentials: 'include'
       })
       if (!response.ok) throw new Error('Unable to retrieve this document.')
       const objectUrl = URL.createObjectURL(await response.blob())
@@ -159,12 +160,24 @@ export default function TenantDetail() {
     }
   }
 
-  async function deleteMerchant(merchantId) {
-    if (!window.confirm('Delete this merchant permanently? This cannot be undone.')) return
+  async function requestDestinationChange(merchantId) {
     setError('')
     setNotice('')
     try {
-      const result = await merchantsApi.remove(merchantId)
+      await merchantsApi.requestDestinationChange(merchantId, destinationRequestNumber)
+      setNotice('Payout destination change submitted for review by another tenant administrator.')
+      load()
+    } catch (err) { setError(err.message) }
+  }
+
+  async function deleteMerchant(merchantId) {
+    if (!window.confirm('Delete this merchant permanently? This cannot be undone.')) return
+    const reason = window.prompt('Reason for deleting or deactivating this merchant:')
+    if (!reason?.trim()) return
+    setError('')
+    setNotice('')
+    try {
+      const result = await merchantsApi.remove(merchantId, reason.trim())
       setNotice(result.message || 'Merchant deleted.')
       load()
     } catch (err) {
@@ -319,8 +332,8 @@ export default function TenantDetail() {
                     <input required value={editMerchantForm.displayName} onChange={(e) => setEditMerchantForm((f) => ({ ...f, displayName: e.target.value }))} />
                   </div>
                   <div className="field">
-                    <label>MoMo number</label>
-                    <input required value={editMerchantForm.mobileMoneyNumber} onChange={(e) => setEditMerchantForm((f) => ({ ...f, mobileMoneyNumber: e.target.value }))} />
+                    <label>Active payout MoMo number</label>
+                    <input value={editMerchantForm.mobileMoneyNumber} disabled />
                   </div>
                   <div className="field">
                     <label>Network</label>
@@ -337,17 +350,18 @@ export default function TenantDetail() {
                       <option value="AUTO_SWEEP">Collect for me</option>
                     </select>
                   </div>
-                  <div className="field">
-                    <label>Status</label>
-                    <select value={editMerchantForm.isActive ? 'true' : 'false'} onChange={(e) => setEditMerchantForm((f) => ({ ...f, isActive: e.target.value === 'true' }))}>
-                      <option value="true">Active</option>
-                      <option value="false">Inactive</option>
-                    </select>
-                  </div>
                 </div>
                 <div className="form-actions">
                   <button className="btn btn-primary">Save changes</button>
                   <button type="button" className="btn btn-secondary" onClick={() => setEditMerchantForm(null)}>Cancel</button>
+                </div>
+                <div className="form-grid single">
+                  <div className="field">
+                    <label htmlFor="tenant-merchant-destination">Request payout destination change</label>
+                    <input id="tenant-merchant-destination" inputMode="tel" value={destinationRequestNumber} onChange={(event) => setDestinationRequestNumber(event.target.value)} />
+                    <small>Another tenant administrator must approve before this number becomes active.</small>
+                  </div>
+                  <button type="button" className="btn btn-secondary" onClick={() => requestDestinationChange(editMerchantForm.id)}>Submit destination request</button>
                 </div>
               </form>
             )}
@@ -366,7 +380,7 @@ export default function TenantDetail() {
                       <td>{m.payoutMode === 'AUTO_SWEEP' ? 'Collect for me' : 'Collection only'}</td>
                       <td>{m.isActive ? 'Active' : 'Inactive'}</td>
                       <td style={{ display: 'flex', gap: 6 }}>
-                        <button className="btn btn-secondary btn-sm" onClick={() => setEditMerchantForm(m)}>Edit</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => { setEditMerchantForm(m); setDestinationRequestNumber(m.mobileMoneyNumber || '') }}>Edit</button>
                         <button className="btn btn-danger btn-sm" onClick={() => deleteMerchant(m.id)}>Delete</button>
                       </td>
                     </tr>

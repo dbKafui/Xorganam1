@@ -25,8 +25,10 @@ const initialForm = {
 export default function OperatorTeam() {
   const { user, hasPermission } = useOperatorAuth()
   const canManage = hasPermission('MANAGE_TEAM', user?.merchantId || null)
+  const canApproveRoleChanges = user?.role === 'TENANT_ADMIN'
 
   const [members, setMembers] = useState([])
+  const [roleChangeRequests, setRoleChangeRequests] = useState([])
   const [merchants, setMerchants] = useState([])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -53,17 +55,19 @@ export default function OperatorTeam() {
     setLoading(true)
     Promise.all([
       operatorApi.listUsers(user.tenantId),
-      operatorApi.listMerchants(user.tenantId)
+      operatorApi.listMerchants(user.tenantId),
+      canApproveRoleChanges ? operatorApi.listRoleChangeRequests(user.tenantId) : Promise.resolve([])
     ])
-      .then(([usersData, merchantsData]) => {
+      .then(([usersData, merchantsData, roleRequests]) => {
         setMembers(usersData)
         setMerchants(merchantsData || [])
+        setRoleChangeRequests(roleRequests || [])
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
   }
 
-  useEffect(load, [user])
+  useEffect(load, [user, canApproveRoleChanges])
 
   async function loadPermissionsFor(userId) {
     try {
@@ -114,11 +118,13 @@ export default function OperatorTeam() {
 
   async function toggleActive(member) {
     const willActivate = !member.isActive
+    const deactivationReason = willActivate ? undefined : window.prompt(`Why are you deactivating ${member.firstName} ${member.lastName}?`)
+    if (!willActivate && !deactivationReason?.trim()) return
     if (!window.confirm(`${willActivate ? 'Activate' : 'Deactivate'} ${member.firstName} ${member.lastName}? They will ${willActivate ? 'be able to sign in again' : 'lose access immediately'}.`)) return
     setError('')
     setNotice('')
     try {
-      await operatorApi.updateUserStatus(member.id, willActivate, member.merchantId)
+      await operatorApi.updateUserStatus(member.id, willActivate, member.merchantId, deactivationReason)
       setNotice(`${member.firstName} ${member.lastName} ${willActivate ? 'activated' : 'deactivated'}.`)
       load()
     } catch (err) {
@@ -145,11 +151,27 @@ export default function OperatorTeam() {
     setError('')
     setNotice('')
     try {
-      await operatorApi.assignRole(member.id, role)
+      const result = await operatorApi.assignRole(member.id, role)
+      setNotice(result.message || 'Role change submitted for independent approval.')
       load()
     } catch (err) {
       setError(err.message)
     }
+  }
+
+  async function reviewRoleChange(changeRequest, decision) {
+    let reason
+    if (decision === 'reject') {
+      reason = window.prompt('Why are you rejecting this role change?')
+      if (!reason?.trim() || reason.trim().length < 5) return
+    }
+    setError('')
+    setNotice('')
+    try {
+      const result = await operatorApi.reviewRoleChangeRequest(changeRequest.id, decision, user.tenantId, reason)
+      setNotice(result.message)
+      load()
+    } catch (requestError) { setError(requestError.message) }
   }
 
   function openEdit(member) {
@@ -172,14 +194,17 @@ export default function OperatorTeam() {
     setError('')
     setNotice('')
     try {
+      const roleChanged = editForm.role !== selectedEditUser.role
       await operatorApi.updateUser(selectedEditUser.id, {
         merchantId: selectedEditUser.merchantId,
         firstName: editForm.firstName,
         lastName: editForm.lastName,
-        phoneNumber: editForm.phoneNumber,
-        role: editForm.role
+        phoneNumber: editForm.phoneNumber
       })
-      setNotice(`Updated ${editForm.firstName} ${editForm.lastName}.`)
+      if (roleChanged) await operatorApi.assignRole(selectedEditUser.id, editForm.role)
+      setNotice(roleChanged
+        ? `Profile updated. The role change to ${ROLE_LABELS[editForm.role]} is awaiting approval by another Admin.`
+        : `Updated ${editForm.firstName} ${editForm.lastName}.`)
       closeEdit()
       load()
     } catch (err) {
@@ -234,6 +259,13 @@ export default function OperatorTeam() {
 
       {error && <div className="status-banner error" role="alert"><span className="status-icon">⚠</span><span>{error}</span></div>}
       {notice && <div className="status-banner success"><span className="status-icon">✓</span><span>{notice}</span></div>}
+
+      {canApproveRoleChanges && <div className="card">
+        <h2>Pending role changes</h2>
+        {roleChangeRequests.length ? <div className="table-wrap"><table className="ledger"><thead><tr><th>User</th><th>Requested by</th><th>Change</th><th>Requested</th><th>Review</th></tr></thead><tbody>
+          {roleChangeRequests.map((request) => <tr key={request.id}><td>{request.first_name} {request.last_name}<small>{request.email}</small></td><td>{request.requester_first_name} {request.requester_last_name}</td><td>{ROLE_LABELS[request.previous_role]} → {ROLE_LABELS[request.requested_role]}</td><td>{new Date(request.created_at).toLocaleString()}</td><td><button className="btn btn-primary btn-sm" disabled={request.requested_by_user_id === user?.id} onClick={() => reviewRoleChange(request, 'approve')}>Approve</button> <button className="btn btn-danger btn-sm" disabled={request.requested_by_user_id === user?.id} onClick={() => reviewRoleChange(request, 'reject')}>Reject</button></td></tr>)}
+        </tbody></table></div> : <div className="empty-state">No role changes are waiting for review.</div>}
+      </div>}
 
       {!canManage && (
         <div className="status-banner pending" style={{ marginBottom: 16 }}>

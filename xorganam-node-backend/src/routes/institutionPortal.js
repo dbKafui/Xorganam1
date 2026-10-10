@@ -11,6 +11,8 @@ import { institutionMembershipAdapterInternals } from '../services/institutionMe
 import { isMfaRequired } from '../services/mfaPolicy.js'
 import { createSession, listSessionsForUser, revokeCurrentSession } from '../services/sessionService.js'
 import { writePlatformAudit } from '../services/auditService.js'
+import { authPolicy } from '../config/authPolicy.js'
+import { clearFailedInstitutionLoginState, isLoginLocked, recordFailedInstitutionLogin } from '../services/loginSecurityService.js'
 
 export const institutionAuthRouter = Router()
 export const institutionPortalRouter = Router()
@@ -77,7 +79,8 @@ institutionAuthRouter.post(
     const { rows } = await query(
       `SELECT s.id, s.institution_id, i.name AS institution_name, s.branch_id,
               s.first_name, s.last_name, s.email, s.role, s.password_hash, s.is_active,
-              s.created_at, s.mfa_enabled, s.token_version
+              s.created_at, s.mfa_enabled, s.token_version,
+              s.failed_login_attempts, s.login_locked_until
          FROM institution_staff s
          JOIN institutions i ON i.id = s.institution_id AND i.status = 'ACTIVE'
         WHERE lower(s.email) = lower($1)`,
@@ -97,18 +100,59 @@ institutionAuthRouter.post(
     }
 
     const staff = rows[0]
+    if (isLoginLocked(staff.login_locked_until)) {
+      await writePlatformAudit({
+        actorInstitutionStaffId: staff.id,
+        tenantId: staff.institution_id,
+        action: 'INSTITUTION_LOGIN_LOCKED',
+        resourceType: 'institution_staff',
+        resourceId: staff.id,
+        details: { lockedUntil: staff.login_locked_until },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
+      })
+      return res.status(429).json({ message: 'Too many failed login attempts. Try again later.' })
+    }
     if (!(await verifyPassword(password, staff.password_hash))) {
+      const attempts = await recordFailedInstitutionLogin(staff.id, authPolicy)
       await writePlatformAudit({
         action: 'INSTITUTION_LOGIN_FAILED',
         resourceType: 'institution_staff',
         resourceId: staff.id,
         tenantId: staff.institution_id,
-        details: { reason: 'invalid_password' },
+        details: {
+          reason: 'invalid_password',
+          failedAttempts: attempts?.failed_login_attempts || 0,
+          accountLocked: Boolean(attempts?.login_locked_until)
+        },
         ipAddress: req.ip || null,
         userAgent: req.headers['user-agent'] || null,
         requestId: req.id || null
       })
       return res.status(401).json({ message: 'Invalid email or password.' })
+    }
+
+    await clearFailedInstitutionLoginState(staff.id)
+
+    const { rows: priorSessions } = await query(
+      `SELECT host(ip_address) AS ip_address FROM sessions
+        WHERE institution_staff_id = $1 AND ip_address IS NOT NULL
+        ORDER BY created_at DESC LIMIT 1`,
+      [staff.id]
+    )
+    if (priorSessions[0]?.ip_address && req.ip && priorSessions[0].ip_address !== req.ip) {
+      await writePlatformAudit({
+        actorInstitutionStaffId: staff.id,
+        tenantId: staff.institution_id,
+        action: 'INSTITUTION_LOGIN_SUSPICIOUS_IP_CHANGE',
+        resourceType: 'institution_staff',
+        resourceId: staff.id,
+        details: { priorIpAddress: priorSessions[0].ip_address, ipAddress: req.ip },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null
+      })
     }
 
     if (!(await isMfaRequired('INSTITUTION', staff.id))) {
@@ -480,19 +524,23 @@ institutionPortalRouter.patch(
   '/staff/:staffId',
   requireInstitutionPermission('staff:manage'),
   asyncHandler(async (req, res) => {
-    const { role, branchId, isActive } = req.body || {}
+    const { role, branchId, isActive, deactivationReason } = req.body || {}
     if (role !== undefined && !['FIELD_OFFICER', 'SUPERVISOR', 'INSTITUTION_ADMIN'].includes(role)) {
       return res.status(400).json({ message: 'Invalid institution staff role.' })
     }
     if (isActive !== undefined && typeof isActive !== 'boolean') {
       return res.status(400).json({ message: 'isActive must be a boolean.' })
     }
+    const normalizedDeactivationReason = String(deactivationReason || '').trim()
+    if (isActive === false && (normalizedDeactivationReason.length < 5 || normalizedDeactivationReason.length > 1000)) {
+      return res.status(400).json({ message: 'A deactivation reason between 5 and 1000 characters is required.' })
+    }
     if (branchId !== undefined && branchId !== null && typeof branchId !== 'string') {
       return res.status(400).json({ message: 'branchId must be a branch UUID or null.' })
     }
     const result = await withTransaction(async (client) => {
       const { rows: currentRows } = await client.query(
-        `SELECT id, role, is_active FROM institution_staff
+        `SELECT id, role, branch_id, is_active FROM institution_staff
           WHERE id = $1 AND institution_id = $2 FOR UPDATE`,
         [req.params.staffId, req.institutionAuth.institutionId]
       )
@@ -534,6 +582,22 @@ institutionPortalRouter.patch(
         [req.params.staffId, req.institutionAuth.institutionId, nextRole,
           Object.hasOwn(req.body || {}, 'branchId'), branchId || null, nextActive]
       )
+      await writePlatformAudit({
+        actorInstitutionStaffId: req.institutionAuth.id,
+        tenantId: req.institutionAuth.institutionId,
+        action: nextActive ? 'INSTITUTION_STAFF_ACCESS_CHANGED' : 'INSTITUTION_STAFF_DEACTIVATED',
+        resourceType: 'institution_staff',
+        resourceId: req.params.staffId,
+        details: {
+          previous: { role: current.role, branchId: current.branch_id, isActive: current.is_active },
+          current: { role: nextRole, branchId: rows[0].branch_id, isActive: nextActive },
+          ...(nextActive ? {} : { reason: normalizedDeactivationReason })
+        },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null,
+        client
+      })
 
       if (!nextActive || nextRole !== 'FIELD_OFFICER') {
         await client.query(

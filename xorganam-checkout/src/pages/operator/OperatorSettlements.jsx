@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi } from '../../api/client'
+import { addDecimalAmounts, decimalToMinorUnits, formatCurrencyAmount } from '../../../../shared/currency.js'
 
 function amount(value) {
-  return Number(value ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(value ?? 0, 'GHS')
 }
 
 export default function OperatorSettlements() {
@@ -18,9 +19,12 @@ export default function OperatorSettlements() {
     counts[status] = (counts[status] || 0) + 1
     return counts
   }, {})
-  const pendingAccrual = rows.reduce((total, row) => total + Number(row.pending_accrual_amount || 0), 0)
-  const sweptAccrual = rows.reduce((total, row) => total + Number(row.swept_accrual_amount || 0), 0)
-  const maxAccrual = Math.max(pendingAccrual, sweptAccrual, 1)
+  const pendingAccrual = addDecimalAmounts(...rows.map((row) => row.pending_accrual_amount || 0))
+  const sweptAccrual = addDecimalAmounts(...rows.map((row) => row.swept_accrual_amount || 0))
+  const pendingCents = BigInt(decimalToMinorUnits(pendingAccrual) || '0')
+  const sweptCents = BigInt(decimalToMinorUnits(sweptAccrual) || '0')
+  const maxAccrual = pendingCents > sweptCents ? pendingCents : sweptCents
+  const percentage = (value) => maxAccrual === 0n ? 0 : Number(value * 10000n / maxAccrual) / 100
 
   const refresh = useCallback(async () => {
     if (!user?.tenantId) return
@@ -66,13 +70,13 @@ export default function OperatorSettlements() {
       </div>
       <div>
         <h2>Accrual movement</h2>
-        <div className="settlement-accrual-row"><span>Pending</span><strong>GHS {amount(pendingAccrual)}</strong></div>
-        <div className="settlement-bar-track" role="progressbar" aria-label="Pending accrual amount" aria-valuemin="0" aria-valuemax={maxAccrual} aria-valuenow={pendingAccrual}>
-          <span className="settlement-bar pending" style={{ width: `${pendingAccrual / maxAccrual * 100}%` }} />
+        <div className="settlement-accrual-row"><span>Pending</span><strong>{amount(pendingAccrual)}</strong></div>
+        <div className="settlement-bar-track" role="progressbar" aria-label="Pending accrual amount" aria-valuemin="0" aria-valuemax={maxAccrual.toString()} aria-valuenow={pendingCents.toString()}>
+          <span className="settlement-bar pending" style={{ width: `${percentage(pendingCents)}%` }} />
         </div>
-        <div className="settlement-accrual-row"><span>Swept</span><strong>GHS {amount(sweptAccrual)}</strong></div>
-        <div className="settlement-bar-track" role="progressbar" aria-label="Swept accrual amount" aria-valuemin="0" aria-valuemax={maxAccrual} aria-valuenow={sweptAccrual}>
-          <span className="settlement-bar settled" style={{ width: `${sweptAccrual / maxAccrual * 100}%` }} />
+        <div className="settlement-accrual-row"><span>Swept</span><strong>{amount(sweptAccrual)}</strong></div>
+        <div className="settlement-bar-track" role="progressbar" aria-label="Swept accrual amount" aria-valuemin="0" aria-valuemax={maxAccrual.toString()} aria-valuenow={sweptCents.toString()}>
+          <span className="settlement-bar settled" style={{ width: `${percentage(sweptCents)}%` }} />
         </div>
       </div>
     </section>}

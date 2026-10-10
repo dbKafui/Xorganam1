@@ -28,7 +28,11 @@ export async function writePlatformAudit({
   }
   validateAuditActor(actorUserId, actorInstitutionStaffId)
 
-  const runner = client || query
+  const runner = typeof client === 'function'
+    ? client
+    : client?.query
+      ? client.query.bind(client)
+      : query
   const result = await runner(
     `INSERT INTO platform_audit_log
        (actor_user_id, actor_institution_staff_id, tenant_id, merchant_id, action,
@@ -65,5 +69,31 @@ export async function auditRequest(req, action, resourceType, resourceId, detail
     ipAddress: req.ip || null,
     userAgent: req.headers['user-agent'] || null,
     requestId: req.id || null
+  })
+}
+
+export async function auditPermissionDenied(req, permissionType, resourceId = null) {
+  return auditRequest(req, 'PERMISSION_DENIED', 'authorization', resourceId, {
+    permissionType,
+    role: req.user?.role || null,
+    method: req.method,
+    path: req.path
+  })
+}
+
+export async function auditPermissionBypass(req, permissionType, resourceId = null) {
+  return auditRequest(req, 'PLATFORM_PERMISSION_BYPASS', 'authorization', resourceId, {
+    permissionType,
+    role: req.user?.role || null,
+    method: req.method,
+    path: req.path
+  })
+}
+
+export async function auditPlatformRoleBypass(req, requiredRole) {
+  return auditRequest(req, 'PLATFORM_ROLE_BYPASS', 'authorization', null, {
+    requiredRole,
+    method: req.method,
+    path: req.path
   })
 }

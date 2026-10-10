@@ -48,7 +48,7 @@ export default function Staff() {
 
   function startEdit(person) {
     setEditingStaffId(person.id)
-    setEditForm({ role: person.role, branchId: person.branch_id || '', isActive: person.is_active })
+    setEditForm({ role: person.role, branchId: person.branch_id || '', isActive: person.is_active, deactivationReason: '' })
   }
 
   async function saveAccess(person) {
@@ -59,7 +59,8 @@ export default function Staff() {
       await institutionApi.updateStaff(person.id, {
         role: editForm.role,
         branchId: editForm.branchId || null,
-        isActive: editForm.isActive
+        isActive: editForm.isActive,
+        deactivationReason: editForm.deactivationReason
       })
       setNotice(`Access updated for ${person.first_name} ${person.last_name}.`)
       setEditingStaffId('')
@@ -105,6 +106,7 @@ export default function Staff() {
               <label>Role<select value={editForm.role} onChange={(event) => setEditForm({ ...editForm, role: event.target.value })}><option value="FIELD_OFFICER">Field Officer</option><option value="SUPERVISOR">Supervisor</option><option value="INSTITUTION_ADMIN">Institution Admin</option></select></label>
               <label>Branch<select value={editForm.branchId} onChange={(event) => setEditForm({ ...editForm, branchId: event.target.value })}><option value="">No branch assigned</option>{branches.filter((branch) => branch.is_active).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></label>
               <label className="checkbox-field"><input type="checkbox" checked={editForm.isActive} onChange={(event) => setEditForm({ ...editForm, isActive: event.target.checked })} /><span>Active</span></label>
+              {!editForm.isActive && <label>Reason for deactivation<textarea required minLength="5" maxLength="1000" value={editForm.deactivationReason} onChange={(event) => setEditForm({ ...editForm, deactivationReason: event.target.value })} /></label>}
               <button type="button" className="button button-primary button-small" disabled={saving} onClick={() => saveAccess(person)}>{saving ? 'Saving...' : 'Save access'}</button>
             </div></td></tr>}
           </Fragment>)}

@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS uq_transactions_provider_reference_scope;

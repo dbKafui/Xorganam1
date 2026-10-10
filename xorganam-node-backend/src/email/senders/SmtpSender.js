@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer'
 import { prepareEmailMessage, classifyProviderFailure } from '../emailMessagePolicy.js'
+import { createPinnedDnsLookup, resolveSmtpDestination } from '../smtpAddressPolicy.js'
 
 export class SmtpSender {
   constructor(config, policy) {
@@ -29,10 +30,20 @@ export class SmtpSender {
     if (normalizedEncryption === 'none' && !this.policy.allowInsecureSmtp) {
       return { ok: false, transient: false, error: 'Unencrypted SMTP is disabled.' }
     }
+    let destination
+    try {
+      destination = await resolveSmtpDestination(host, this.policy)
+    } catch (error) {
+      if (error.message === 'SMTP host resolves to a blocked network.') {
+        return { ok: false, transient: false, error: 'SMTP host resolves to a blocked network.' }
+      }
+      return classifyProviderFailure(error)
+    }
 
     const transport = nodemailer.createTransport({
-      host,
+      host: destination.address,
       port: Number(port),
+      lookup: createPinnedDnsLookup(destination),
       secure: normalizedEncryption === 'implicit_tls',
       requireTLS: normalizedEncryption === 'starttls',
       ...(username ? { auth: { user: username, pass: password } } : {}),

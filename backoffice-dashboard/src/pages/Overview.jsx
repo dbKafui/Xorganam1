@@ -4,8 +4,9 @@ import { useAuth } from '../context/AuthContext'
 import { reportsApi } from '../api/reports'
 import { api } from '../api/client'
 
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 function money(n) {
-  return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(n ?? 0, 'GHS')
 }
 
 export default function Overview() {

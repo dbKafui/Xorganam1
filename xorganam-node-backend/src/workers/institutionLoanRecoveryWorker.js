@@ -12,6 +12,7 @@ import { createVendorReference } from '../services/referenceIds.js'
 import { updateTransactionStatus } from '../services/transactionStateService.js'
 import { updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
 import { recordOperationalFailure } from '../services/operationalFailureService.js'
+import { normalizeAmountMinorUnits, formatMinorUnits } from '../services/providerResultValidation.js'
 
 const connection = getRedisConnection()
 const scheduler = new Queue(INSTITUTION_LOAN_RECOVERY_QUEUE, { connection })
@@ -52,13 +53,13 @@ async function postRecovery(payoutTransactionId, gatewayResult) {
       })
     }
     for (const recovery of recoveries) {
-      const paidCents = Number(recovery.amount_cents)
-      const installmentPaid = Number(recovery.amount_paid_cents) + paidCents
-      if (installmentPaid > Number(recovery.amount_due_cents)) throw new Error('Default recovery exceeds the unpaid installment amount.')
+      const paidCents = BigInt(recovery.amount_cents)
+      const installmentPaid = BigInt(recovery.amount_paid_cents) + paidCents
+      if (installmentPaid > BigInt(recovery.amount_due_cents)) throw new Error('Default recovery exceeds the unpaid installment amount.')
       await tx.query(
         `UPDATE institution_loan_installments SET amount_paid_cents = $2,
                 status = CASE WHEN $2 = amount_due_cents THEN 'PAID' ELSE 'PARTIALLY_PAID' END, updated_at = now()
-          WHERE id = $1`, [recovery.installment_id, installmentPaid]
+          WHERE id = $1`, [recovery.installment_id, String(installmentPaid)]
       )
       await tx.query(
         `UPDATE institution_financial_accounts a
@@ -195,8 +196,8 @@ async function createRecoveryPayout(tenantId, merchantId, institutionId) {
   if (pendingRows[0]) return submitPayout(pendingRows[0])
 
   const balance = await getPayoutWalletBalance(tenantId, merchant.eganow_payout_account_id, merchantId)
-  const availableCents = Math.floor(Number(balance) * 100)
-  if (availableCents <= 0) return { skipped: true, reason: 'no-payout-wallet-balance' }
+  const availableCents = normalizeAmountMinorUnits(balance)
+  if (availableCents === null || availableCents <= 0n) return { skipped: true, reason: 'no-payout-wallet-balance' }
 
   const prepared = await withTransaction(async (tx) => {
     await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`institution-default-payout:${merchantId}:${institutionId}`])
@@ -241,19 +242,20 @@ async function createRecoveryPayout(tenantId, merchantId, institutionId) {
       if (remaining <= 0) break
       const capacity = accountCapacity.has(installment.account_id)
         ? accountCapacity.get(installment.account_id)
-        : Number(installment.outstanding_cents)
-      const amount = Math.min(remaining, Number(installment.due_cents), capacity)
-      if (amount <= 0) continue
+        : BigInt(installment.outstanding_cents)
+      const due = BigInt(installment.due_cents)
+      const amount = [remaining, due, capacity].reduce((smallest, value) => value < smallest ? value : smallest)
+      if (amount <= 0n) continue
       allocations.push({ ...installment, amount_cents: amount })
       remaining -= amount
       accountCapacity.set(installment.account_id, capacity - amount)
     }
     if (!allocations.length) return { skipped: true, reason: 'no-recoverable-balance' }
-    const totalCents = allocations.reduce((sum, item) => sum + item.amount_cents, 0)
+    const totalCents = allocations.reduce((sum, item) => sum + item.amount_cents, 0n)
     const { rows: parents } = await tx.query(
       `INSERT INTO transactions (tenant_id, merchant_id, institution_id, type, status, amount, currency, internal_reference)
        VALUES ($1, $2, $3, 'SWEEP_PAYOUT', 'PENDING', $4, 'GHS', $5) RETURNING id`,
-      [tenantId, merchantId, institutionId, totalCents / 100, createVendorReference(merchant.display_name, 'DEF')]
+      [tenantId, merchantId, institutionId, formatMinorUnits(totalCents), createVendorReference(merchant.display_name, 'DEF')]
     )
     const parentId = parents[0].id
     const { rows: payouts } = await tx.query(
@@ -263,7 +265,7 @@ async function createRecoveryPayout(tenantId, merchantId, institutionId) {
        VALUES ($1, $2, $3, $4, 'PAYOUT', 'INSTITUTION', 'PENDING', $5, 'GHS', $6, $7, 'READY')
        RETURNING id, internal_reference, status, amount, currency, merchant_id, tenant_id,
                  payment_gateway_status`,
-      [tenantId, merchantId, institutionId, parentId, totalCents / 100,
+      [tenantId, merchantId, institutionId, parentId, formatMinorUnits(totalCents),
         createVendorReference(merchant.display_name, 'INST'), merchant.settlement_msisdn]
     )
     const payout = payouts[0]
@@ -274,7 +276,7 @@ async function createRecoveryPayout(tenantId, merchantId, institutionId) {
             sweep_transaction_id, payout_transaction_id, amount_cents)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [institutionId, tenantId, merchantId, allocation.account_id, allocation.installment_id,
-          parentId, payout.id, allocation.amount_cents]
+          parentId, payout.id, String(allocation.amount_cents)]
       )
     }
     await tx.query(
@@ -282,7 +284,7 @@ async function createRecoveryPayout(tenantId, merchantId, institutionId) {
          (institution_id, type, status, amount, internal_reference, counterparty_transaction_id)
        VALUES ($1, 'COLLECTION', 'PENDING', $2, $3, $4)
        ON CONFLICT (internal_reference) DO NOTHING`,
-      [institutionId, totalCents / 100, `IDEF-${payout.id}`, payout.id]
+      [institutionId, formatMinorUnits(totalCents), `IDEF-${payout.id}`, payout.id]
     )
     return { payout: { ...payout, settlement_msisdn: merchant.settlement_msisdn,
       settlement_account_name: merchant.settlement_account_name, institution_name: merchant.institution_name,

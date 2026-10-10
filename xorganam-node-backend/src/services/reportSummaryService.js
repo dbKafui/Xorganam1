@@ -1,6 +1,4 @@
-function asNumber(value) {
-  return Number(value ?? 0)
-}
+import { addDecimalStrings, decimalCount } from '../lib/decimalString.js'
 
 function readTotal(source, camelCaseKey, snakeCaseKey) {
   return source?.[camelCaseKey] ?? source?.[snakeCaseKey]
@@ -10,24 +8,24 @@ export function buildReportSummary({
   transactionTotals,
   ledgerTotals = {}
 }) {
-  const totalCollected = asNumber(readTotal(transactionTotals, 'totalCollected', 'total_collected'))
-  const totalPaidOut = asNumber(readTotal(transactionTotals, 'totalPaidOut', 'total_paid_out'))
-  const totalFees = asNumber(readTotal(transactionTotals, 'totalFees', 'total_fees'))
-  const totalPlatformMargin = asNumber(readTotal(transactionTotals, 'totalPlatformMargin', 'total_platform_margin'))
+  const totalCollected = String(readTotal(transactionTotals, 'totalCollected', 'total_collected') ?? '0')
+  const totalPaidOut = String(readTotal(transactionTotals, 'totalPaidOut', 'total_paid_out') ?? '0')
+  const totalFees = String(readTotal(transactionTotals, 'totalFees', 'total_fees') ?? '0')
+  const totalPlatformMargin = String(readTotal(transactionTotals, 'totalPlatformMargin', 'total_platform_margin') ?? '0')
 
-  const pendingAccrualAmount = asNumber(readTotal(ledgerTotals, 'pendingAccrualAmount', 'pending_accrual_amount'))
-  const sweptAccrualAmount = asNumber(readTotal(ledgerTotals, 'sweptAccrualAmount', 'swept_accrual_amount'))
-  const pendingSettlementAmount = asNumber(readTotal(ledgerTotals, 'pendingSettlementAmount', 'pending_settlement_amount'))
-  const settledAmount = asNumber(readTotal(ledgerTotals, 'settledAmount', 'settled_amount'))
-  const allocatedAmount = asNumber(readTotal(ledgerTotals, 'allocatedAmount', 'allocated_amount'))
-  const pendingFinancialMovement = pendingAccrualAmount + pendingSettlementAmount
-  const finalizedFinancialMovement = totalCollected + totalPaidOut
-  const unresolvedFlagCount = asNumber(readTotal(ledgerTotals, 'unresolvedFlagCount', 'unresolved_flag_count'))
-  const feeDataUnavailableCount = asNumber(readTotal(transactionTotals, 'feeDataUnavailableCount', 'fee_data_unavailable_count'))
-  const collectionCount = asNumber(readTotal(transactionTotals, 'collectionCount', 'collection_count'))
-  const successfulCount = asNumber(readTotal(transactionTotals, 'successfulCount', 'successful_count'))
-  const failedCount = asNumber(readTotal(transactionTotals, 'failedCount', 'failed_count'))
-  const pendingCount = asNumber(readTotal(transactionTotals, 'pendingCount', 'pending_count'))
+  const pendingAccrualAmount = String(readTotal(ledgerTotals, 'pendingAccrualAmount', 'pending_accrual_amount') ?? '0')
+  const sweptAccrualAmount = String(readTotal(ledgerTotals, 'sweptAccrualAmount', 'swept_accrual_amount') ?? '0')
+  const pendingSettlementAmount = String(readTotal(ledgerTotals, 'pendingSettlementAmount', 'pending_settlement_amount') ?? '0')
+  const settledAmount = String(readTotal(ledgerTotals, 'settledAmount', 'settled_amount') ?? '0')
+  const allocatedAmount = String(readTotal(ledgerTotals, 'allocatedAmount', 'allocated_amount') ?? '0')
+  const pendingFinancialMovement = addDecimalStrings(pendingAccrualAmount, pendingSettlementAmount)
+  const finalizedFinancialMovement = addDecimalStrings(totalCollected, totalPaidOut)
+  const unresolvedFlagCount = decimalCount(readTotal(ledgerTotals, 'unresolvedFlagCount', 'unresolved_flag_count') ?? 0)
+  const feeDataUnavailableCount = decimalCount(readTotal(transactionTotals, 'feeDataUnavailableCount', 'fee_data_unavailable_count') ?? 0)
+  const collectionCount = decimalCount(readTotal(transactionTotals, 'collectionCount', 'collection_count') ?? 0)
+  const successfulCount = decimalCount(readTotal(transactionTotals, 'successfulCount', 'successful_count') ?? 0)
+  const failedCount = decimalCount(readTotal(transactionTotals, 'failedCount', 'failed_count') ?? 0)
+  const pendingCount = decimalCount(readTotal(transactionTotals, 'pendingCount', 'pending_count') ?? 0)
   const unresolvedFlagText = unresolvedFlagCount === 1 ? 'One' : unresolvedFlagCount === 2 ? 'Two' : unresolvedFlagCount.toString()
 
   const warnings = unresolvedFlagCount > 0

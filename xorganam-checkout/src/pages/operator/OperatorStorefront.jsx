@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi, publicApi } from '../../api/client'
 
+import { formatCurrencyAmount } from '../../../../shared/currency.js'
 const blankProduct = { name: '', description: '', listingType: 'PHYSICAL', price: '', categoryId: '', storefrontCategoryId: '', imageUrls: '' }
 const blankDefaults = { enabled: false, downPaymentPercent: '0', installmentCount: '4', installmentFrequency: 'MONTHLY', markupAmount: '0', lateFeeAmount: '0', lateFeeGraceDays: '0', missedInstallmentThreshold: '3', firstDueDays: '30' }
 const storefrontBase = import.meta.env.VITE_STOREFRONT_PUBLIC_URL || ''
 
-function money(value) { return `GHS ${Number(value || 0).toFixed(2)}` }
+function money(value) { return formatCurrencyAmount(value || 0, 'GHS') }
 
 export default function OperatorStorefront() {
   const { user } = useOperatorAuth()

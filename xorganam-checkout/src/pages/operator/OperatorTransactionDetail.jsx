@@ -4,8 +4,10 @@ import { operatorApi } from '../../api/client'
 import { maskAccount } from '../../lib/mask'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 
+import { decimalToMinorUnits, formatCurrencyAmount } from '../../../../shared/currency.js'
+import { BANK_PARTNERS, MOMO_CHANNELS } from '../../constants/paymentOptions.js'
 function money(n) {
-  return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(n ?? 0, 'GHS')
 }
 
 export default function OperatorTransactionDetail() {
@@ -15,7 +17,7 @@ export default function OperatorTransactionDetail() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [transferAmount, setTransferAmount] = useState('')
-  const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '', destinationType: 'MOMO', bankCode: '', accountName: '' })
+  const [payoutForm, setPayoutForm] = useState({ amount: '', accountNoOrMsisdn: '', destinationType: 'MOMO', network: '', bankCode: '', accountName: '' })
   const [busy, setBusy] = useState(false)
   const [reconciling, setReconciling] = useState(false)
   const [disputeReason, setDisputeReason] = useState('')
@@ -55,12 +57,13 @@ export default function OperatorTransactionDetail() {
 
   async function startTransfer(e) {
     e.preventDefault()
-    const amount = Number(transferAmount) || undefined
-    if (transferAmount && (!Number.isFinite(amount) || amount <= 0)) {
+    const amountCents = transferAmount ? decimalToMinorUnits(transferAmount) : null
+    const amount = amountCents === null ? undefined : transferAmount
+    if (transferAmount && (amountCents === null || BigInt(amountCents) <= 0n)) {
       setError('Transfer amount must be greater than zero.')
       return
     }
-    if (amount && amount > Number(txn.amount)) {
+    if (amountCents !== null && BigInt(amountCents) > BigInt(decimalToMinorUnits(txn.amount) || '0')) {
       setError('Transfer amount cannot exceed the collection amount.')
       return
     }
@@ -81,15 +84,16 @@ export default function OperatorTransactionDetail() {
 
   async function startPayout(e) {
     e.preventDefault()
-    const amount = Number(payoutForm.amount) || undefined
+    const amountCents = payoutForm.amount ? decimalToMinorUnits(payoutForm.amount) : null
+    const amount = amountCents === null ? undefined : payoutForm.amount
     const destination = payoutForm.destinationType === 'BANK'
       ? `${payoutForm.bankCode} account ending in ${payoutForm.accountNoOrMsisdn.slice(-4) || 'unknown'}`
       : payoutForm.accountNoOrMsisdn || 'merchant mobile number'
-    if (payoutForm.amount && (!Number.isFinite(amount) || amount <= 0)) {
+    if (payoutForm.amount && (amountCents === null || BigInt(amountCents) <= 0n)) {
       setError('Payout amount must be greater than zero.')
       return
     }
-    if (amount && amount > Number(txn.amount)) {
+    if (amountCents !== null && BigInt(amountCents) > BigInt(decimalToMinorUnits(txn.amount) || '0')) {
       setError('Payout amount cannot exceed the collection amount.')
       return
     }
@@ -112,6 +116,7 @@ export default function OperatorTransactionDetail() {
         amount,
         accountNoOrMsisdn: payoutForm.accountNoOrMsisdn || undefined,
         destinationType: payoutForm.destinationType,
+        network: payoutForm.destinationType === 'MOMO' ? payoutForm.network || undefined : undefined,
         bankCode: payoutForm.destinationType === 'BANK' ? payoutForm.bankCode : undefined,
         accountName: payoutForm.accountName || undefined
       })
@@ -269,10 +274,11 @@ export default function OperatorTransactionDetail() {
               <input type="number" step="0.01" placeholder={txn.amount} value={payoutForm.amount} onChange={(e) => setPayoutForm((f) => ({ ...f, amount: e.target.value }))} />
             </div>
             <div className="field">
-              <label>Destination type</label><select value={payoutForm.destinationType} onChange={(e) => setPayoutForm((f) => ({ ...f, destinationType: e.target.value }))}><option value="MOMO">Mobile Money</option><option value="BANK">Bank account</option></select>
+              <label>Destination type</label><select value={payoutForm.destinationType} onChange={(e) => setPayoutForm((f) => ({ ...f, destinationType: e.target.value, network: '', bankCode: '' }))}><option value="MOMO">MoMo</option><option value="BANK">Bank</option></select>
             </div>
             <div className="field"><label>{payoutForm.destinationType === 'BANK' ? 'Bank account number' : 'Mobile number'}</label><input required={payoutForm.destinationType === 'BANK'} value={payoutForm.accountNoOrMsisdn} onChange={(e) => setPayoutForm((f) => ({ ...f, accountNoOrMsisdn: e.target.value }))} placeholder={payoutForm.destinationType === 'MOMO' ? "Leave blank to use merchant's number" : 'Bank account number'} /></div>
-            {payoutForm.destinationType === 'BANK' && <><div className="field"><label>Bank</label><select required value={payoutForm.bankCode} onChange={(e) => setPayoutForm((f) => ({ ...f, bankCode: e.target.value }))}><option value="">Choose bank</option>{[['GCBGH','GCB Bank'],['SOCIETE','Societe Generale'],['ARBAPEX','ARB Apex'],['OMNIBSIC','OmniBSIC'],['FIRSTATGH','First Atlantic'],['FBNGH','First Bank'],['BANKOFAFRICA','Bank of Africa'],['FIDELITY','Fidelity Bank'],['FNBGH','First National Bank'],['CBG','Consolidated Bank Ghana'],['ACCESSGH','Access Bank'],['UNAFBKGH','UBA'],['GTBANKGH','Guaranty Trust Bank'],['PBL','Prudential Bank'],['CAL','CAL Bank'],['ECOBANKGH','Ecobank Ghana'],['ZENITHGH','Zenith Bank'],['REPUBLIC','Republic Bank'],['UMB','Universal Merchant Bank'],['ADB','Agricultural Development Bank'],['NIB','National Investment Bank'],['ABSA','Absa Bank Ghana'],['STANCHART','Standard Chartered'],['STANBICGH','Stanbic Bank']].map(([code,label]) => <option key={code} value={code}>{label}</option>)}</select></div><div className="field"><label>Account holder name</label><input required value={payoutForm.accountName} onChange={(e) => setPayoutForm((f) => ({ ...f, accountName: e.target.value }))} /></div></>}
+            {payoutForm.destinationType === 'MOMO' && <div className="field"><label>MoMo channel</label><select value={payoutForm.network} onChange={(e) => setPayoutForm((f) => ({ ...f, network: e.target.value }))}><option value="">Auto-detect from number</option>{MOMO_CHANNELS.map((channel) => <option key={channel.code} value={channel.code}>{channel.label}</option>)}</select></div>}
+            {payoutForm.destinationType === 'BANK' && <><div className="field"><label>Bank partner</label><select required value={payoutForm.bankCode} onChange={(e) => setPayoutForm((f) => ({ ...f, bankCode: e.target.value }))}><option value="">Choose bank</option>{BANK_PARTNERS.map((bank) => <option key={bank.code} value={bank.code}>{bank.label}</option>)}</select></div><div className="field"><label>Account holder name</label><input required value={payoutForm.accountName} onChange={(e) => setPayoutForm((f) => ({ ...f, accountName: e.target.value }))} /></div></>}
           </div>
           <button className="btn btn-primary" disabled={busy}>Start payout</button>
         </form>

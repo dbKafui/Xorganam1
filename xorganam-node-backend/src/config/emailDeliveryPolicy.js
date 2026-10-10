@@ -1,4 +1,5 @@
 import { EMAIL_PROVIDER_DESCRIPTORS, isEmailProviderType } from '../email/providerDescriptors.js'
+import ipaddr from 'ipaddr.js'
 
 function requiredString(environment, name, problems) {
   const value = String(environment[name] || '').trim()
@@ -46,10 +47,16 @@ export function parseEmailDeliveryPolicy(environment = process.env, nodeEnvironm
   const maxRecipients = positiveInteger(environment, 'EMAIL_MAX_RECIPIENTS', problems)
   const workerConcurrency = positiveInteger(environment, 'EMAIL_WORKER_CONCURRENCY', problems)
   const deliveryRecordRetentionDays = positiveInteger(environment, 'EMAIL_DELIVERY_RECORD_RETENTION_DAYS', problems)
+  const testRateLimit = positiveInteger(environment, 'EMAIL_TEST_RATE_LIMIT', problems)
+  const testRateWindowMs = positiveInteger(environment, 'EMAIL_TEST_RATE_WINDOW_MS', problems)
+  const senderChallengeTtlMs = positiveInteger(environment, 'EMAIL_SENDER_CHALLENGE_TTL_MS', problems)
   const allowedSmtpPorts = csvValues(environment, 'EMAIL_ALLOWED_SMTP_PORTS', problems).map(Number)
   const smtpStartTlsPorts = csvValues(environment, 'EMAIL_SMTP_STARTTLS_PORTS', problems).map(Number)
   const smtpImplicitTlsPort = positiveInteger(environment, 'EMAIL_SMTP_IMPLICIT_TLS_PORT', problems)
   const blockedSmtpCidrs = csvValues(environment, 'EMAIL_BLOCKED_SMTP_CIDRS', problems)
+  for (const cidr of blockedSmtpCidrs) {
+    try { ipaddr.parseCIDR(cidr) } catch { problems.push(`EMAIL_BLOCKED_SMTP_CIDRS contains an invalid CIDR: ${cidr}`) }
+  }
   const smtpEncryptionModes = csvValues(environment, 'EMAIL_SMTP_ENCRYPTION_MODES', problems).map((mode) => mode.toLowerCase())
   const sesRegions = csvValues(environment, 'EMAIL_SES_REGIONS', problems)
   const mailgunRegions = csvValues(environment, 'EMAIL_MAILGUN_REGIONS', problems)
@@ -149,6 +156,9 @@ export function parseEmailDeliveryPolicy(environment = process.env, nodeEnvironm
     maxRecipients,
     workerConcurrency,
     deliveryRecordRetentionDays,
+    testRateLimit,
+    testRateWindowMs,
+    senderChallengeTtlMs,
     allowedSmtpPorts,
     smtpStartTlsPorts,
     smtpImplicitTlsPort,

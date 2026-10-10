@@ -3,6 +3,7 @@ import { query } from '../db/pool.js'
 import { reconcileInstitutionTransaction, institutionTransactionByReference } from '../services/institutionFinancialLedger.js'
 import { queryInstitutionEganowStatus } from '../services/institutionEganowService.js'
 import { reconcileTransaction } from '../services/reconciliationService.js'
+import { normalizeAmountMinorUnits } from '../services/providerResultValidation.js'
 
 export const webhooksRouter = Router()
 
@@ -49,11 +50,11 @@ async function handleInstitutionEganowWebhook(req, res) {
   const transaction = await institutionTransactionByReference(institutionId, reference)
   if (!transaction) return res.status(404).json({ message: 'Institution transaction not found.' })
   if (transaction.status !== 'PENDING_GATEWAY') return res.status(200).json({ message: 'Institution payment was already reconciled.', transactionId: transaction.id, status: transaction.status })
-  const expectedCents = ['LOAN_DISBURSEMENT', 'WITHDRAWAL'].includes(transaction.transaction_type)
-    ? Number(transaction.payout_amount_cents)
-    : Number(transaction.amount_cents)
+  const expectedCents = BigInt(['LOAN_DISBURSEMENT', 'WITHDRAWAL'].includes(transaction.transaction_type)
+    ? transaction.payout_amount_cents
+    : transaction.amount_cents)
   const callbackAmount = value('amount', 'Amount')
-  if (callbackAmount !== undefined && Math.round(Number(callbackAmount) * 100) !== expectedCents) {
+  if (callbackAmount !== undefined && normalizeAmountMinorUnits(callbackAmount) !== expectedCents) {
     return res.status(409).json({ message: 'Callback amount does not match the institution transaction.' })
   }
   // Eganow's documented callback has no signature header. Treat it only as a

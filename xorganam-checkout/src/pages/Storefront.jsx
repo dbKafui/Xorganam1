@@ -3,8 +3,10 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { publicApi } from '../api/client'
 import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../lib/idempotency'
 import { classifyPaymentStatus } from '../lib/statusOutcome'
+import { MOMO_CHANNELS } from '../constants/paymentOptions.js'
 
-function money(value) { return `GHS ${Number(value || 0).toFixed(2)}` }
+import { decimalAmountFromMinorUnits, formatCurrencyAmount, multiplyDecimalByInteger } from '../../../shared/currency.js'
+function money(value) { return formatCurrencyAmount(value ?? '—', 'GHS') }
 
 function restoreOrderAttempt(slug) {
   try {
@@ -29,6 +31,7 @@ export default function Storefront() {
   const [customerName, setCustomerName] = useState('')
   const [paymentMethod, setPaymentMethod] = useState('EGANOW')
   const [collectionMethod, setCollectionMethod] = useState('MOMO')
+  const [networkProvider, setNetworkProvider] = useState('')
   const [card, setCard] = useState({ number: '', name: '', month: '', year: '', cvv: '' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -55,6 +58,7 @@ export default function Storefront() {
     setCustomerName('')
     setPaymentMethod('EGANOW')
     setCollectionMethod('MOMO')
+    setNetworkProvider('')
     setCard({ number: '', name: '', month: '', year: '', cvv: '' })
     idempotencyKey.current = null
     publicApi.getStorefront(slug).then((result) => {
@@ -129,7 +133,16 @@ export default function Storefront() {
   const products = selectedCategoryId ? allProducts.filter((product) => product.storefront_category_id === selectedCategoryId) : allProducts
   const blocks = data?.storefront?.branding_config?.blocks || []
   const hasProductGrid = blocks.some((block) => block.type === 'product_grid')
-  const total = useMemo(() => allProducts.reduce((sum, product) => sum + Number(product.price) * Number(cart[product.id] || 0), 0), [allProducts, cart])
+  const total = useMemo(() => {
+    let minorUnits = 0n
+    for (const product of allProducts) {
+      const quantity = cart[product.id] || 0
+      const line = multiplyDecimalByInteger(product.price, quantity, 'GHS')
+      if (line === null) return null
+      minorUnits += BigInt(line)
+    }
+    return decimalAmountFromMinorUnits(minorUnits.toString(), 'GHS')
+  }, [allProducts, cart])
   const theme = data?.storefront?.branding_config?.theme || {}
   const inventoryBranchId = fulfillment === 'DELIVERY' ? data?.storefront?.default_fulfillment_branch_id : branchId
 
@@ -183,6 +196,7 @@ export default function Storefront() {
         items, customerPhone, customerName,
         fulfillmentType: fulfillment, fulfillmentAddress: fulfillment === 'DELIVERY' ? address : undefined,
         merchantId: fulfillment === 'PICKUP' ? branchId : undefined, paymentMethod, collectionMethod,
+        network: collectionMethod === 'MOMO' ? networkProvider || undefined : undefined,
         ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {})
       }, idempotencyKey.current)
       if (result.redirectHtml) {
@@ -261,7 +275,8 @@ export default function Storefront() {
           <div className="field"><label>Name (optional)</label><input maxLength="160" value={customerName} onChange={(e) => setCustomerName(e.target.value)} /></div>
         </div>
         {data.creditDefaults?.enabled && <div className="field"><label>Payment method</label><select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}><option value="EGANOW">Pay now with Eganow</option><option value="CREDIT">Hire-purchase ({data.creditDefaults.installment_count} {String(data.creditDefaults.installment_frequency).toLowerCase()} installments; {data.creditDefaults.down_payment_percent}% down payment)</option></select></div>}
-        {(paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="field"><label>Collection method</label><select value={collectionMethod} onChange={(e) => setCollectionMethod(e.target.value)}><option value="MOMO">Mobile Money</option><option value="CARD">Visa / Mastercard</option></select></div>}
+        {(paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="field"><label>Collection method</label><select value={collectionMethod} onChange={(e) => { setCollectionMethod(e.target.value); setNetworkProvider('') }}><option value="MOMO">MoMo</option><option value="CARD">Card (Visa / Mastercard)</option></select></div>}
+        {collectionMethod === 'MOMO' && (paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="field"><label>MoMo channel</label><select value={networkProvider} onChange={(e) => setNetworkProvider(e.target.value)}><option value="">Auto-detect from phone number</option>{MOMO_CHANNELS.map((channel) => <option key={channel.code} value={channel.code}>{channel.label}</option>)}</select></div>}
         {collectionMethod === 'CARD' && (paymentMethod === 'EGANOW' || Number(data.creditDefaults?.down_payment_percent) > 0) && <div className="two-col"><div className="field"><label>Card number</label><input required autoComplete="cc-number" inputMode="numeric" value={card.number} onChange={(e) => setCard((v) => ({ ...v, number: e.target.value }))} /></div><div className="field"><label>Cardholder name</label><input required autoComplete="cc-name" value={card.name} onChange={(e) => setCard((v) => ({ ...v, name: e.target.value }))} /></div><div className="field"><label>Expiry month</label><input required type="number" min="1" max="12" autoComplete="cc-exp-month" value={card.month} onChange={(e) => setCard((v) => ({ ...v, month: e.target.value }))} /></div><div className="field"><label>Expiry year</label><input required inputMode="numeric" autoComplete="cc-exp-year" placeholder="2030" value={card.year} onChange={(e) => setCard((v) => ({ ...v, year: e.target.value }))} /></div><div className="field"><label>CVV</label><input required type="password" inputMode="numeric" autoComplete="cc-csc" value={card.cvv} onChange={(e) => setCard((v) => ({ ...v, cvv: e.target.value }))} /></div></div>}
         {error && <div className="status-banner error" role="alert">{error}</div>}{notice && <div className="status-banner success" role="status">{notice}</div>}
         <button className="btn btn-primary" disabled={submitting || payment?.status === 'PENDING_PAYMENT' || !branchId && fulfillment === 'PICKUP'}>{submitting ? 'Starting checkout…' : payment?.status === 'PENDING_PAYMENT' ? 'Payment pending' : `Place order · ${money(total)}`}</button>

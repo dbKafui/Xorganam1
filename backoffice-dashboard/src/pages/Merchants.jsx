@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { merchantsApi } from '../api/merchants'
 import { tenantsApi } from '../api/tenants'
 
@@ -13,8 +14,12 @@ const emptyForm = {
 }
 
 export default function Merchants() {
+  const [searchParams] = useSearchParams()
+  const focusedMerchantId = searchParams.get('merchantId')
   const [tenants, setTenants] = useState([])
   const [merchants, setMerchants] = useState([])
+  const [destinationRequests, setDestinationRequests] = useState([])
+  const [destinationRequestNumber, setDestinationRequestNumber] = useState('')
   const [form, setForm] = useState(emptyForm)
   const [editForm, setEditForm] = useState(null)
   const [accountForm, setAccountForm] = useState(null)
@@ -26,7 +31,8 @@ export default function Merchants() {
     setLoading(true)
     Promise.all([
       tenantsApi.list().then(setTenants),
-      merchantsApi.all().then(setMerchants)
+      merchantsApi.all().then(setMerchants),
+      merchantsApi.listDestinationChanges().then((data) => setDestinationRequests(data.requests || [])).catch(() => setDestinationRequests([]))
     ])
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
@@ -67,10 +73,12 @@ export default function Merchants() {
 
   async function deleteMerchant(merchantId) {
     if (!window.confirm('Delete this merchant permanently? This cannot be undone.')) return
+    const reason = window.prompt('Reason for deleting or deactivating this merchant:')
+    if (!reason?.trim()) return
     setError('')
     setNotice('')
     try {
-      const result = await merchantsApi.remove(merchantId)
+      const result = await merchantsApi.remove(merchantId, reason.trim())
       setNotice(result.message || 'Merchant deleted.')
       load()
     } catch (err) {
@@ -84,6 +92,28 @@ export default function Merchants() {
       await merchantsApi.setEganowAccounts(accountForm.id, accountForm)
       setNotice('Eganow accounts saved. Merchant is active for payments.')
       setAccountForm(null)
+      load()
+    } catch (err) { setError(err.message) }
+  }
+
+  async function requestDestinationChange(merchantId) {
+    setError('')
+    setNotice('')
+    try {
+      await merchantsApi.requestDestinationChange(merchantId, destinationRequestNumber)
+      setNotice('Payout destination change submitted for approval by another tenant administrator.')
+      load()
+    } catch (err) { setError(err.message) }
+  }
+
+  async function reviewDestinationChange(requestId, decision) {
+    const reason = decision === 'REJECTED' ? window.prompt('Reason for rejecting this payout destination change:') : ''
+    if (decision === 'REJECTED' && !reason?.trim()) return
+    setError('')
+    setNotice('')
+    try {
+      await merchantsApi.reviewDestinationChange(requestId, decision, reason?.trim())
+      setNotice(`Payout destination request ${decision.toLowerCase()}.`)
       load()
     } catch (err) { setError(err.message) }
   }
@@ -162,8 +192,8 @@ export default function Merchants() {
               <input required value={editForm.displayName} onChange={(e) => setEditForm((f) => ({ ...f, displayName: e.target.value }))} />
             </div>
             <div className="field">
-              <label>MoMo number</label>
-              <input required value={editForm.mobileMoneyNumber} onChange={(e) => setEditForm((f) => ({ ...f, mobileMoneyNumber: e.target.value }))} />
+              <label>Active payout MoMo number</label>
+              <input value={editForm.mobileMoneyNumber} disabled />
             </div>
             <div className="field">
               <label>Network</label>
@@ -180,20 +210,39 @@ export default function Merchants() {
                 <option value="AUTO_SWEEP">Collect for me</option>
               </select>
             </div>
-            <div className="field">
-              <label>Status</label>
-              <select value={editForm.isActive ? 'true' : 'false'} onChange={(e) => setEditForm((f) => ({ ...f, isActive: e.target.value === 'true' }))}>
-                <option value="true">Active</option>
-                <option value="false">Inactive</option>
-              </select>
-            </div>
           </div>
           <div className="form-actions">
             <button className="btn btn-primary">Save changes</button>
             <button type="button" className="btn btn-secondary" onClick={() => setEditForm(null)}>Cancel</button>
           </div>
+          <div className="form-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)', marginTop: 16 }}>
+            <div className="field">
+              <label htmlFor="requested-destination">Request payout destination change</label>
+              <input id="requested-destination" inputMode="tel" value={destinationRequestNumber} onChange={(event) => setDestinationRequestNumber(event.target.value)} />
+              <small>Another tenant administrator must approve before this number becomes active.</small>
+            </div>
+            <div className="form-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => requestDestinationChange(editForm.id)}>Submit destination request</button>
+            </div>
+          </div>
         </form>
       )}
+
+      <div className="panel">
+        <h2>Payout destination change approvals</h2>
+        {!destinationRequests.length ? <div className="empty-state">No destination change requests.</div> : (
+          <div className="table-wrap"><table><thead><tr><th>Merchant</th><th>Requested by</th><th>Previous</th><th>Requested</th><th>Status</th><th>Review</th></tr></thead><tbody>
+            {destinationRequests.map((change) => <tr key={change.id}>
+              <td>{change.merchant_name}</td><td>{change.requester_email}</td>
+              <td className="mono">{change.previous_mobile_money_number}</td><td className="mono">{change.requested_mobile_money_number}</td>
+              <td>{change.status}</td><td>{change.status === 'PENDING' ? <div className="form-actions">
+                <button className="btn btn-primary btn-sm" onClick={() => reviewDestinationChange(change.id, 'APPROVED')}>Approve</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => reviewDestinationChange(change.id, 'REJECTED')}>Reject</button>
+              </div> : change.reviewer_email || '—'}</td>
+            </tr>)}
+          </tbody></table></div>
+        )}
+      </div>
 
       <div className="panel">
         <h2>All merchants</h2>
@@ -207,8 +256,8 @@ export default function Merchants() {
               <tr><th>Tenant</th><th>Name</th><th>MoMo</th><th>Mode</th><th>Account setup</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
-              {merchants.map((merchant) => (
-                <tr key={merchant.id}>
+              {merchants.filter((merchant) => !focusedMerchantId || merchant.id === focusedMerchantId).map((merchant) => (
+                <tr key={merchant.id} className={focusedMerchantId === merchant.id ? 'search-result-focus' : undefined}>
                   <td>{merchant.tenantCompanyName}</td>
                   <td>{merchant.displayName}<small className="mono" style={{ display: 'block' }}>{merchant.vendorReference}</small></td>
                   <td className="mono">{merchant.mobileMoneyNumber}</td>
@@ -217,7 +266,7 @@ export default function Merchants() {
                   <td>{merchant.isActive ? 'Active' : 'Inactive'}</td>
                   <td style={{ display: 'flex', gap: 6 }}>
                     {merchant.accountSetupStatus !== 'ACTIVE' && <button className="btn btn-secondary btn-sm" onClick={() => setAccountForm({ id: merchant.id, eganowCollectionAccountId: '', eganowPayoutAccountId: '' })}>Set Eganow accounts</button>}
-                    <button className="btn btn-secondary btn-sm" onClick={() => setEditForm(merchant)}>Edit</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => { setEditForm(merchant); setDestinationRequestNumber(merchant.mobileMoneyNumber || '') }}>Edit</button>
                     <button className="btn btn-danger btn-sm" onClick={() => deleteMerchant(merchant.id)}>Delete</button>
                   </td>
                 </tr>

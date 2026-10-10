@@ -5,6 +5,7 @@ import { sendMerchantSms } from '../services/notificationService.js'
 import { issueInstallmentToken, installmentPaymentUrl } from '../services/creditInstallmentToken.js'
 import { recordCreditWebhookEvent } from '../services/creditWebhookOutbox.js'
 import { CREDIT_PLAN_PAYMENT_STATUSES, updateCreditInstallmentStatus, updateCreditPlanStatus } from '../services/creditStateService.js'
+import { normalizeAmountMinorUnits, formatMinorUnits } from '../services/providerResultValidation.js'
 
 const connection = getRedisConnection()
 const producerQueue = new Queue(CREDIT_REMINDER_QUEUE, { connection })
@@ -52,7 +53,10 @@ async function processOverdue(installmentId) {
     )
     const plan = rows[0]
     if (!plan) return { skipped: true }
-    const updatedAmountDue = (Math.round(Number(plan.amount_due) * 100) + Math.round(Number(plan.late_fee_amount) * 100)) / 100
+    const amountDueCents = normalizeAmountMinorUnits(plan.amount_due)
+    const lateFeeCents = normalizeAmountMinorUnits(plan.late_fee_amount)
+    if (amountDueCents === null || lateFeeCents === null) throw new Error('Credit installment amount has unsupported precision.')
+    const updatedAmountDue = formatMinorUnits(amountDueCents + lateFeeCents)
     await updateCreditInstallmentStatus(tx, {
       id: plan.installment_id,
       currentStatus: 'PENDING',
@@ -108,8 +112,8 @@ async function sendReminder({ installmentId, type, reminderDate }) {
   const token = issueInstallmentToken({ planId: installment.plan_id, installmentId, expiresAt: new Date(Math.max(dueDate.getTime(), Date.now() + 30 * 86400000)) })
   const url = installmentPaymentUrl(token)
   const text = type === 'PRE_DUE'
-    ? `Reminder: GHS ${Number(installment.amount_due).toFixed(2)} is due ${installment.due_date} to ${installment.merchant_name}. Pay securely: ${url}`
-    : `GHS ${Number(installment.amount_due).toFixed(2)} is due today to ${installment.merchant_name}. Pay securely: ${url}`
+    ? `Reminder: GHS ${formatMinorUnits(normalizeAmountMinorUnits(installment.amount_due))} is due ${installment.due_date} to ${installment.merchant_name}. Pay securely: ${url}`
+    : `GHS ${formatMinorUnits(normalizeAmountMinorUnits(installment.amount_due))} is due today to ${installment.merchant_name}. Pay securely: ${url}`
   const sent = await sendMerchantSms(installment.tenant_id, installment.customer_identifier, text)
   if (!sent) throw new Error('Credit installment reminder SMS was not accepted by the gateway.')
   await query(`UPDATE credit_reminder_delivery SET sent_at = now() WHERE id = $1`, [deliveries[0].id])

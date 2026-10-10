@@ -11,6 +11,8 @@ import { loadVendorPackagePayoutRule, processSplitPayout } from '../services/spl
 import { computeFee } from '../services/feeService.js'
 import { createVendorReference } from '../services/referenceIds.js'
 import { updateTransactionStatus } from '../services/transactionStateService.js'
+import { writePlatformAudit } from '../services/auditService.js'
+import { formatMinorUnits, normalizeAmountMinorUnits } from '../services/providerResultValidation.js'
 
 // No env-level Eganow callback fallback: tenant-stored callback must be used.
 
@@ -40,15 +42,25 @@ transactionsRouter.put('/fee-config', requireRole('TENANT_ADMIN'), asyncHandler(
   for (const item of configs) {
     if (!stages.has(item.stage) || seen.has(item.stage) || !calcTypes.has(item.chargeCalcType) || !calcTypes.has(item.eganowCostCalcType) || !payers.has(item.chargePayer) || (item.stage === 'PAYOUT' && item.chargePayer === 'CUSTOMER')) return res.status(400).json({ message: 'Fee stage, calculation type, or payer is invalid.' })
     seen.add(item.stage)
-    for (const value of [item.chargeFlatAmount, item.chargePercentage, item.chargeCapAmount, item.eganowCostFlatAmount, item.eganowCostPercentage, item.eganowCostCapAmount]) {
-      if (value != null && (!Number.isFinite(Number(value)) || Number(value) < 0)) return res.status(400).json({ message: 'Fee amounts and rates must be non-negative numbers.' })
-    }
-    if (['PERCENTAGE', 'PERCENTAGE_WITH_CAP'].includes(item.chargeCalcType) && (!Number.isFinite(Number(item.chargePercentage)) || Number(item.chargePercentage) > 100)) return res.status(400).json({ message: 'Fee percentages must be between 0 and 100.' })
-    if (['PERCENTAGE', 'PERCENTAGE_WITH_CAP'].includes(item.eganowCostCalcType) && (!Number.isFinite(Number(item.eganowCostPercentage)) || Number(item.eganowCostPercentage) > 100)) return res.status(400).json({ message: 'Eganow cost percentages must be between 0 and 100.' })
+    const amountValues = [item.chargeFlatAmount, item.chargeCapAmount, item.eganowCostFlatAmount, item.eganowCostCapAmount]
+    if (amountValues.some((value) => value != null && (normalizeAmountMinorUnits(value) ?? -1n) < 0n)) return res.status(400).json({ message: 'Fee amounts must be non-negative decimal values with at most two fractional digits.' })
+    const percentageValues = [item.chargePercentage, item.eganowCostPercentage]
+    if (percentageValues.some((value) => value != null && (normalizeAmountMinorUnits(value) ?? -1n) < 0n)) return res.status(400).json({ message: 'Fee rates must be non-negative decimal values with at most two fractional digits.' })
+    if (['PERCENTAGE', 'PERCENTAGE_WITH_CAP'].includes(item.chargeCalcType) && (normalizeAmountMinorUnits(item.chargePercentage) ?? 10001n) > 10000n) return res.status(400).json({ message: 'Fee percentages must be between 0 and 100.' })
+    if (['PERCENTAGE', 'PERCENTAGE_WITH_CAP'].includes(item.eganowCostCalcType) && (normalizeAmountMinorUnits(item.eganowCostPercentage) ?? 10001n) > 10000n) return res.status(400).json({ message: 'Eganow cost percentages must be between 0 and 100.' })
     if (item.chargeCalcType === 'FLAT' && item.chargeFlatAmount == null || item.chargeCalcType === 'PERCENTAGE_WITH_CAP' && item.chargeCapAmount == null) return res.status(400).json({ message: 'Provide the flat fee or percentage cap required by the selected calculation.' })
     if (item.eganowCostCalcType === 'FLAT' && item.eganowCostFlatAmount == null || item.eganowCostCalcType === 'PERCENTAGE_WITH_CAP' && item.eganowCostCapAmount == null) return res.status(400).json({ message: 'Provide the Eganow flat cost or percentage cap required by the selected calculation.' })
   }
   await withTransaction(async (tx) => {
+    const previous = await tx.query(
+      `SELECT stage, charge_calc_type, charge_flat_amount, charge_percentage, charge_cap_amount,
+              charge_payer, eganow_cost_calc_type, eganow_cost_flat_amount,
+              eganow_cost_percentage, eganow_cost_cap_amount, effective_from
+         FROM fee_config_versions
+        WHERE tenant_id = $1 AND stage = ANY($2::text[]) AND effective_to IS NULL
+        ORDER BY stage`,
+      [tenantId, [...seen]]
+    )
     for (const item of configs) {
       await tx.query(`UPDATE fee_config_versions SET effective_to = now()
         WHERE tenant_id = $1 AND stage = $2 AND effective_to IS NULL`, [tenantId, item.stage])
@@ -62,8 +74,74 @@ transactionsRouter.put('/fee-config', requireRole('TENANT_ADMIN'), asyncHandler(
         item.eganowCostFlatAmount ?? null, item.eganowCostPercentage ?? null,
         item.eganowCostCapAmount ?? null, req.user.id])
     }
+    const auditQuery = (text, params) => tx.query(text, params)
+    await writePlatformAudit({
+      actorUserId: req.user.id,
+      tenantId,
+      action: 'TENANT_FEE_CONFIG_UPDATED',
+      resourceType: 'fee_config_versions',
+      details: { previous: previous.rows, current: configs },
+      ipAddress: req.ip || null,
+      userAgent: req.headers['user-agent'] || null,
+      requestId: req.id || null,
+      client: auditQuery
+    })
   })
   res.json({ updated: [...seen] })
+}))
+
+transactionsRouter.post('/fee-config/:stage/rollback', requireRole('TENANT_ADMIN'), asyncHandler(async (req, res) => {
+  const tenantId = scopeOrRespond(req, res, req.body?.tenantId)
+  if (!tenantId) return
+  const stage = String(req.params.stage || '').toUpperCase()
+  if (!['COLLECTION', 'PAYOUT'].includes(stage)) return res.status(400).json({ message: 'Fee stage is invalid.' })
+  const restored = await withTransaction(async (tx) => {
+    const { rows: activeRows } = await tx.query(
+      `SELECT * FROM fee_config_versions
+        WHERE tenant_id = $1 AND stage = $2 AND effective_to IS NULL FOR UPDATE`,
+      [tenantId, stage]
+    )
+    const active = activeRows[0]
+    if (!active) return { missing: true }
+    const { rows: priorRows } = await tx.query(
+      `SELECT * FROM fee_config_versions
+        WHERE tenant_id = $1 AND stage = $2 AND effective_to IS NOT NULL
+        ORDER BY effective_to DESC, created_at DESC LIMIT 1`,
+      [tenantId, stage]
+    )
+    const prior = priorRows[0]
+    if (!prior) return { noPrior: true }
+    await tx.query('UPDATE fee_config_versions SET effective_to = now() WHERE id = $1', [active.id])
+    const { rows } = await tx.query(
+      `INSERT INTO fee_config_versions
+        (tenant_id, stage, charge_calc_type, charge_flat_amount, charge_percentage, charge_cap_amount,
+         charge_payer, eganow_cost_calc_type, eganow_cost_flat_amount, eganow_cost_percentage,
+         eganow_cost_cap_amount, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING id, stage, charge_calc_type, charge_flat_amount, charge_percentage, charge_cap_amount,
+         charge_payer, eganow_cost_calc_type, eganow_cost_flat_amount, eganow_cost_percentage,
+         eganow_cost_cap_amount, effective_from`,
+      [tenantId, stage, prior.charge_calc_type, prior.charge_flat_amount, prior.charge_percentage,
+        prior.charge_cap_amount, prior.charge_payer, prior.eganow_cost_calc_type,
+        prior.eganow_cost_flat_amount, prior.eganow_cost_percentage, prior.eganow_cost_cap_amount, req.user.id]
+    )
+    await writePlatformAudit({
+      actorUserId: req.user.id,
+      tenantId,
+      action: 'TENANT_FEE_CONFIG_ROLLED_BACK',
+      resourceType: 'fee_config_versions',
+      resourceId: rows[0].id,
+      details: { stage, replacedVersionId: active.id, restoredFromVersionId: prior.id },
+      ipAddress: req.ip || null,
+      userAgent: req.headers['user-agent'] || null,
+      requestId: req.id || null,
+      client: (sql, params) => tx.query(sql, params)
+    })
+    return { config: rows[0] }
+  })
+  if (restored.missing) return res.status(404).json({ message: 'No active fee configuration exists for this stage.' })
+  if (restored.noPrior) return res.status(409).json({ message: 'No earlier fee configuration exists to restore.' })
+  res.json({ restored: true, feeConfig: restored.config })
 }))
 
 function scopeOrRespond(req, res, requestedTenantId) {
@@ -88,7 +166,7 @@ transactionsRouter.get(
     const tenantId = scopeOrRespond(req, res, req.query.tenantId)
     if (!tenantId) return
 
-    const { merchantId, status, type, page = 1, pageSize = 20 } = req.query
+    const { merchantId, customerIdentifier, status, type, page = 1, pageSize = 20 } = req.query
     const limit = Math.min(parseInt(pageSize, 10) || 20, 200)
     const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * limit
 
@@ -109,6 +187,15 @@ transactionsRouter.get(
     if (effectiveMerchantId) {
       params.push(effectiveMerchantId)
       conditions.push(`merchant_id = $${params.length}`)
+    }
+    if (customerIdentifier) {
+      if (typeof customerIdentifier !== 'string' || customerIdentifier.length > 32 || !/^[+0-9 ()-]+$/.test(customerIdentifier)) {
+        return res.status(400).json({ message: 'Customer mobile number is invalid.' })
+      }
+      params.push(customerIdentifier.replace(/[ ()-]/g, ''))
+      conditions.push(`(collection_msisdn = $${params.length} OR kyc_msisdn = $${params.length}
+        OR EXISTS (SELECT 1 FROM credit_plans cp WHERE cp.id = credit_plan_id AND cp.customer_identifier = $${params.length})
+        OR EXISTS (SELECT 1 FROM orders o WHERE o.id = order_id AND o.customer_identifier = $${params.length}))`)
     }
     if (status) {
       params.push(status)
@@ -233,7 +320,7 @@ transactionsRouter.post(
 
     try {
       const result = await initiateCollection(merchantId, {
-        amount: Number(amount),
+        amount,
         msisdn,
         network,
         narration,
@@ -313,24 +400,49 @@ transactionsRouter.post(
       return res.status(400).json({ message: 'Source transaction must be RECEIVED from the payment gateway before internal transfer.' })
     }
 
-    const existingChild = await query(
-      `SELECT id FROM transactions WHERE parent_transaction_id = $1 AND type = 'INTERNAL_TRANSFER'`,
-      [source.id]
-    )
-    if (existingChild.rows.length > 0) return res.status(409).json({ message: 'An internal transfer already exists for this transaction.' })
-
+    const requestedTransferAmount = amount == null || amount === '' ? source.amount : amount
+    const transferAmountMinor = normalizeAmountMinorUnits(requestedTransferAmount)
+    const sourceAmountMinor = normalizeAmountMinorUnits(source.amount)
+    if (transferAmountMinor === null || transferAmountMinor <= 0n || sourceAmountMinor === null || transferAmountMinor > sourceAmountMinor) {
+      return res.status(400).json({ message: 'Transfer amount must be positive and no greater than the source collection amount.' })
+    }
+    const transferAmount = Number(transferAmountMinor) / 100
     const internalReference = createVendorReference(source.display_name, 'IT')
-    const transferAmount = Number(amount) || source.amount
-
-    const inserted = await query(
-      `INSERT INTO transactions
-         (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference,
-          manually_triggered, initiated_by_user_id)
-       VALUES ($1, $2, $3, 'INTERNAL_TRANSFER', 'PENDING', $4, $5, $6, TRUE, $7)
-       RETURNING id`,
-      [source.tenant_id, source.merchant_id, source.id, transferAmount, source.currency, internalReference, req.user.id]
-    )
-    const transferId = inserted.rows[0].id
+    const transfer = await withTransaction(async (client) => {
+      const { rows: lockedSource } = await client.query('SELECT status FROM transactions WHERE id = $1 FOR UPDATE', [source.id])
+      if (lockedSource[0]?.status !== 'RECEIVED') return { sourceChanged: true }
+      const { rows: existing } = await client.query(
+        `SELECT id, internal_reference, status, payment_gateway_status
+           FROM transactions WHERE parent_transaction_id = $1 AND type = 'INTERNAL_TRANSFER'
+          ORDER BY created_at LIMIT 1`, [source.id]
+      )
+      if (existing[0]) return { existing: existing[0] }
+      const { rows } = await client.query(
+        `INSERT INTO transactions
+           (tenant_id, merchant_id, parent_transaction_id, type, status, amount, currency, internal_reference,
+            manually_triggered, initiated_by_user_id)
+         VALUES ($1, $2, $3, 'INTERNAL_TRANSFER', 'PENDING', $4, $5, $6, TRUE, $7)
+         RETURNING id`,
+        [source.tenant_id, source.merchant_id, source.id, transferAmount, source.currency, internalReference, req.user.id]
+      )
+      return { id: rows[0].id, created: true }
+    })
+    if (transfer.sourceChanged) return res.status(409).json({ message: 'Source transaction changed while starting the transfer. Refresh and try again.' })
+    if (transfer.existing) {
+      if (transfer.existing.status === 'PENDING') {
+        try {
+          const reconciled = await reconcileTransaction(transfer.existing.id, source.tenant_id)
+          return res.status(reconciled?.status === 'PENDING' ? 202 : 200).json({
+            id: transfer.existing.id, internalReference: transfer.existing.internal_reference,
+            status: reconciled?.status || 'PENDING', paymentGatewayStatus: reconciled?.payment_gateway_status || transfer.existing.payment_gateway_status
+          })
+        } catch {
+          return res.status(202).json({ id: transfer.existing.id, internalReference: transfer.existing.internal_reference, status: 'PENDING' })
+        }
+      }
+      return res.status(409).json({ message: 'An internal transfer already exists for this transaction.', id: transfer.existing.id, status: transfer.existing.status })
+    }
+    const transferId = transfer.id
 
     try {
       const result = await sweepToPayoutAccount(source.tenant_id, {
@@ -523,12 +635,15 @@ transactionsRouter.post(
     if (!destination || (normalizedDestinationType === 'BANK' && (!supportedBanks.has(String(bankCode || '').toUpperCase()) || !String(accountName || '').trim() || !/^\d{6,34}$/.test(String(destination).replace(/\s/g, ''))))) {
       return res.status(400).json({ message: 'Provide a valid destination, recipient name, and supported bank.' })
     }
-    const availableAmount = Math.max(0, Number(source.base_amount ?? source.amount))
-    const requestedPayoutAmount = amount == null || amount === '' ? availableAmount : Number(amount)
+    const availableAmountMinor = normalizeAmountMinorUnits(source.base_amount ?? source.amount)
+    const requestedPayoutMinor = amount == null || amount === '' ? availableAmountMinor : normalizeAmountMinorUnits(amount)
+    if (availableAmountMinor === null || requestedPayoutMinor === null || requestedPayoutMinor <= 0n || requestedPayoutMinor > availableAmountMinor || requestedPayoutMinor > BigInt(Number.MAX_SAFE_INTEGER)) {
+      return res.status(400).json({ message: 'Payout amount must be a valid positive amount within the available collection balance.' })
+    }
+    const requestedPayoutAmount = formatMinorUnits(requestedPayoutMinor)
     const payoutFee = await computeFee(source.tenant_id, 'PAYOUT', requestedPayoutAmount)
-    // Xorganam records configured fees for reconciliation; Eganow performs deductions.
-    const payoutAmount = Math.round(requestedPayoutAmount * 100) / 100
-    if (!Number.isFinite(requestedPayoutAmount) || payoutAmount <= 0 || requestedPayoutAmount > availableAmount) return res.status(400).json({ message: 'Payout amount is invalid or exceeds the available collection amount.' })
+    // Provider amount is converted only after exact minor-unit bounds validation.
+    const payoutAmount = Number(requestedPayoutMinor) / 100
 
     const inserted = await withTransaction(async (tx) => {
       await tx.query('SELECT id FROM transactions WHERE id = $1 FOR UPDATE', [source.id])

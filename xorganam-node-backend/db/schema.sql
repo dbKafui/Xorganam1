@@ -42,7 +42,18 @@ CREATE TYPE payout_mode AS ENUM ('AUTO_SWEEP', 'MANUAL');
 
 CREATE TYPE transaction_type AS ENUM ('COLLECTION', 'INTERNAL_TRANSFER', 'PAYOUT');
 
-CREATE TYPE transaction_status AS ENUM ('PENDING', 'RECEIVED', 'SWEPT_INTERNAL', 'PAID_OUT', 'FAILED');
+CREATE TYPE transaction_status AS ENUM (
+    'PENDING',
+    'RECEIVED',
+    'SWEPT_INTERNAL',
+    'PARTIALLY_SETTLED',
+    'PAID_OUT',
+    'FAILED',
+    'UNKNOWN',
+    'REJECTED',
+    'VERIFICATION_BLOCKED',
+    'MANUAL_RECONCILIATION_REQUIRED'
+);
 
 CREATE TYPE user_role AS ENUM ('PLATFORM_ADMIN', 'TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_OPERATOR', 'TENANT_VIEWER');
 
@@ -100,6 +111,22 @@ CREATE TABLE users (
 CREATE INDEX idx_users_tenant ON users (tenant_id);
 CREATE INDEX idx_users_email ON users (email);
 
+CREATE TABLE user_permissions (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    tenant_id           UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+    permission_type     VARCHAR(100) NOT NULL,
+    resource_id         UUID,
+    granted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    granted_by_user_id  UUID REFERENCES users (id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_user_permission UNIQUE (user_id, permission_type, resource_id)
+);
+
+CREATE INDEX idx_user_permissions_user ON user_permissions (user_id);
+CREATE INDEX idx_user_permissions_tenant ON user_permissions (tenant_id);
+CREATE INDEX idx_user_permissions_tenant_type ON user_permissions (tenant_id, permission_type);
+
 -- ---------------------------------------------------------------------
 -- tenant_eganow_credentials
 -- ---------------------------------------------------------------------
@@ -110,7 +137,7 @@ CREATE TABLE tenant_eganow_credentials (
     eganow_client_secret_encrypted  TEXT,
     eganow_access_token_encrypted   TEXT,
     eganow_refresh_token_encrypted  TEXT,
-    amount                  NUMERIC(18, 2) NOT NULL,
+    amount                  NUMERIC(18, 2) NOT NULL DEFAULT 0,
     idempotency_key         VARCHAR(128),
     idempotency_fingerprint CHAR(64),
     webhook_secret_encrypted        TEXT,
@@ -137,30 +164,6 @@ CREATE TABLE tenant_notification_settings (
     email_from_address          VARCHAR(255),
     email_enabled               BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- ---------------------------------------------------------------------
--- tenant_email_config
--- ---------------------------------------------------------------------
-CREATE TABLE tenant_email_config (
-    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id           UUID NOT NULL UNIQUE REFERENCES tenants (id) ON DELETE CASCADE,
-    provider_type       VARCHAR(64) NOT NULL,
-    settings            JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(settings) = 'object'),
-    secrets_encrypted   BYTEA,
-    key_version         INTEGER,
-    from_address        VARCHAR(255) NOT NULL,
-    from_name           VARCHAR(255),
-    reply_to            VARCHAR(255),
-    sender_verified     BOOLEAN NOT NULL DEFAULT FALSE,
-    enabled             BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT tenant_email_config_secret_version_chk CHECK (
-        (secrets_encrypted IS NULL AND key_version IS NULL) OR
-        (secrets_encrypted IS NOT NULL AND key_version > 0)
-    ),
-    CONSTRAINT tenant_email_config_enabled_sender_chk CHECK (NOT enabled OR sender_verified)
 );
 
 -- ---------------------------------------------------------------------
@@ -313,13 +316,13 @@ CREATE TRIGGER trg_tenants_updated_at BEFORE UPDATE ON tenants
 CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+CREATE TRIGGER trg_user_permissions_updated_at BEFORE UPDATE ON user_permissions
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 CREATE TRIGGER trg_tenant_credentials_updated_at BEFORE UPDATE ON tenant_eganow_credentials
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TRIGGER trg_tenant_notification_settings_updated_at BEFORE UPDATE ON tenant_notification_settings
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-CREATE TRIGGER trg_tenant_email_config_updated_at BEFORE UPDATE ON tenant_email_config
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TRIGGER trg_kyc_documents_updated_at BEFORE UPDATE ON kyc_documents

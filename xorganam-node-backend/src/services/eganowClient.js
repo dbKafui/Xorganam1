@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { getTenantEganowContext, getMerchantEganowContext, getInstitutionEganowContext, TenantCredentialsError, InstitutionCredentialsError } from './credentialsService.js'
+import { normalizeInstitutionMomoNetwork } from './institutionPaymentMethods.js'
 
 const DEFAULT_EGANOW_BASE_URL = 'https://developer.deveganowapi.com'
 
@@ -117,6 +118,8 @@ function normalizeEganowResponse(data) {
       status: null,
       reference: null,
       transactionId: null,
+      amount: null,
+      currency: null,
       message: null,
       eganowReference: null
     }
@@ -129,6 +132,8 @@ function normalizeEganowResponse(data) {
       status: value || null,
       reference: null,
       transactionId: null,
+      amount: null,
+      currency: null,
       message: value || null,
       eganowReference: null
     }
@@ -138,6 +143,8 @@ function normalizeEganowResponse(data) {
   const normalizedStatus = normalizeGatewayStatusValue(rawStatus)
   const reference = data.eganowReferenceNo || data.EganowReferenceNo || data.reference || data.referenceNo || null
   const transactionId = data.transactionId || data.TransactionId || data.transactionReference || data.transaction_id || null
+  const amount = data.amount ?? data.transactionAmount ?? data.TransactionAmount ?? null
+  const currency = data.currency ?? data.transCurrencyIso ?? data.currencyCode ?? null
   const message = data.message || data.messageSuccessfulOrFailed || data.error || data.FailureReason || null
 
   const hasEganowShape = Object.prototype.hasOwnProperty.call(data, 'transactionStatus') ||
@@ -158,6 +165,8 @@ function normalizeEganowResponse(data) {
     status: normalizedStatus || (rawStatus === null && hasEganowShape ? 'PENDING' : null),
     reference,
     transactionId,
+    amount,
+    currency,
     message,
     redirectHtml: data.redirectHtml ?? data.data?.redirectHtml ?? null,
     eganowReference: reference
@@ -402,9 +411,9 @@ export async function disburseToMobileMoney(tenantId, { reference, amount, curre
     async () => {
       const isBank = String(destinationType).toUpperCase() === 'BANK'
       const normalizedDestination = isBank ? String(accountNoOrCardNoOrMsisdn || '').replace(/\s/g, '') : normalizeMsisdnInput(accountNoOrCardNoOrMsisdn)
-      let paypartnerCode = normalizePaypartnerCode(network)
+      let paypartnerCode = isBank ? normalizePaypartnerCode(network) : normalizeInstitutionMomoNetwork(network)
       const inferredPaypartnerCode = isBank ? null : inferPaypartnerCodeFromMsisdn(normalizedDestination)
-      if (inferredPaypartnerCode) {
+      if (!paypartnerCode && inferredPaypartnerCode) {
         paypartnerCode = inferredPaypartnerCode
       }
 
@@ -475,11 +484,11 @@ export async function getPayoutWalletBalance(tenantId, _accountId, merchantId = 
         data: {},
         headers: { 'Content-Type': 'application/json' }
       })
-      const balance = Number(response.data?.balance)
-      if (!Number.isFinite(balance) || balance < 0) {
+      const balance = response.data?.balance
+      if (balance === null || balance === undefined || !/^\d+(?:\.\d{1,2})?$/.test(String(balance))) {
         throw new EganowApiError('Eganow returned an invalid payout-wallet balance.', tenantId, response.status, response.data)
       }
-      return balance
+      return String(balance)
     },
     { tenantId, operation: 'PayoutWalletBalance' }
   )

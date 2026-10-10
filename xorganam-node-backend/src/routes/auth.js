@@ -9,6 +9,9 @@ import { createSession, listSessionsForUser, revokeCurrentSession } from '../ser
 import { requestPasswordReset, resetPassword } from '../services/passwordResetService.js'
 import { requestEmailVerification, verifyEmailAddress } from '../services/emailVerificationService.js'
 import { auditRequest, writePlatformAudit } from '../services/auditService.js'
+import { authPolicy } from '../config/authPolicy.js'
+import { clearFailedLoginState, isLoginLocked, recordFailedLogin } from '../services/loginSecurityService.js'
+import { clearAdminSessionCookie, setAdminSessionCookie } from '../security/adminSessionCookie.js'
 
 export const authRouter = Router()
 
@@ -30,6 +33,7 @@ authRouter.post('/login', async (req, res) => {
   const { rows } = await query(
     `SELECT u.id, u.tenant_id, u.merchant_id, u.first_name, u.last_name, u.email, u.password_hash, u.role, u.is_active,
             u.mfa_enabled, u.token_version, u.password_reset_required, u.email_verified_at,
+            u.failed_login_attempts, u.login_locked_until,
             t.company_name AS tenant_company_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -51,6 +55,21 @@ authRouter.post('/login', async (req, res) => {
 
   const user = rows[0]
 
+  if (isLoginLocked(user.login_locked_until)) {
+    await writePlatformAudit({
+      actorUserId: user.id,
+      tenantId: user.tenant_id,
+      action: 'LOGIN_BLOCKED_ACCOUNT_LOCKED',
+      resourceType: 'user',
+      resourceId: user.id,
+      details: { lockedUntil: user.login_locked_until },
+      ipAddress: req.ip || null,
+      userAgent: req.headers['user-agent'] || null,
+      requestId: req.id || null
+    })
+    return res.status(423).json({ message: 'Sign-in is temporarily locked. Try again later or reset your password.' })
+  }
+
   if (!user.is_active) {
     await writePlatformAudit({
       action: 'LOGIN_FAILED',
@@ -67,12 +86,17 @@ authRouter.post('/login', async (req, res) => {
 
   const valid = await verifyPassword(password, user.password_hash)
   if (!valid) {
+    const attempts = await recordFailedLogin(user.id, authPolicy)
     await writePlatformAudit({
       action: 'LOGIN_FAILED',
       resourceType: 'user',
       resourceId: user.id,
       tenantId: user.tenant_id,
-      details: { reason: 'invalid_password' },
+      details: {
+        reason: 'invalid_password',
+        failedAttempts: attempts?.failed_login_attempts || 0,
+        accountLocked: Boolean(attempts?.login_locked_until)
+      },
       ipAddress: req.ip || null,
       userAgent: req.headers['user-agent'] || null,
       requestId: req.id || null
@@ -113,7 +137,27 @@ authRouter.post('/login', async (req, res) => {
     })
   }
 
+  const { rows: priorSessions } = await query(
+    `SELECT host(ip_address) AS ip_address FROM sessions
+      WHERE user_id = $1 AND ip_address IS NOT NULL
+      ORDER BY created_at DESC LIMIT 1`,
+    [user.id]
+  )
+  if (priorSessions[0]?.ip_address && req.ip && priorSessions[0].ip_address !== req.ip) {
+    await writePlatformAudit({
+      actorUserId: user.id,
+      tenantId: user.tenant_id,
+      action: 'LOGIN_SUSPICIOUS_IP_CHANGE',
+      resourceType: 'user',
+      resourceId: user.id,
+      details: { priorIpAddress: priorSessions[0].ip_address, ipAddress: req.ip },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || null,
+      requestId: req.id || null
+    })
+  }
   await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id])
+  await clearFailedLoginState(user.id)
   const mfaRequired = await isMfaRequired('TENANT', user.id)
   if (!mfaRequired) {
     const token = await createSession(user, req)
@@ -129,11 +173,13 @@ authRouter.post('/login', async (req, res) => {
       userAgent: req.headers['user-agent'] || null,
       requestId: req.id || null
     })
-    return res.json({
-      mfaRequired: false,
-      token,
-      user: mapUser(user)
-    })
+    const response = { mfaRequired: false, user: mapUser(user) }
+    if (user.role === 'PLATFORM_ADMIN') {
+      setAdminSessionCookie(res, token)
+    } else {
+      response.token = token
+    }
+    return res.json(response)
   }
   await writePlatformAudit({
     actorUserId: user.id,
@@ -161,6 +207,7 @@ authRouter.post('/logout', authenticate, asyncHandler(async (req, res) => {
     'user_logout'
   )
   if (!revoked) return res.status(404).json({ message: 'Session no longer exists.' })
+  clearAdminSessionCookie(res)
   res.status(204).send()
 }))
 

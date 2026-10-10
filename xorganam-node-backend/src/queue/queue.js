@@ -5,6 +5,7 @@ import { filterQueueFailuresByTenant } from '../services/operationalHealthServic
 import { replayCreditWebhookJob } from '../services/creditWebhookReplay.js'
 import { query } from '../db/pool.js'
 import { serializeEmailMessageForQueue } from '../email/emailMessagePolicy.js'
+import { paymentRecoveryPolicy } from '../config/paymentRecoveryPolicy.js'
 
 // One shared Redis connection, one shared queue, used by every tenant.
 // Tenant isolation for job PROCESSING happens at the job-data level
@@ -20,7 +21,7 @@ let creditWebhookQueue = null
 let creditReminderQueue = null
 let creditCashSweepQueue = null
 let institutionLoanRecoveryQueue = null
-let emailDeliveryQueue = null
+let tenantEmailDeliveryQueue = null
 let connectError = null
 
 function createRedisConnection() {
@@ -185,8 +186,8 @@ export async function enqueueCollectForMeJob(jobData) {
       // queue a duplicate sweep+payout job. Use a sanitized jobId
       // (BullMQ forbids certain characters such as ':').
       jobId: makeSafeJobId('collect-for-me', jobData.retryToken ? `${jobData.transactionId}-${jobData.retryToken}` : jobData.transactionId),
-      attempts: 5,
-      backoff: { type: 'exponential', delay: 2000 },
+      attempts: paymentRecoveryPolicy.collectionQueueAttempts,
+      backoff: { type: 'exponential', delay: paymentRecoveryPolicy.collectionQueueBackoffMs },
       removeOnComplete: { age: 60 * 60 * 24 * 7 }, // keep 7 days for audit
       removeOnFail: { age: 60 * 60 * 24 * 30 } // keep failures 30 days
     })
@@ -206,8 +207,8 @@ export async function enqueueCollectionStatusPollJob(jobData) {
     return await queue.add('poll-collection-status', jobData, {
       // Use sanitized jobId to avoid characters rejected by BullMQ.
       jobId: makeSafeJobId('status-poll', jobData.transactionId),
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 2000 },
+      attempts: paymentRecoveryPolicy.statusPollQueueAttempts,
+      backoff: { type: 'exponential', delay: paymentRecoveryPolicy.statusPollQueueBackoffMs },
       removeOnComplete: { age: 60 * 60 * 24 * 7 },
       removeOnFail: { age: 60 * 60 * 24 * 30 }
     })
@@ -233,45 +234,6 @@ export async function enqueuePeriodicSettlementJob(jobData = {}) {
 export function getCreditWebhookQueue() {
   if (!creditWebhookQueue) creditWebhookQueue = new Queue(CREDIT_WEBHOOK_QUEUE, { connection: getRedisConnection() })
   return creditWebhookQueue
-}
-
-export function getTenantEmailDeliveryQueue() {
-  if (!emailDeliveryQueue) emailDeliveryQueue = new Queue(TENANT_EMAIL_DELIVERY_QUEUE, { connection: getRedisConnection() })
-  return emailDeliveryQueue
-}
-
-export async function enqueueTenantEmail({ tenantId, message }) {
-  const { emailDeliveryPolicy } = await import('../config/emailDelivery.js')
-  const queue = getTenantEmailDeliveryQueue()
-  const { rows } = await query(
-    `INSERT INTO email_delivery_records (tenant_id, status, recipient_count)
-     VALUES ($1, 'PENDING', $2)
-     RETURNING id`,
-    [tenantId, emailRecipientCount(message)]
-  )
-  const deliveryId = rows[0].id
-  try {
-    await queue.add('send-tenant-email', { tenantId, message: serializeEmailMessageForQueue(message), deliveryId }, {
-      jobId: `tenant-email-${deliveryId}`,
-      attempts: emailDeliveryPolicy.retryAttempts,
-      backoff: { type: 'exponential', delay: emailDeliveryPolicy.retryBackoffMs },
-      removeOnComplete: { age: emailDeliveryPolicy.deliveryRecordRetentionDays * 24 * 60 * 60 },
-      removeOnFail: { age: emailDeliveryPolicy.deliveryRecordRetentionDays * 24 * 60 * 60 }
-    })
-  } catch (error) {
-    await query(
-      `UPDATE email_delivery_records SET status = 'FAILED', error_code = 'QUEUE_UNAVAILABLE', completed_at = now()
-        WHERE id = $1`,
-      [deliveryId]
-    )
-    throw error
-  }
-  return { deliveryId, status: 'QUEUED' }
-}
-
-function emailRecipientCount(message) {
-  const values = [message?.to, message?.cc, message?.bcc].flatMap((value) => value === undefined || value === null ? [] : Array.isArray(value) ? value : [value])
-  return values.length
 }
 
 export async function enqueueCreditWebhookDelivery(eventId) {
@@ -316,4 +278,45 @@ export function getCreditCashSweepQueue() {
 export function getInstitutionLoanRecoveryQueue() {
   if (!institutionLoanRecoveryQueue) institutionLoanRecoveryQueue = new Queue(INSTITUTION_LOAN_RECOVERY_QUEUE, { connection: getRedisConnection() })
   return institutionLoanRecoveryQueue
+}
+
+export function getTenantEmailDeliveryQueue() {
+  if (!tenantEmailDeliveryQueue) {
+    tenantEmailDeliveryQueue = new Queue(TENANT_EMAIL_DELIVERY_QUEUE, { connection: getRedisConnection() })
+  }
+  return tenantEmailDeliveryQueue
+}
+
+export async function enqueueTenantEmail({ tenantId, message }) {
+  const { emailDeliveryPolicy } = await import('../config/emailDelivery.js')
+  const recipients = [...(Array.isArray(message?.to) ? message.to : [message?.to]),
+    ...(Array.isArray(message?.cc) ? message.cc : message?.cc ? [message.cc] : []),
+    ...(Array.isArray(message?.bcc) ? message.bcc : message?.bcc ? [message.bcc] : [])].filter(Boolean)
+  const { rows } = await query(
+    `INSERT INTO email_delivery_records (tenant_id, status, recipient_count)
+     VALUES ($1, 'PENDING', $2) RETURNING id`,
+    [tenantId, recipients.length]
+  )
+  const deliveryId = rows[0].id
+  try {
+    const job = await getTenantEmailDeliveryQueue().add('deliver-tenant-email', {
+      tenantId,
+      deliveryId,
+      message: serializeEmailMessageForQueue(message)
+    }, {
+      jobId: makeSafeJobId('tenant-email', deliveryId),
+      attempts: emailDeliveryPolicy.retryAttempts,
+      backoff: { type: 'exponential', delay: emailDeliveryPolicy.retryBackoffMs },
+      removeOnComplete: { age: emailDeliveryPolicy.deliveryRecordRetentionDays * 24 * 60 * 60 },
+      removeOnFail: { age: emailDeliveryPolicy.deliveryRecordRetentionDays * 24 * 60 * 60 }
+    })
+    return { deliveryId, jobId: String(job.id), status: 'PENDING' }
+  } catch (error) {
+    await query(
+      `UPDATE email_delivery_records SET status = 'FAILED', error_code = 'QUEUE_UNAVAILABLE', completed_at = now()
+        WHERE id = $1`,
+      [deliveryId]
+    )
+    throw error
+  }
 }

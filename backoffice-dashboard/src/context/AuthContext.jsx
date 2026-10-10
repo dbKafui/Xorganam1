@@ -7,32 +7,23 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     localStorage.removeItem('xorganam_token')
     localStorage.removeItem('xorganam_user')
-    const stored = sessionStorage.getItem('xorganam_user')
-    return stored ? JSON.parse(stored) : null
+    sessionStorage.removeItem('xorganam_token')
+    sessionStorage.removeItem('xorganam_user')
+    return null
   })
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    const token = sessionStorage.getItem('xorganam_token')
-    if (!token) {
-      setReady(true)
-      return
-    }
     authApi
       .me()
       .then((profile) => {
         if (!profile.isPlatformAdmin) {
-          sessionStorage.removeItem('xorganam_token')
-          sessionStorage.removeItem('xorganam_user')
           setUser(null)
           return
         }
         setUser(profile)
-        sessionStorage.setItem('xorganam_user', JSON.stringify(profile))
       })
       .catch(() => {
-        sessionStorage.removeItem('xorganam_token')
-        sessionStorage.removeItem('xorganam_user')
         setUser(null)
       })
       .finally(() => setReady(true))
@@ -47,9 +38,7 @@ export function AuthProvider({ children }) {
       )
     }
 
-    if (!result.mfaRequired && result.token) {
-      sessionStorage.setItem('xorganam_token', result.token)
-      sessionStorage.setItem('xorganam_user', JSON.stringify(result.user))
+    if (!result.mfaRequired) {
       setUser(result.user)
     }
 
@@ -58,8 +47,6 @@ export function AuthProvider({ children }) {
 
   const completeMfa = useCallback(async (challengeToken, code) => {
     const result = await authApi.verifyMfa(challengeToken, code)
-    sessionStorage.setItem('xorganam_token', result.token)
-    sessionStorage.setItem('xorganam_user', JSON.stringify(result.user))
     setUser(result.user)
     return result.user
   }, [])
@@ -72,10 +59,10 @@ export function AuthProvider({ children }) {
     } catch {
       // The browser state is still cleared so a stale token cannot remain usable.
     }
-    sessionStorage.removeItem('xorganam_token')
-    sessionStorage.removeItem('xorganam_user')
     localStorage.removeItem('xorganam_token')
     localStorage.removeItem('xorganam_user')
+    sessionStorage.removeItem('xorganam_token')
+    sessionStorage.removeItem('xorganam_user')
     setUser(null)
     window.location.href = '/login'
   }, [])

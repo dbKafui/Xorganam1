@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { publicApi } from '../api/client'
 import { createIdempotencyKey } from '../lib/idempotency'
 
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '')
   if (digits.startsWith('0') && digits.length === 10) return `233${digits.slice(1)}`
@@ -62,7 +63,7 @@ export default function HostedInstallmentPayment() {
         <p className="merchant">{installment.merchantName}</p>
         <h1>Installment {installment.installmentNumber}</h1>
         <div className="receipt">
-          <div className="receipt-row"><span>Amount due</span><strong className="mono">GHS {Number(installment.amountDue).toFixed(2)}</strong></div>
+          <div className="receipt-row"><span>Amount due</span><strong className="mono">{formatCurrencyAmount(installment.amountDue, 'GHS')}</strong></div>
           <div className="receipt-row"><span>Due date</span><span>{String(installment.dueDate).slice(0, 10)}</span></div>
           <div className="receipt-row"><span>Status</span><span>{installment.status.replaceAll('_', ' ').toLowerCase()}</span></div>
         </div>

@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { publicApi } from '../api/client'
 
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 const storefrontBase = import.meta.env.VITE_STOREFRONT_PUBLIC_URL || ''
-function money(value) { return `GHS ${Number(value || 0).toFixed(2)}` }
+function money(value) { return formatCurrencyAmount(value || 0, 'GHS') }
 
 export default function Marketplace() {
   const [categories, setCategories] = useState([])

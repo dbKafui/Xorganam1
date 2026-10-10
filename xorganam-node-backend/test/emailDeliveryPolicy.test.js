@@ -13,6 +13,9 @@ function validEnvironment(overrides = {}) {
     EMAIL_MAX_RECIPIENTS: '100',
     EMAIL_WORKER_CONCURRENCY: '5',
     EMAIL_DELIVERY_RECORD_RETENTION_DAYS: '90',
+    EMAIL_TEST_RATE_LIMIT: '5',
+    EMAIL_TEST_RATE_WINDOW_MS: '3600000',
+    EMAIL_SENDER_CHALLENGE_TTL_MS: '86400000',
     EMAIL_ALLOWED_SMTP_PORTS: '25,465,587,2525',
     EMAIL_SMTP_STARTTLS_PORTS: '25,587,2525',
     EMAIL_SMTP_IMPLICIT_TLS_PORT: '465',
@@ -61,5 +64,11 @@ describe('tenant email delivery policy', () => {
     assert.throws(() => parseEmailDeliveryPolicy(validEnvironment({
       EMAIL_DEFAULT_SETTINGS_JSON: '{"encryption":"starttls"}'
     }), 'test'), /missing required provider field host[\s\S]*missing required provider field port/)
+  })
+
+  it('rejects malformed configured SMTP CIDRs at startup', () => {
+    assert.throws(() => parseEmailDeliveryPolicy(validEnvironment({
+      EMAIL_BLOCKED_SMTP_CIDRS: 'not-a-cidr'
+    }), 'test'), /EMAIL_BLOCKED_SMTP_CIDRS contains an invalid CIDR/)
   })
 })

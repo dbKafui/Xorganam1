@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { reportsApi } from '../api/reports'
 import { tenantsApi } from '../api/tenants'
 import { merchantsApi } from '../api/merchants'
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 
 function money(n) {
-  return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(n ?? 0, 'GHS')
 }
 
 function reportSections(report, title) {

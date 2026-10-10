@@ -9,6 +9,8 @@ const { Client } = pg;
 const databaseDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../db');
 const throughArgument = process.argv.find((argument) => argument.startsWith('--through='));
 const throughVersion = throughArgument?.split('=', 2)[1] ?? null;
+const downArgument = process.argv.find((argument) => argument.startsWith('--down='));
+const downVersion = downArgument?.split('=', 2)[1] ?? null;
 
 function migrationVersion(name) {
   return name.split('_', 1)[0];
@@ -21,7 +23,7 @@ function checksum(contents) {
 async function getMigrations() {
   const names = await readdir(databaseDirectory);
   return names
-    .filter((name) => /^\d+_.+\.sql$/.test(name))
+    .filter((name) => /^\d+_.+\.sql$/.test(name) && !name.endsWith('.down.sql'))
     .sort()
     .filter((name) => !throughVersion || migrationVersion(name) <= throughVersion);
 }
@@ -36,6 +38,34 @@ async function run() {
   await client.connect();
 
   try {
+    if (downVersion) {
+      const { rows: appliedRows } = await client.query(
+        'SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1',
+      );
+      const latest = appliedRows[0]?.name;
+      if (!latest || migrationVersion(latest) !== downVersion) {
+        throw new Error(`Only the latest applied migration can be rolled back; requested ${downVersion}, latest is ${latest || 'none'}.`);
+      }
+      const downPath = path.join(databaseDirectory, latest.replace(/\.sql$/, '.down.sql'));
+      let downSql;
+      try {
+        downSql = await readFile(downPath, 'utf8');
+      } catch {
+        throw new Error(`Rollback SQL is missing for ${latest}: ${path.basename(downPath)}.`);
+      }
+      process.stdout.write(`Rolling back ${latest}\n`);
+      await client.query('BEGIN');
+      try {
+        await client.query(downSql);
+        await client.query('DELETE FROM schema_migrations WHERE name = $1', [latest]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      }
+      return;
+    }
+
     const migrations = await getMigrations();
     const { rows: appliedRows } = await client.query(
       'SELECT name, checksum FROM schema_migrations',

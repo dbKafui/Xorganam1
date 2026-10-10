@@ -8,6 +8,7 @@ import { authenticate } from '../middleware/auth.js'
 import { institutionAuthenticate } from '../middleware/institutionAuth.js'
 import { asyncHandler } from '../middleware/asyncHandler.js'
 import { consumeMfaRecoveryCode, enableMfaWithRecoveryCodes, replaceMfaRecoveryCodes } from '../services/mfaRecoveryService.js'
+import { setAdminSessionCookie } from '../security/adminSessionCookie.js'
 
 export const mfaRouter = Router()
 const ENCRYPTION_CONTEXT = 'xorganam-authenticator-mfa-v1'
@@ -146,6 +147,9 @@ mfaRouter.post('/verify', async (req, res, next) => {
     if (principal.kind === 'INSTITUTION') {
       return res.json({ token: session, staff: { id: row.id, institutionId: row.institution_id, institutionName: row.institution_name, branchId: row.branch_id || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role }, ...(recoveryCodes ? { recoveryCodes } : {}), recoveryCodeUsed: usedRecoveryCode })
     }
-    res.json({ token: session, user: { id: row.id, tenantId: row.tenant_id, merchantId: row.merchant_id || null, tenantCompanyName: row.tenant_company_name || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role, isPlatformAdmin: row.role === 'PLATFORM_ADMIN' }, ...(recoveryCodes ? { recoveryCodes } : {}), recoveryCodeUsed: usedRecoveryCode })
+    const response = { user: { id: row.id, tenantId: row.tenant_id, merchantId: row.merchant_id || null, tenantCompanyName: row.tenant_company_name || null, firstName: row.first_name, lastName: row.last_name, email: row.email, role: row.role, isPlatformAdmin: row.role === 'PLATFORM_ADMIN' }, ...(recoveryCodes ? { recoveryCodes } : {}), recoveryCodeUsed: usedRecoveryCode }
+    if (row.role === 'PLATFORM_ADMIN') setAdminSessionCookie(res, session)
+    else response.token = session
+    res.json(response)
   } catch (error) { next(error) }
 })

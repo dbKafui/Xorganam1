@@ -9,10 +9,12 @@
     "worker": "node src/workers/index.js",
     "dev": "node --watch src/server.js",
     "db:migrate": "node src/scripts/migrate.js",
+    "email:rotate-secrets": "node src/scripts/rotateTenantEmailSecrets.js",
     "seed:admin": "node src/scripts/seedPlatformAdmin.js",
     "lint": "eslint . --ext .js",
     "format": "prettier --write .",
-    "test": "node --test --test-concurrency=1 ./test/*.test.js"
+    "test": "node --test --test-concurrency=1 ./test/*.test.js",
+    "test:integration": "node --test --test-concurrency=1 ./test/integration/*.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-sesv2": "^3.1148.0",
@@ -25,15 +27,20 @@
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
     "ioredis": "^5.4.1",
+    "ipaddr.js": "^2.5.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^10.0.16",
     "pg": "^8.12.0",
-    "sanitize-html": "^2.17.7"
+    "sanitize-html": "^2.17.7",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^12.2.0",
+    "@testcontainers/redis": "^12.2.0",
     "eslint": "^8.56.0",
     "eslint-config-prettier": "^9.0.0",
-    "prettier": "^3.0.0"
+    "prettier": "^3.0.0",
+    "testcontainers": "^12.2.0"
   }
 }

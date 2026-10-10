@@ -9,10 +9,12 @@ import { markStorefrontOrderPaid } from '../services/storefrontOrderService.js'
 import { MAX_SPLIT_PAYOUT_RETRIES, updateTransactionStatus } from '../services/transactionStateService.js'
 import { updateInstitutionTransactionStatus } from '../services/institutionStateService.js'
 import { recordOperationalFailure } from '../services/operationalFailureService.js'
+import { validateProviderResult } from '../services/providerResultValidation.js'
+import { paymentRecoveryPolicy } from '../config/paymentRecoveryPolicy.js'
 
-const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10)
-const POLL_DELAY_MS = parseInt(process.env.COLLECTION_STATUS_POLL_DELAY_MS || '5000', 10)
-const MAX_POLL_ATTEMPTS = parseInt(process.env.COLLECTION_STATUS_POLL_ATTEMPTS || '12', 10)
+const WORKER_CONCURRENCY = paymentRecoveryPolicy.workerConcurrency
+const POLL_DELAY_MS = paymentRecoveryPolicy.statusPollDelayMs
+const MAX_POLL_ATTEMPTS = paymentRecoveryPolicy.statusPollMaxAttempts
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -214,6 +216,26 @@ async function processCollectionStatusPollJob(job) {
       }
 
       return { pending: true }
+    }
+
+    if (isGatewaySuccess(result.status)) {
+      const validation = validateProviderResult({
+        expectedAmount: String(txn.amount),
+        expectedCurrency: txn.currency,
+        expectedReference: txn.eganow_reference || txn.internal_reference,
+        actualAmount: result.amount ?? result.transactionAmount ?? result.TransactionAmount,
+        actualCurrency: result.currency ?? result.transCurrencyIso ?? result.currencyCode,
+        actualReference: result.reference ?? result.eganowReference
+      })
+      if (!validation.valid) {
+        const reason = `Provider result mismatch for ${validation.mismatches.join(', ')}. Reconcile manually before applying success.`
+        await query(
+          `UPDATE transactions SET payment_gateway_status = $2, failure_reason = $3, updated_at = now()
+            WHERE id = $1 AND status = 'PENDING'`,
+          [transactionId, result.status, reason]
+        )
+        throw Object.assign(new Error(reason), { code: 'PROVIDER_RESULT_MISMATCH' })
+      }
     }
 
     await updateCollectionTransactionFields(transactionId, {

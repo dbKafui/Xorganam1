@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import crypto from 'node:crypto'
-import { query } from '../db/pool.js'
+import { query, withTransaction } from '../db/pool.js'
 import { encrypt } from '../security/encryption.js'
 import { authenticate, requireRole, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { initiateCollection, CollectionRejectedError } from '../services/collectionService.js'
@@ -10,6 +10,7 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import { safeTenantUploadDir, hasAllowedDocumentSignature, encryptKycFile, decryptKycFile, newKycDocumentFilename } from '../services/fileStorage.js'
 import { isValidGhanaCardNumber, sanitizeInput } from '../middleware/sanitizeInput.js'
+import { writePlatformAudit } from '../services/auditService.js'
 
 export const tenantsRouter = Router()
 
@@ -48,7 +49,7 @@ tenantsRouter.post(
     const apiKeySalt = crypto.randomBytes(16).toString('hex')
     const { rows } = await query(
       `INSERT INTO tenants (company_name, contact_phone, contact_email, api_key_salt, status, approved_at)
-       VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 = 'ACTIVE' THEN now() ELSE NULL END)
+        VALUES ($1, $2, $3, $4, $5, CASE WHEN $5::tenant_status = 'ACTIVE'::tenant_status THEN now() ELSE NULL END)
        RETURNING id, company_name, contact_phone, contact_email, status, created_at, approved_at`,
       [companyName, contactPhone, contactEmail, apiKeySalt, status]
     )
@@ -95,7 +96,14 @@ tenantsRouter.put(
       return res.status(400).json({ message: 'Invalid tenant status.' })
     }
 
-    const { rows } = await query(
+    const result = await withTransaction(async (client) => {
+      const { rows: previousRows } = await client.query(
+        'SELECT company_name, contact_phone, contact_email, status FROM tenants WHERE id = $1 FOR UPDATE',
+        [req.params.tenantId]
+      )
+      if (!previousRows.length) return null
+      const previous = previousRows[0]
+      const { rows } = await client.query(
       `UPDATE tenants
           SET company_name = COALESCE($2, company_name),
               contact_phone = COALESCE($3, contact_phone),
@@ -109,10 +117,28 @@ tenantsRouter.put(
         WHERE id = $1
         RETURNING id, company_name, contact_phone, contact_email, status, created_at, approved_at`,
       [req.params.tenantId, companyName || null, contactPhone || null, contactEmail || null, status || null]
-    )
+      )
+      const current = rows[0]
+      await writePlatformAudit({
+        actorUserId: req.user.id,
+        tenantId: current.id,
+        action: 'TENANT_CONFIGURATION_CHANGED',
+        resourceType: 'tenant',
+        resourceId: current.id,
+        details: {
+          previous: { companyName: previous.company_name, contactPhone: previous.contact_phone, contactEmail: previous.contact_email, status: previous.status },
+          current: { companyName: current.company_name, contactPhone: current.contact_phone, contactEmail: current.contact_email, status: current.status }
+        },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null,
+        client
+      })
+      return current
+    })
 
-    if (rows.length === 0) return res.status(404).json({ message: 'Tenant not found.' })
-    res.json(mapTenant(rows[0]))
+    if (!result) return res.status(404).json({ message: 'Tenant not found.' })
+    res.json(mapTenant(result))
   })
 )
 
@@ -264,30 +290,58 @@ tenantsRouter.post(
     if (!['APPROVED', 'REJECTED'].includes(decision)) {
       return res.status(400).json({ message: "decision must be 'APPROVED' or 'REJECTED'." })
     }
-
-    const { rows } = await query('SELECT id, tenant_id FROM kyc_documents WHERE id = $1', [req.params.documentId])
-    if (rows.length === 0) return res.status(404).json({ message: 'Document not found.' })
-    const doc = rows[0]
-
-    await query(
-      `UPDATE kyc_documents
-          SET verification_status = $2, rejection_reason = $3, verified_by_user_id = $4, verified_at = now()
-        WHERE id = $1`,
-      [doc.id, decision, decision === 'REJECTED' ? rejectionReason || 'Not specified' : null, req.user.id]
-    )
-
-    if (decision === 'REJECTED') {
-      await query(`UPDATE tenants SET status = 'REJECTED' WHERE id = $1`, [doc.tenant_id])
-    } else {
-      const remaining = await query(
-        `SELECT COUNT(*)::int AS pending_count FROM kyc_documents
-          WHERE tenant_id = $1 AND id != $2 AND verification_status != 'APPROVED'`,
-        [doc.tenant_id, doc.id]
-      )
-      if (remaining.rows[0].pending_count === 0) {
-        await query(`UPDATE tenants SET status = 'ACTIVE', approved_at = now() WHERE id = $1`, [doc.tenant_id])
-      }
+    const normalizedReason = String(rejectionReason || '').trim()
+    if (decision === 'REJECTED' && (!normalizedReason || normalizedReason.length > 1000)) {
+      return res.status(400).json({ message: 'A rejection reason of at most 1000 characters is required.' })
     }
+    const reviewed = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        'SELECT id, tenant_id, verification_status FROM kyc_documents WHERE id = $1 FOR UPDATE',
+        [req.params.documentId]
+      )
+      if (!rows.length) return null
+      const doc = rows[0]
+      const reason = decision === 'REJECTED' ? normalizedReason : null
+      await client.query(
+        `UPDATE kyc_documents
+            SET verification_status = $2, rejection_reason = $3, verified_by_user_id = $4, verified_at = now()
+          WHERE id = $1`,
+        [doc.id, decision, reason, req.user.id]
+      )
+
+      if (decision === 'REJECTED') {
+        await client.query(`UPDATE tenants SET status = 'REJECTED' WHERE id = $1`, [doc.tenant_id])
+      } else {
+        const remaining = await client.query(
+          `SELECT COUNT(*)::int AS pending_count FROM kyc_documents
+            WHERE tenant_id = $1 AND id != $2 AND verification_status != 'APPROVED'`,
+          [doc.tenant_id, doc.id]
+        )
+        if (remaining.rows[0].pending_count === 0) {
+          await client.query(`UPDATE tenants SET status = 'ACTIVE', approved_at = now() WHERE id = $1`, [doc.tenant_id])
+        }
+      }
+      await client.query(
+        `INSERT INTO kyc_document_review_history
+          (kyc_document_id, tenant_id, actor_user_id, previous_status, next_status, rejection_reason)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [doc.id, doc.tenant_id, req.user.id, doc.verification_status, decision, reason]
+      )
+      await writePlatformAudit({
+        actorUserId: req.user.id,
+        tenantId: doc.tenant_id,
+        action: decision === 'APPROVED' ? 'KYC_DOCUMENT_APPROVED' : 'KYC_DOCUMENT_REJECTED',
+        resourceType: 'kyc_document',
+        resourceId: doc.id,
+        details: { previousStatus: doc.verification_status, nextStatus: decision, rejectionReason: reason },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+        requestId: req.id || null,
+        client
+      })
+      return doc
+    })
+    if (!reviewed) return res.status(404).json({ message: 'Document not found.' })
 
     res.json({ message: 'Review recorded.', status: decision })
   })
@@ -343,7 +397,14 @@ tenantsRouter.put(
       webhookSecret ? encrypt(webhookSecret, tenant.api_key_salt) : null
     ])
 
-    await query(
+    await withTransaction(async (client) => {
+    const { rows: previousRows } = await client.query(
+      `SELECT eganow_api_key_encrypted, eganow_client_secret_encrypted, eganow_access_token_encrypted,
+              eganow_base_url, eganow_callback_url, webhook_secret_encrypted, eganow_merchant_code, is_enabled
+         FROM tenant_eganow_credentials WHERE tenant_id = $1 FOR UPDATE`, [tenantId]
+    )
+    const previous = previousRows[0] || {}
+    const { rows: currentRows } = await client.query(
       `UPDATE tenant_eganow_credentials
           SET eganow_api_key_encrypted = COALESCE($2, eganow_api_key_encrypted),
               eganow_client_secret_encrypted = COALESCE($3, eganow_client_secret_encrypted),
@@ -353,7 +414,9 @@ tenantsRouter.put(
               webhook_secret_encrypted = COALESCE($7, webhook_secret_encrypted),
               eganow_merchant_code = COALESCE($8, eganow_merchant_code),
               is_enabled = COALESCE($9, is_enabled)
-        WHERE tenant_id = $1`,
+        WHERE tenant_id = $1
+        RETURNING eganow_api_key_encrypted, eganow_client_secret_encrypted, eganow_access_token_encrypted,
+                  eganow_callback_url, webhook_secret_encrypted, eganow_merchant_code, is_enabled`,
       [
         tenantId,
         encryptedUsername,
@@ -366,6 +429,31 @@ tenantsRouter.put(
         typeof isEnabled === 'boolean' ? isEnabled : null
       ]
     )
+    const current = currentRows[0]
+    await writePlatformAudit({
+      actorUserId: req.user.id, tenantId, action: 'TENANT_EGANOW_CREDENTIALS_CHANGED',
+      resourceType: 'tenant_eganow_credentials', resourceId: tenantId,
+      details: {
+        previous: {
+          usernameConfigured: Boolean(previous.eganow_api_key_encrypted),
+          passwordConfigured: Boolean(previous.eganow_client_secret_encrypted),
+          accessTokenConfigured: Boolean(previous.eganow_access_token_encrypted),
+          callbackConfigured: Boolean(previous.eganow_callback_url),
+          webhookSecretConfigured: Boolean(previous.webhook_secret_encrypted),
+          merchantCodeConfigured: Boolean(previous.eganow_merchant_code), isEnabled: previous.is_enabled ?? false
+        },
+        current: {
+          usernameConfigured: Boolean(current.eganow_api_key_encrypted),
+          passwordConfigured: Boolean(current.eganow_client_secret_encrypted),
+          accessTokenConfigured: Boolean(current.eganow_access_token_encrypted),
+          callbackConfigured: Boolean(current.eganow_callback_url),
+          webhookSecretConfigured: Boolean(current.webhook_secret_encrypted),
+          merchantCodeConfigured: Boolean(current.eganow_merchant_code), isEnabled: current.is_enabled
+        }
+      },
+      ipAddress: req.ip || null, userAgent: req.headers['user-agent'] || null, requestId: req.id || null, client
+    })
+    })
 
     res.json({ message: 'Eganow configuration updated.' })
   })
@@ -482,7 +570,7 @@ tenantsRouter.put(
 
       try {
         const result = await initiateCollection(merchantId, {
-          amount: Number(amount),
+          amount,
           msisdn,
           network,
           narration,

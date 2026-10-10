@@ -3,6 +3,17 @@ import test from 'node:test'
 
 const { TRANSACTION_STATUS_DEFINITIONS, normalizeTransactionStatus, isTerminalTransactionStatus, isSuccessfulTransactionStatus, isFailedTransactionStatus, isPendingTransactionStatus } = await import('../src/lib/statusContract.js')
 const { assertTransactionStatusTransition } = await import('../src/services/transactionStateService.js')
+const sharedStatusContract = await import('../../shared/paymentStatus.js')
+const checkoutStatusContract = await import('../../xorganam-checkout/src/lib/statusContract.js')
+const institutionStatusContract = await import('../../institution-portal/src/lib/statusContract.js')
+const backofficeStatusContract = await import('../../backoffice-dashboard/src/lib/statusContract.js')
+
+test('all frontends consume the shared payment status contract', () => {
+  assert.equal(checkoutStatusContract.PAYMENT_STATUS_CONTRACT, sharedStatusContract.PAYMENT_STATUS_CONTRACT)
+  assert.equal(institutionStatusContract.PAYMENT_STATUS_CONTRACT, sharedStatusContract.PAYMENT_STATUS_CONTRACT)
+  assert.equal(backofficeStatusContract.PAYMENT_STATUS_CONTRACT, sharedStatusContract.PAYMENT_STATUS_CONTRACT)
+  assert.equal(sharedStatusContract.normalizePaymentStatus('manual reconciliation required'), 'MANUAL_RECONCILIATION_REQUIRED')
+})
 
 test('defines the canonical transaction status contract', () => {
   assert.deepEqual(TRANSACTION_STATUS_DEFINITIONS.PENDING, {

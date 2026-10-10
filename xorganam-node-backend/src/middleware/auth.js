@@ -2,22 +2,47 @@ import { query } from '../db/pool.js'
 import { isMfaRequired } from '../services/mfaPolicy.js'
 import { ROLE_PERMISSIONS } from '../constants/permissions.js'
 import { validateSessionToken } from '../services/sessionService.js'
+import { auditPermissionBypass, auditPermissionDenied, auditPlatformRoleBypass } from '../services/auditService.js'
+import { getAdminSessionCookie } from '../security/adminSessionCookie.js'
+
+async function denyPermission(req, res, permissionType, resourceId, message, next) {
+  try {
+    await auditPermissionDenied(req, permissionType, resourceId)
+    return res.status(403).json({ message })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function continueWithPlatformBypass(req, permissionType, resourceId, next) {
+  try {
+    await auditPermissionBypass(req, permissionType, resourceId)
+    return next()
+  } catch (error) {
+    return next(error)
+  }
+}
 
 /**
- * Verifies the Bearer token and attaches req.user = { id, tenantId, role }.
+ * Verifies a Bearer token or the backoffice admin cookie and attaches req.user.
  * Also re-checks the user is still active in the database on every request
  * rather than trusting only the JWT claims - a deactivated user's existing
  * token is rejected immediately rather than staying valid until it expires.
  */
 export async function authenticate(req, res, next) {
   const header = req.headers.authorization
-  if (!header || !header.startsWith('Bearer ')) {
+  const cookieToken = header ? null : getAdminSessionCookie(req)
+  if (!header && !cookieToken) {
     return res.status(401).json({ message: 'Authentication required.' })
+  }
+  if (cookieToken && req.headers['x-xorganam-request'] !== '1') {
+    return res.status(403).json({ message: 'Cookie-authenticated requests require the dashboard request header.' })
   }
 
   let payload
   try {
-    payload = await validateSessionToken(header.slice('Bearer '.length))
+    if (header && !header.startsWith('Bearer ')) return res.status(401).json({ message: 'Authentication required.' })
+    payload = await validateSessionToken(cookieToken || header.slice('Bearer '.length))
   } catch {
     return res.status(401).json({ message: 'Invalid or expired session.' })
   }
@@ -37,6 +62,9 @@ export async function authenticate(req, res, next) {
     }
 
     const user = rows[0]
+    if (cookieToken && user.role !== 'PLATFORM_ADMIN') {
+      return res.status(401).json({ message: 'Invalid or expired session.' })
+    }
     if (user.token_version !== payload.tokenVersion) {
       return res.status(401).json({ message: 'Invalid or expired session.' })
     }
@@ -79,24 +107,39 @@ export function requireRole(minimumRole) {
     throw new Error(`Unknown role in requireRole(): ${minimumRole}`)
   }
 
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
 
-    if (req.user.isPlatformAdmin) return next()
+    if (req.user.isPlatformAdmin) {
+      try {
+        await auditPlatformRoleBypass(req, minimumRole)
+        return next()
+      } catch (error) {
+        return next(error)
+      }
+    }
 
     const userRank = ROLE_RANK[req.user.role] ?? 0
     if (userRank < minimumRank) {
-      return res.status(403).json({ message: 'You do not have permission to do this.' })
+      return denyPermission(req, res, `ROLE_AT_LEAST_${minimumRole}`, null, 'You do not have permission to do this.', next)
     }
     next()
   }
 }
 
 export function requireAnyRole(...roles) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
-    if (req.user.isPlatformAdmin || roles.includes(req.user.role)) return next()
-    return res.status(403).json({ message: 'You do not have permission to do this.' })
+    if (req.user.isPlatformAdmin) {
+      try {
+        await auditPlatformRoleBypass(req, roles)
+        return next()
+      } catch (error) {
+        return next(error)
+      }
+    }
+    if (roles.includes(req.user.role)) return next()
+    return denyPermission(req, res, `ROLE_ANY_OF_${roles.join('_')}`, null, 'You do not have permission to do this.', next)
   }
 }
 
@@ -112,9 +155,11 @@ export function requireOwnMerchantIfBranchManager(req, res, next) {
 /**
  * Restricts a route to PLATFORM_ADMIN only.
  */
-export function requirePlatformAdmin(req, res, next) {
+export async function requirePlatformAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
-  if (!req.user.isPlatformAdmin) return res.status(403).json({ message: 'Platform admin only.' })
+  if (!req.user.isPlatformAdmin) {
+    return denyPermission(req, res, 'PLATFORM_ADMIN_ONLY', null, 'Platform admin only.', next)
+  }
   next()
 }
 
@@ -179,7 +224,10 @@ export function requirePermission(permissionType) {
     if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
     
     // Platform admins always have all permissions
-    if (req.user.isPlatformAdmin) return next()
+    if (req.user.isPlatformAdmin) {
+      const resourceId = req.params.merchantId || req.query.merchantId || req.body?.merchantId || null
+      return continueWithPlatformBypass(req, permissionType, resourceId, next)
+    }
 
     // Check if user has the permission
     try {
@@ -189,7 +237,7 @@ export function requirePermission(permissionType) {
       }
       const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId, req.user.role)
       if (!hasPermission) {
-        return res.status(403).json({ message: `You do not have ${permissionType} permission.` })
+        return denyPermission(req, res, permissionType, resourceId, `You do not have ${permissionType} permission.`, next)
       }
       next()
     } catch (error) {
@@ -207,7 +255,10 @@ export function requireResourcePermission(permissionType, resourceIdParam) {
     if (!req.user) return res.status(401).json({ message: 'Authentication required.' })
     
     // Platform admins always have all permissions
-    if (req.user.isPlatformAdmin) return next()
+    if (req.user.isPlatformAdmin) {
+      const resourceId = req.params[resourceIdParam] || req.body?.[resourceIdParam] || req.query[resourceIdParam] || null
+      return continueWithPlatformBypass(req, permissionType, resourceId, next)
+    }
 
     const resourceId = req.params[resourceIdParam] || req.body[resourceIdParam] || req.query[resourceIdParam]
     if (!resourceId) {
@@ -217,7 +268,7 @@ export function requireResourcePermission(permissionType, resourceIdParam) {
     try {
       const hasPermission = await userHasPermission(req.user.id, permissionType, resourceId, req.user.role)
       if (!hasPermission) {
-        return res.status(403).json({ message: `You do not have ${permissionType} permission for this resource.` })
+        return denyPermission(req, res, permissionType, resourceId, `You do not have ${permissionType} permission for this resource.`, next)
       }
       next()
     } catch (error) {

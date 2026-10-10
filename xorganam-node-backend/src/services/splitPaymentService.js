@@ -13,19 +13,11 @@ import {
 import { retryFailedSplitPayout, updateTransactionStatus } from './transactionStateService.js'
 import { updateInstitutionTransactionStatus } from './institutionStateService.js'
 import { resolveSplitParentStatus } from './splitSettlementState.js'
+import { amountForRule } from '../lib/periodicSettlementMoney.js'
+import { normalizeAmountMinorUnits, formatMinorUnits } from './providerResultValidation.js'
 
 export function calculateInstitutionAmount(collectionAmount, rule) {
-  const amount = Number(collectionAmount)
-  const configuredAmount = Number(rule.amount)
-  const institutionAmount = rule.type === 'PERCENTAGE'
-    ? amount * configuredAmount / 100
-    : configuredAmount
-
-  if (!Number.isFinite(institutionAmount) || institutionAmount < 0 || institutionAmount > amount) {
-    throw new Error(`Invalid split amount for rule ${rule.id}`)
-  }
-
-  return Math.round(institutionAmount * 100) / 100
+  return amountForRule(collectionAmount, rule)
 }
 
 async function findOrCreateLeg({ tenantId, merchantId, merchantName, parentTransactionId, payoutLeg, amount, currency, destination, fee }) {
@@ -177,7 +169,7 @@ async function updateLeg(leg, result) {
 }
 
 export async function recordPeriodicAccrualAndVendorLeg(tx, { collectionTxn, merchant, rule }) {
-  const baseAmount = Number(collectionTxn.base_amount ?? collectionTxn.amount)
+  const baseAmount = String(collectionTxn.base_amount ?? collectionTxn.amount)
   const calculated = calculateInstitutionAmount(baseAmount, rule)
   const { rows: inserted } = await tx.query(
     `INSERT INTO periodic_accrual_ledger
@@ -187,14 +179,17 @@ export async function recordPeriodicAccrualAndVendorLeg(tx, { collectionTxn, mer
      RETURNING accrued_amount`,
     [collectionTxn.tenant_id, collectionTxn.merchant_id, rule.institution_id, rule.id, collectionTxn.id, calculated]
   )
-  const accruedAmount = Number(inserted[0]?.accrued_amount ?? (await tx.query(
+  const accruedAmount = String(inserted[0]?.accrued_amount ?? (await tx.query(
     `SELECT accrued_amount FROM periodic_accrual_ledger WHERE source_transaction_id = $1 AND institution_id = $2`,
     [collectionTxn.id, rule.institution_id]
   )).rows[0]?.accrued_amount ?? calculated)
-  let vendorAmount = baseAmount - accruedAmount
-  const payoutFee = await computeFee(collectionTxn.tenant_id, 'PAYOUT', Math.max(0, vendorAmount), (sql, params) => tx.query(sql, params))
-  vendorAmount = Math.round(vendorAmount * 100) / 100
-  if (vendorAmount <= 0) throw new Error('Institution allocation leaves no positive vendor payout.')
+  const baseCents = normalizeAmountMinorUnits(baseAmount)
+  const accruedCents = normalizeAmountMinorUnits(accruedAmount)
+  if (baseCents === null || accruedCents === null) throw new Error('Periodic split contains unsupported amount precision.')
+  const vendorCents = baseCents - accruedCents
+  if (vendorCents <= 0n) throw new Error('Institution allocation leaves no positive vendor payout.')
+  const vendorAmount = formatMinorUnits(vendorCents)
+  const payoutFee = await computeFee(collectionTxn.tenant_id, 'PAYOUT', vendorAmount, (sql, params) => tx.query(sql, params))
   const payoutReference = createVendorReference(merchant?.display_name, 'PO')
   await tx.query(
     `INSERT INTO transactions
@@ -295,7 +290,7 @@ async function prepareVendorFinancialAllocations({ collectionTxn, merchantId, in
         ORDER BY created_at, id`, [collectionTxn.id, institutionId]
     )
     if (existing.length) return {
-      amountCents: existing.reduce((sum, row) => sum + Number(row.amount_cents), 0),
+      amountCents: existing.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n).toString(),
       rows: existing
     }
 
@@ -328,43 +323,44 @@ async function prepareVendorFinancialAllocations({ collectionTxn, merchantId, in
         FOR UPDATE OF a`,
       [collectionTxn.tenant_id, merchantId, institutionId, triggerMode]
     )
-    let remaining = Math.max(0, Number(availableCents))
+    let remaining = BigInt(availableCents)
     const created = []
-    const payoutCents = Math.round(Number(collectionTxn.base_amount ?? collectionTxn.amount) * 100)
+    const payoutCents = normalizeAmountMinorUnits(collectionTxn.base_amount ?? collectionTxn.amount)
+    if (payoutCents === null) throw new Error('Collection payout amount has unsupported precision.')
     for (const account of accounts) {
-      if (remaining <= 0) break
-      let allocation = 0
+      if (remaining <= 0n) break
+      let allocation = 0n
       let type
       if (account.product_type === 'LOAN') {
-        allocation = Math.min(remaining,
-          Number(account.outstanding_cents) - Number(account.pending_loan_cents),
-          Number(account.overdue_due_cents) - Number(account.pending_loan_cents))
+        const capacity = [remaining,
+          BigInt(account.outstanding_cents) - BigInt(account.pending_loan_cents),
+          BigInt(account.overdue_due_cents) - BigInt(account.pending_loan_cents)]
+        allocation = capacity.reduce((smallest, value) => value < smallest ? value : smallest)
         type = 'LOAN_REPAYMENT'
       } else {
-        if (payoutCents < Number(account.minimum_payout_cents)) continue
+        if (payoutCents < BigInt(account.minimum_payout_cents)) continue
         if (!contributionFrequencyIsDue(account.frequency, account.last_allocation_at)) continue
         allocation = account.calculation_type === 'PERCENTAGE'
-          ? Math.round(payoutCents * Number(account.calculation_value) / 10000)
-          : Number(account.calculation_value)
-        allocation = Math.min(remaining, allocation)
+          ? (payoutCents * BigInt(account.calculation_value) + 5000n) / 10000n
+          : BigInt(account.calculation_value)
+        if (allocation > remaining) allocation = remaining
         type = account.product_type === 'SAVINGS' ? 'SAVINGS_CONTRIBUTION' : 'INVESTMENT_CONTRIBUTION'
       }
-      allocation = Math.floor(allocation)
-      if (allocation <= 0) continue
+      if (allocation <= 0n) continue
       const { rows } = await tx.query(
         `INSERT INTO institution_split_financial_allocations
            (institution_id, sweep_transaction_id, source_transaction_id, account_id, allocation_type, amount_cents, status)
          VALUES ($1, $2, $2, $3, $4, $5, 'PENDING')
          ON CONFLICT DO NOTHING
          RETURNING account_id, allocation_type, amount_cents`,
-        [institutionId, collectionTxn.id, account.account_id, type, allocation]
+        [institutionId, collectionTxn.id, account.account_id, type, String(allocation)]
       )
       if (rows[0]) {
         created.push(rows[0])
         remaining -= allocation
       }
     }
-    return { amountCents: created.reduce((sum, row) => sum + Number(row.amount_cents), 0), rows: created }
+    return { amountCents: created.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n).toString(), rows: created }
   })
 }
 
@@ -376,7 +372,7 @@ async function postVendorFinancialAllocations(collectionId, institutionId) {
         FOR UPDATE`, [collectionId, institutionId]
     )
     for (const allocation of rows) {
-      const amount = Number(allocation.amount_cents)
+      const amount = BigInt(allocation.amount_cents)
       if (allocation.allocation_type === 'LOAN_REPAYMENT') {
         const { rows: installments } = await tx.query(
           `SELECT id, amount_due_cents, amount_paid_cents FROM institution_loan_installments
@@ -386,14 +382,14 @@ async function postVendorFinancialAllocations(collectionId, institutionId) {
         let remaining = amount
         for (const installment of installments) {
           if (!remaining) break
-          const due = Number(installment.amount_due_cents) - Number(installment.amount_paid_cents)
-          const paid = Math.min(remaining, due)
-          if (paid <= 0) continue
-          const totalPaid = Number(installment.amount_paid_cents) + paid
+          const due = BigInt(installment.amount_due_cents) - BigInt(installment.amount_paid_cents)
+          const paid = remaining < due ? remaining : due
+          if (paid <= 0n) continue
+          const totalPaid = BigInt(installment.amount_paid_cents) + paid
           await tx.query(
             `UPDATE institution_loan_installments SET amount_paid_cents = $2,
                 status = CASE WHEN $2 = amount_due_cents THEN 'PAID' ELSE 'PARTIALLY_PAID' END, updated_at = now()
-              WHERE id = $1`, [installment.id, totalPaid]
+              WHERE id = $1`, [installment.id, String(totalPaid)]
           )
           remaining -= paid
         }
@@ -404,12 +400,12 @@ async function postVendorFinancialAllocations(collectionId, institutionId) {
                 WHEN EXISTS (SELECT 1 FROM institution_loan_installments i WHERE i.account_id = a.id
                   AND i.status = 'OVERDUE' AND i.amount_paid_cents < i.amount_due_cents)
                 THEN 'OVERDUE'::institution_financial_account_status ELSE 'ACTIVE'::institution_financial_account_status END,
-              updated_at = now() WHERE a.id = $1`, [allocation.account_id, amount]
+              updated_at = now() WHERE a.id = $1`, [allocation.account_id, String(amount)]
         )
       } else {
         await tx.query(
           `UPDATE institution_financial_accounts SET balance_cents = balance_cents + $2,
-              status = 'ACTIVE', updated_at = now() WHERE id = $1`, [allocation.account_id, amount]
+              status = 'ACTIVE', updated_at = now() WHERE id = $1`, [allocation.account_id, String(amount)]
         )
       }
       await tx.query(`UPDATE institution_split_financial_allocations SET status = 'POSTED' WHERE id = $1`, [allocation.id])
@@ -426,7 +422,9 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
     return { skipped: true, reason: 'periodic-rule-requires-accrual-worker' }
   }
 
-  const baseAmount = Number(collectionTxn.base_amount ?? collectionTxn.amount)
+  const baseAmount = String(collectionTxn.base_amount ?? collectionTxn.amount)
+  const baseCents = normalizeAmountMinorUnits(baseAmount)
+  if (baseCents === null) throw new Error('Collection payout amount has unsupported precision.')
   let institutionAmount = calculateInstitutionAmount(baseAmount, rule)
   if (vendorOnlyForPeriodic) {
     // This ledger entry and vendor payout leg belong to the payout decision.
@@ -435,20 +433,21 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
     await withTransaction((tx) => recordPeriodicAccrualAndVendorLeg(tx, { collectionTxn, merchant, rule }))
     const { rows } = await query(`SELECT accrued_amount FROM periodic_accrual_ledger
       WHERE source_transaction_id = $1 AND institution_id = $2`, [collectionTxn.id, rule.institution_id])
-    if (rows[0]) institutionAmount = Number(rows[0].accrued_amount)
+    if (rows[0]) institutionAmount = String(rows[0].accrued_amount)
   }
   const financialAllocations = vendorOnlyForPeriodic
     ? { amountCents: 0, rows: [] }
     : await prepareVendorFinancialAllocations({
         collectionTxn, merchantId, institutionId: rule.institution_id,
-        availableCents: Math.max(0, Math.round((baseAmount - institutionAmount) * 100)), triggerMode
+        availableCents: baseCents - (normalizeAmountMinorUnits(institutionAmount) ?? 0n), triggerMode
       })
-  institutionAmount = Math.round((institutionAmount + financialAllocations.amountCents / 100) * 100) / 100
-  let vendorAmount = Math.round((baseAmount - institutionAmount) * 100) / 100
-  if (vendorAmount < 0) throw new Error('Institution allocations exceed the source payout amount.')
-  const payoutFee = vendorAmount > 0 ? await computeFee(tenantId, 'PAYOUT', vendorAmount) : null
-  vendorAmount = Math.round(vendorAmount * 100) / 100
-  if (vendorAmount === 0 && institutionAmount === 0) throw new Error('No positive payout allocation is available.')
+  const institutionCents = (normalizeAmountMinorUnits(institutionAmount) ?? 0n) + BigInt(financialAllocations.amountCents)
+  const vendorCents = baseCents - institutionCents
+  if (vendorCents < 0n) throw new Error('Institution allocations exceed the source payout amount.')
+  const institutionAmountExact = formatMinorUnits(institutionCents)
+  const vendorAmount = formatMinorUnits(vendorCents)
+  const payoutFee = vendorCents > 0n ? await computeFee(tenantId, 'PAYOUT', vendorAmount) : null
+  if (vendorCents === 0n && institutionCents === 0n) throw new Error('No positive payout allocation is available.')
   const institution = {
     msisdn: rule.settlement_msisdn,
     institutionId: rule.institution_id
@@ -459,7 +458,7 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
   }
 
   const legs = vendorOnlyForPeriodic
-    ? (vendorAmount > 0 ? [{
+    ? (vendorCents > 0n ? [{
         payoutLeg: 'VENDOR',
         amount: vendorAmount,
         destination: vendor,
@@ -467,16 +466,16 @@ export async function processSplitPayout({ tenantId, merchantId, collectionTxn, 
         narration: `Vendor payout for collection ${collectionTxn.internal_reference}`
       }] : [])
     : [
-        ...(vendorAmount > 0 ? [{
+        ...(vendorCents > 0n ? [{
           payoutLeg: 'VENDOR',
           amount: vendorAmount,
           destination: vendor,
           network: merchant.network_provider,
           narration: `Vendor payout for collection ${collectionTxn.internal_reference}`
         }] : []),
-        ...(institutionAmount > 0 ? [{
+        ...(institutionCents > 0n ? [{
           payoutLeg: 'INSTITUTION',
-          amount: institutionAmount,
+          amount: institutionAmountExact,
           destination: institution,
           network: null,
           narration: `Institution payout for collection ${collectionTxn.internal_reference}`

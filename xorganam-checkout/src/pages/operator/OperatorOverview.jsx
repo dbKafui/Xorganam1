@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom'
 import { useOperatorAuth } from '../../context/OperatorAuthContext'
 import { operatorApi } from '../../api/client'
 
+import { formatCurrencyAmount } from '../../../../shared/currency.js'
 function money(n) {
-  return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(n ?? 0, 'GHS')
 }
 
 export default function OperatorOverview() {

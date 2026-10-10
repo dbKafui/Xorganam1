@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { creditCustomerApi, publicApi } from '../api/client'
 import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../lib/idempotency'
 
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '')
   if (digits.startsWith('0') && digits.length === 10) return `233${digits.slice(1)}`
@@ -11,7 +12,7 @@ function normalizePhone(value) {
   return ''
 }
 
-function money(value) { return `GHS ${Number(value || 0).toFixed(2)}` }
+function money(value) { return formatCurrencyAmount(value || 0, 'GHS') }
 
 export default function CreditCustomerPlans() {
   const [phone, setPhone] = useState(creditCustomerApi.getPhone())

@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { publicApi } from '../api/client'
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 import { clearIdempotencyKey, getOrCreateIdempotencyKey } from '../lib/idempotency'
 import { classifyPaymentStatus } from '../lib/statusOutcome'
 import PaymentStatusDetails from '../components/PaymentStatusDetails.jsx'
+import { MOMO_CHANNELS } from '../constants/paymentOptions.js'
 
 const MSISDN_PATTERN = /^(?:0[0-9]{9}|233[0-9]{9})$/
 const MAX_PAYMENT_AMOUNT = 1_000_000
@@ -57,6 +59,7 @@ export default function Checkout() {
   const [amount, setAmount] = useState('')
   const [msisdn, setMsisdn] = useState('')
   const [collectionMethod, setCollectionMethod] = useState('MOMO')
+  const [networkProvider, setNetworkProvider] = useState('')
   const [card, setCard] = useState({ number: '', name: '', month: '', year: '', cvv: '' })
   const [redirectHtml, setRedirectHtml] = useState('')
   const [formError, setFormError] = useState('')
@@ -90,12 +93,12 @@ export default function Checkout() {
       return
     }
 
-    const numericAmount = Number(amount)
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    const amountCents = decimalToMinorUnits(amount)
+    if (amountCents === null || BigInt(amountCents) <= 0n) {
       setFormError('Enter an amount greater than 0.')
       return
     }
-    if (numericAmount > MAX_PAYMENT_AMOUNT) {
+    if (BigInt(amountCents) > BigInt(decimalToMinorUnits(MAX_PAYMENT_AMOUNT) || '0')) {
       setFormError(`Enter an amount no greater than GHS ${MAX_PAYMENT_AMOUNT.toLocaleString()}.`)
       return
     }
@@ -132,7 +135,7 @@ export default function Checkout() {
       }
 
       if (!idempotencyKeyRef.current) idempotencyKeyRef.current = getOrCreateIdempotencyKey(idempotencyStorageKey)
-      const result = await publicApi.collect({ merchantId, amount: numericAmount, msisdn: normalizedMsisdn || undefined, collectionMethod, ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {}) }, idempotencyKeyRef.current)
+      const result = await publicApi.collect({ merchantId, amount, msisdn: normalizedMsisdn || undefined, collectionMethod, network: collectionMethod === 'MOMO' ? networkProvider || undefined : undefined, ...(collectionMethod === 'CARD' ? { cardNumber: card.number, cardholderName: card.name, expiryDateMonth: Number(card.month), expiryDateYear: card.year.slice(-2), cvv: card.cvv } : {}) }, idempotencyKeyRef.current)
       setReference(result.reference)
       setPaymentGatewayStatus(result.paymentGatewayStatus || result.status || '')
       
@@ -279,7 +282,7 @@ export default function Checkout() {
                 </div>
               )}
 
-              <div className="field"><label htmlFor="collection-method">Payment method</label><select id="collection-method" value={collectionMethod} onChange={(e) => setCollectionMethod(e.target.value)}><option value="MOMO">Mobile Money</option><option value="CARD">Visa / Mastercard</option></select></div>
+              <div className="field"><label htmlFor="collection-method">Payment method</label><select id="collection-method" value={collectionMethod} onChange={(e) => { setCollectionMethod(e.target.value); setNetworkProvider('') }}><option value="MOMO">MoMo</option><option value="CARD">Card (Visa / Mastercard)</option></select></div>
               <div className="field">
                 <label htmlFor="amount">Amount</label>
                 <div className="prefix-input">
@@ -315,6 +318,8 @@ export default function Checkout() {
                 />
               </div>}
 
+              {collectionMethod === 'MOMO' && <div className="field"><label htmlFor="momo-channel">MoMo channel</label><select id="momo-channel" value={networkProvider} onChange={(e) => setNetworkProvider(e.target.value)}><option value="">Auto-detect from phone number</option>{MOMO_CHANNELS.map((channel) => <option key={channel.code} value={channel.code}>{channel.label}</option>)}</select></div>}
+
               {collectionMethod === 'MOMO' && <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0' }}>Payment via {merchant?.networkProvider || 'mobile money'}</p>}
 
               <button type="submit" className="pay-btn" disabled={stage === 'submitting'}>{stage === 'submitting' ? 'Starting payment…' : 'Pay now'}</button>
@@ -339,7 +344,7 @@ export default function Checkout() {
               <span><strong>Payment pending</strong><small>{statusMessage || 'Payment prompt sent. Waiting for approval on your phone…'}</small></span>
             </div>
             <div className="receipt">
-              <div className="receipt-row"><span>Amount</span><span className="mono">GHS {Number(amount).toFixed(2)}</span></div>
+              <div className="receipt-row"><span>Amount</span><span className="mono">{formatCurrencyAmount(amount, 'GHS')}</span></div>
               <div className="receipt-row"><span>Reference</span><span className="mono">{reference}</span></div>
               <div className="receipt-row"><span>Gateway status</span><span className="mono">{paymentGatewayStatus || 'PENDING'}</span></div>
             </div>
@@ -356,7 +361,7 @@ export default function Checkout() {
               <span><strong>Payment completed</strong><small>{statusMessage || 'Your payment was completed successfully.'}</small></span>
             </div>
             <div className="receipt">
-              <div className="receipt-row"><span>Amount</span><span className="mono">GHS {Number(amount).toFixed(2)}</span></div>
+              <div className="receipt-row"><span>Amount</span><span className="mono">{formatCurrencyAmount(amount, 'GHS')}</span></div>
               <div className="receipt-row"><span>Reference</span><span className="mono">{reference}</span></div>
               <div className="receipt-row"><span>Gateway status</span><span className="mono">{paymentGatewayStatus || 'SUCCESSFUL'}</span></div>
             </div>

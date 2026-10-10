@@ -4,6 +4,7 @@ import { ErrorMessage, LoadingState, SuccessMessage } from '../components/Feedba
 import { institutionApi } from '../api/client.js'
 import { useInstitutionAuth } from '../context/InstitutionAuthContext.jsx'
 
+import { formatCurrencyMinorUnits } from '../../../shared/currency.js'
 const events = [
   ['CONTRIBUTION_REMINDER', 'Savings contribution reminder'], ['REPAYMENT_DUE', 'Loan repayment due'],
   ['REPAYMENT_OVERDUE', 'Loan repayment overdue'], ['SAVINGS_MATURITY', 'Savings maturity'],
@@ -20,7 +21,7 @@ const defaultText = {
   DISPUTE_UPDATE: 'Hello {customerName}, there is an update to your institution service request.'
 }
 const defaults = Object.fromEntries(events.map(([event]) => [event, { event, enabled: false, templateText: defaultText[event] }]))
-const amount = (cents) => `GHS ${(Number(cents || 0) / 100).toFixed(2)}`
+const amount = (cents) => formatCurrencyMinorUnits(cents || 0, 'GHS')
 
 export default function Notifications() {
   const { staff } = useInstitutionAuth()

@@ -3,6 +3,7 @@ import { disburseToMobileMoney, getPayoutWalletBalance, isGatewayFailure, isGate
 import { createVendorReference } from './referenceIds.js'
 import { updateTransactionStatus } from './transactionStateService.js'
 import { updateInstitutionSweepStatus } from './institutionSweepStateService.js'
+import { normalizeAmountMinorUnits, formatMinorUnits } from './providerResultValidation.js'
 
 async function createCashSweepGroups() {
   return withTransaction(async (tx) => {
@@ -25,11 +26,15 @@ async function createCashSweepGroups() {
           FOR UPDATE`, [scope.tenant_id, scope.merchant_id, scope.institution_id]
       )
       if (!accruals.length) continue
-      const total = accruals.reduce((sum, item) => sum + Number(item.accrued_amount), 0)
+      const total = accruals.reduce((sum, item) => {
+        const cents = normalizeAmountMinorUnits(item.accrued_amount)
+        if (cents === null) throw new Error('Credit cash accrual has unsupported precision.')
+        return sum + cents
+      }, 0n)
       const { rows: parentRows } = await tx.query(
         `INSERT INTO transactions (tenant_id, merchant_id, institution_id, type, status, amount, currency, internal_reference)
          VALUES ($1, $2, $3, 'SWEEP_PAYOUT', 'PENDING', $4, 'GHS', $5)
-         RETURNING id`, [scope.tenant_id, scope.merchant_id, scope.institution_id, total, createVendorReference(scope.display_name, 'CASH')]
+         RETURNING id`, [scope.tenant_id, scope.merchant_id, scope.institution_id, formatMinorUnits(total), createVendorReference(scope.display_name, 'CASH')]
       )
       const parentId = parentRows[0].id
       await tx.query(
@@ -37,7 +42,7 @@ async function createCashSweepGroups() {
            (institution_id, tenant_id, merchant_id, sweep_transaction_id, vendor_amount,
             institution_amount, status, period_key)
          VALUES ($1, $2, $3, $4, 0, $5, 'PENDING', CURRENT_DATE)`,
-        [scope.institution_id, scope.tenant_id, scope.merchant_id, parentId, total]
+        [scope.institution_id, scope.tenant_id, scope.merchant_id, parentId, formatMinorUnits(total)]
       )
       await tx.query(
         `UPDATE periodic_accrual_ledger SET swept_transaction_id = $4, period_key = CURRENT_DATE
@@ -88,7 +93,9 @@ async function processCashSweep(parentId) {
   }
 
   const balance = await getPayoutWalletBalance(sweep.tenant_id, null, sweep.merchant_id)
-  if (Number(balance) < Number(sweep.institution_amount)) {
+  const balanceCents = normalizeAmountMinorUnits(balance)
+  const sweepCents = normalizeAmountMinorUnits(sweep.institution_amount)
+  if (balanceCents === null || sweepCents === null || balanceCents < sweepCents) {
     await updateInstitutionSweepStatus(query, {
       id: sweep.id,
       currentStatus: sweep.sweep_status,
@@ -245,7 +252,7 @@ export async function applyInstitutionSplitRepayments(tx, sweepTransactionId) {
       [sweepTransactionId, source.source_transaction_id, source.source_credit_installment_id]
     )
     if (prior.length) continue
-    let remaining = Number(source.amount_cents)
+    let remaining = BigInt(source.amount_cents)
     const { rows: accounts } = await tx.query(
       `SELECT a.id, a.outstanding_cents,
               (SELECT min(i.due_date) FROM institution_loan_installments i
@@ -262,24 +269,26 @@ export async function applyInstitutionSplitRepayments(tx, sweepTransactionId) {
       [source.institution_id, source.tenant_id, source.customer_identifier]
     )
     for (const account of accounts) {
-      if (remaining <= 0) break
-      const accountCapacity = Math.min(remaining, Number(account.outstanding_cents))
-      if (accountCapacity <= 0) continue
+      if (remaining <= 0n) break
+      const accountOutstanding = BigInt(account.outstanding_cents)
+      const accountCapacity = remaining < accountOutstanding ? remaining : accountOutstanding
+      if (accountCapacity <= 0n) continue
       const { rows: installments } = await tx.query(
         `SELECT id, amount_due_cents, amount_paid_cents FROM institution_loan_installments
           WHERE account_id = $1 AND status <> 'PAID' ORDER BY due_date, installment_number FOR UPDATE`, [account.id]
       )
-      let accountPaid = 0
+      let accountPaid = 0n
       for (const installment of installments) {
         if (accountPaid >= accountCapacity) break
-        const due = Number(installment.amount_due_cents) - Number(installment.amount_paid_cents)
-        const paid = Math.min(accountCapacity - accountPaid, due)
-        if (paid <= 0) continue
-        const totalPaid = Number(installment.amount_paid_cents) + paid
+        const due = BigInt(installment.amount_due_cents) - BigInt(installment.amount_paid_cents)
+        const available = accountCapacity - accountPaid
+        const paid = available < due ? available : due
+        if (paid <= 0n) continue
+        const totalPaid = BigInt(installment.amount_paid_cents) + paid
         await tx.query(
           `UPDATE institution_loan_installments SET amount_paid_cents = $2,
               status = CASE WHEN $2 = amount_due_cents THEN 'PAID' ELSE 'PARTIALLY_PAID' END, updated_at = now()
-            WHERE id = $1`, [installment.id, totalPaid]
+            WHERE id = $1`, [installment.id, String(totalPaid)]
         )
         accountPaid += paid
       }
@@ -289,17 +298,17 @@ export async function applyInstitutionSplitRepayments(tx, sweepTransactionId) {
             status = CASE WHEN a.outstanding_cents = $2 THEN 'SETTLED'::institution_financial_account_status
               WHEN EXISTS (SELECT 1 FROM institution_loan_installments i WHERE i.account_id = a.id AND i.status = 'OVERDUE' AND i.amount_paid_cents < i.amount_due_cents)
                 THEN 'OVERDUE'::institution_financial_account_status ELSE 'ACTIVE'::institution_financial_account_status END,
-            updated_at = now() WHERE a.id = $1`, [account.id, accountPaid]
+            updated_at = now() WHERE a.id = $1`, [account.id, String(accountPaid)]
       )
       await tx.query(
         `INSERT INTO institution_split_financial_allocations
           (institution_id, sweep_transaction_id, source_transaction_id, source_credit_installment_id, account_id, allocation_type, amount_cents)
          VALUES ($1,$2,$3,$4,$5,'LOAN_REPAYMENT',$6) ON CONFLICT DO NOTHING`,
-        [source.institution_id, sweepTransactionId, source.source_transaction_id, source.source_credit_installment_id, account.id, accountPaid]
+        [source.institution_id, sweepTransactionId, source.source_transaction_id, source.source_credit_installment_id, account.id, String(accountPaid)]
       )
       remaining -= accountPaid
     }
-    if (remaining > 0) {
+    if (remaining > 0n) {
       const { rows: savingsAccounts } = await tx.query(
         `SELECT a.id FROM institution_financial_accounts a
          JOIN institution_customers c ON c.id = a.customer_id AND c.institution_id = a.institution_id

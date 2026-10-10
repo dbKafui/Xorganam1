@@ -175,6 +175,34 @@ export async function sendPasswordResetEmail({ email, firstName, resetUrl, purpo
   }
 }
 
+export async function sendCredentialChangedEmail({ email, firstName }) {
+  const apiKey = process.env.RESEND_API_KEY
+  const fromEmail = process.env.RESEND_FROM_EMAIL
+  if (!apiKey || !fromEmail) {
+    console.warn('[credential-notice] delivery skipped: Resend is not configured')
+    return false
+  }
+  try {
+    const response = await axios.post(
+      'https://api.resend.com/emails',
+      {
+        from: fromEmail,
+        to: [email],
+        subject: 'Your XORGANAM password was changed',
+        html: `<p>Hello ${escapeHtml(firstName)},</p><p>Your account password was changed. If you did not make this change, contact your account administrator immediately.</p>`
+      },
+      {
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 15_000
+      }
+    )
+    return response.status >= 200 && response.status < 300
+  } catch (error) {
+    console.error('[credential-notice] delivery failed', { code: error?.code || 'EMAIL_GATEWAY_ERROR' })
+    return false
+  }
+}
+
 export async function sendEmailVerificationEmail({ email, firstName, token }) {
   const apiKey = process.env.RESEND_API_KEY
   const fromEmail = process.env.RESEND_FROM_EMAIL

@@ -13,7 +13,7 @@ import axios from 'axios'
  */
 
 function requireVaultConfig() {
-  const addr = process.env.VAULT_ADDR
+  const addr = process.env.VAULT_ADDR || (process.env.NODE_ENV === 'production' ? 'http://vault:8200' : 'http://localhost:8200')
   if (!addr) throw new Error('Missing required environment variable: VAULT_ADDR')
   return addr
 }

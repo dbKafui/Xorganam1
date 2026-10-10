@@ -10,6 +10,9 @@ import { requestPasswordReset } from '../services/passwordResetService.js'
 import { writePlatformAudit } from '../services/auditService.js'
 import { normalizePermissionExpiry } from '../services/permissionPolicy.js'
 import { withTransaction } from '../db/pool.js'
+import { setTenantUserActiveStatus } from '../services/userStatusService.js'
+import { requestUserRoleChange, reviewUserRoleChange } from '../services/userRoleChangeService.js'
+import { assignUserMerchant, unassignUserMerchant } from '../services/userMerchantAssignmentService.js'
 
 export const usersRouter = Router()
 
@@ -151,20 +154,19 @@ usersRouter.put(
   asyncHandler(async (req, res) => {
     const { firstName, lastName, phoneNumber, isActive, role } = req.body || {}
 
-    const existing = await query('SELECT tenant_id, merchant_id FROM users WHERE id = $1', [req.params.userId])
+    const existing = await query('SELECT tenant_id, merchant_id, role FROM users WHERE id = $1', [req.params.userId])
     if (existing.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
     const user = existing.rows[0]
     
     if (scopeOrRespond(req, res, user.tenant_id) === null) return
     if (!enforceAssignedMerchant(req, res, user.merchant_id)) return
     if (role !== undefined && !ASSIGNABLE_ROLES.includes(role)) return res.status(400).json({ message: 'Role is invalid.' })
+    if (role !== undefined && role !== user.role) {
+      return res.status(409).json({ message: 'Role changes require an independent approval. Use the role request action.' })
+    }
     if (role && (ROLE_LEVEL[role] || 0) > (ROLE_LEVEL[req.user.role] || 0)) {
       return res.status(403).json({ message: 'You cannot assign a higher role than your own.' })
     }
-    if (role === 'TENANT_BRANCH_MANAGER' && !user.merchant_id) {
-      return res.status(400).json({ message: 'Assign this user to a merchant before giving them the branch manager role.' })
-    }
-
     const updates = []
     const params = [req.params.userId]
     let paramIndex = 2
@@ -182,14 +184,19 @@ usersRouter.put(
       params.push(phoneNumber || null)
     }
     if (isActive !== undefined) {
-      updates.push(`is_active = $${paramIndex++}`)
-      params.push(isActive)
+      try {
+        const status = await setTenantUserActiveStatus({
+          userId: req.params.userId,
+          isActive,
+          reason: req.body?.deactivationReason,
+          actor: req.user,
+          request: req
+        })
+        if (!status) return res.status(404).json({ message: 'User not found.' })
+      } catch (error) {
+        return res.status(400).json({ message: error.message })
+      }
     }
-    if (role !== undefined && ASSIGNABLE_ROLES.includes(role)) {
-      updates.push(`role = $${paramIndex++}`)
-      params.push(role)
-    }
-
     if (updates.length === 0) {
       return res.status(400).json({ message: 'No valid fields to update.' })
     }
@@ -215,7 +222,19 @@ usersRouter.put(
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
     if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
 
-    await query('UPDATE users SET is_active = $2 WHERE id = $1', [req.params.userId, isActive])
+    let result
+    try {
+      result = await setTenantUserActiveStatus({
+        userId: req.params.userId,
+        isActive,
+        reason: req.body?.deactivationReason,
+        actor: req.user,
+        request: req
+      })
+    } catch (error) {
+      return res.status(400).json({ message: error.message })
+    }
+    if (!result) return res.status(404).json({ message: 'User not found.' })
     res.json({ message: 'User status updated.', userId: req.params.userId, isActive })
   })
 )
@@ -229,7 +248,19 @@ usersRouter.post(
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
     if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
 
-    await query('UPDATE users SET is_active = false WHERE id = $1', [req.params.userId])
+    let result
+    try {
+      result = await setTenantUserActiveStatus({
+        userId: req.params.userId,
+        isActive: false,
+        reason: req.body?.reason,
+        actor: req.user,
+        request: req
+      })
+    } catch (error) {
+      return res.status(400).json({ message: error.message })
+    }
+    if (!result) return res.status(404).json({ message: 'User not found.' })
     res.json({ message: 'User suspended.', userId: req.params.userId, isActive: false })
   })
 )
@@ -243,7 +274,13 @@ usersRouter.post(
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
     if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
 
-    await query('UPDATE users SET is_active = true WHERE id = $1', [req.params.userId])
+    const result = await setTenantUserActiveStatus({
+      userId: req.params.userId,
+      isActive: true,
+      actor: req.user,
+      request: req
+    })
+    if (!result) return res.status(404).json({ message: 'User not found.' })
     res.json({ message: 'User enabled.', userId: req.params.userId, isActive: true })
   })
 )
@@ -260,17 +297,78 @@ usersRouter.post(
       return res.status(403).json({ message: 'You cannot assign a higher role than your own.' })
     }
 
-    const existing = await query('SELECT tenant_id, merchant_id FROM users WHERE id = $1', [req.params.userId])
+    const existing = await query('SELECT tenant_id, merchant_id, role FROM users WHERE id = $1', [req.params.userId])
     if (existing.rows.length === 0) return res.status(404).json({ message: 'User not found.' })
     if (scopeOrRespond(req, res, existing.rows[0].tenant_id) === null) return
     if (!enforceAssignedMerchant(req, res, existing.rows[0].merchant_id)) return
 
-    const existingUser = await query('SELECT merchant_id FROM users WHERE id = $1', [req.params.userId])
-    if (role === 'TENANT_BRANCH_MANAGER' && !existingUser.rows[0].merchant_id) {
+    if (role === 'TENANT_BRANCH_MANAGER' && !existing.rows[0].merchant_id) {
       return res.status(400).json({ message: 'Assign this user to a merchant before giving them the branch manager role.' })
     }
-    await query('UPDATE users SET role = $2 WHERE id = $1', [req.params.userId, role])
-    res.json({ message: 'Role updated.', userId: req.params.userId, role })
+    if (role === 'TENANT_BRANCH_MANAGER' && !existing.rows[0].merchant_id) {
+      return res.status(400).json({ message: 'Assign this user to a merchant before giving them the branch manager role.' })
+    }
+    const result = await requestUserRoleChange({
+      userId: req.params.userId,
+      tenantId: existing.rows[0].tenant_id,
+      requestedRole: role,
+      actor: req.user,
+      request: req
+    })
+    if (result.notFound) return res.status(404).json({ message: 'User not found.' })
+    if (result.unchanged) return res.status(409).json({ message: 'The user already has this role.' })
+    if (result.pending) return res.status(409).json({ message: 'A role change is already pending approval.', requestId: result.pending })
+    res.status(202).json({ message: 'Role change submitted for independent approval.', requestId: result.request.id, status: result.request.status })
+  })
+)
+
+usersRouter.get(
+  '/role-change-requests',
+  requireRole('TENANT_ADMIN'),
+  requirePermission('MANAGE_TEAM'),
+  asyncHandler(async (req, res) => {
+    const tenantId = scopeOrRespond(req, res, req.query.tenantId)
+    if (!tenantId) return
+    const { rows } = await query(
+      `SELECT r.id, r.user_id, r.requested_by_user_id, r.previous_role, r.requested_role,
+              r.status, r.created_at, u.first_name, u.last_name, u.email,
+              requester.first_name AS requester_first_name, requester.last_name AS requester_last_name
+         FROM user_role_change_requests r
+         JOIN users u ON u.id = r.user_id
+         JOIN users requester ON requester.id = r.requested_by_user_id
+        WHERE r.tenant_id = $1 AND r.status = 'PENDING'
+        ORDER BY r.created_at ASC`,
+      [tenantId]
+    )
+    res.json(rows)
+  })
+)
+
+usersRouter.post(
+  '/role-change-requests/:requestId/:decision',
+  requireRole('TENANT_ADMIN'),
+  requirePermission('MANAGE_TEAM'),
+  asyncHandler(async (req, res) => {
+    const decision = String(req.params.decision || '').toUpperCase()
+    if (!['APPROVE', 'REJECT'].includes(decision)) return res.status(400).json({ message: 'Decision must be approve or reject.' })
+    const reason = String(req.body?.reason || '').trim()
+    if (decision === 'REJECT' && (reason.length < 5 || reason.length > 1000)) {
+      return res.status(400).json({ message: 'A rejection reason between 5 and 1000 characters is required.' })
+    }
+    const tenantId = scopeOrRespond(req, res, req.body?.tenantId)
+    if (!tenantId) return
+    const result = await reviewUserRoleChange({
+      requestId: req.params.requestId,
+      tenantId,
+      actor: req.user,
+      decision: decision === 'APPROVE' ? 'APPROVED' : 'REJECTED',
+      reason,
+      request: req
+    })
+    if (result.notFound) return res.status(404).json({ message: 'Role-change request not found.' })
+    if (result.forbidden) return res.status(403).json({ message: 'The requester cannot approve or reject their own role change.' })
+    if (result.conflict) return res.status(409).json({ message: result.conflict })
+    res.json({ message: decision === 'APPROVE' ? 'Role change approved.' : 'Role change rejected.', ...result })
   })
 )
 
@@ -311,7 +409,7 @@ usersRouter.post(
     }
 
     const result = await withTransaction(async (tx) => {
-      const { rows: users } = await tx(
+      const { rows: users } = await tx.query(
         'SELECT id, tenant_id, merchant_id FROM users WHERE tenant_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE',
         [tenantId, uniqueUserIds]
       )
@@ -324,7 +422,7 @@ usersRouter.post(
 
       const counts = { granted: 0, renewed: 0, alreadyActive: 0 }
       for (const target of users) {
-        const inserted = await tx(
+        const inserted = await tx.query(
           `INSERT INTO user_permissions (user_id, tenant_id, permission_type, resource_id, granted_by_user_id, expires_at)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT DO NOTHING
@@ -337,7 +435,7 @@ usersRouter.post(
         if (permission) {
           counts.granted += 1
         } else {
-          const existingGrant = await tx(
+          const existingGrant = await tx.query(
             `SELECT id, expires_at FROM user_permissions
               WHERE user_id = $1 AND permission_type = $2
                 AND resource_id IS NOT DISTINCT FROM $3::uuid FOR UPDATE`,
@@ -346,7 +444,7 @@ usersRouter.post(
           const existingPermission = existingGrant.rows[0]
           if (existingPermission?.expires_at && new Date(existingPermission.expires_at) <= new Date()) {
             previousExpiry = existingPermission.expires_at
-            const renewed = await tx(
+            const renewed = await tx.query(
               `UPDATE user_permissions
                   SET granted_at = now(), granted_by_user_id = $2, expires_at = $3
                 WHERE id = $1 AND expires_at <= now()
@@ -450,7 +548,7 @@ usersRouter.post(
 
     try {
       const p = await withTransaction(async (tx) => {
-        const inserted = await tx(
+        const inserted = await tx.query(
           `INSERT INTO user_permissions (user_id, tenant_id, permission_type, resource_id, granted_by_user_id, expires_at)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT DO NOTHING
@@ -462,7 +560,7 @@ usersRouter.post(
         let action = 'permission.granted'
         let previousExpiry = null
         if (!permission) {
-          const existingGrant = await tx(
+          const existingGrant = await tx.query(
             `SELECT id, expires_at FROM user_permissions
               WHERE user_id = $1 AND permission_type = $2
                 AND resource_id IS NOT DISTINCT FROM $3::uuid
@@ -474,7 +572,7 @@ usersRouter.post(
             throw Object.assign(new Error('This permission already exists and is still active.'), { statusCode: 409 })
           }
           previousExpiry = existingPermission.expires_at
-          const renewed = await tx(
+          const renewed = await tx.query(
             `UPDATE user_permissions
                 SET granted_at = now(), granted_by_user_id = $2, expires_at = $3
               WHERE id = $1 AND expires_at <= now()
@@ -545,7 +643,7 @@ usersRouter.delete(
     }
 
     await withTransaction(async (tx) => {
-      await tx('DELETE FROM user_permissions WHERE id = $1', [req.params.permissionId])
+      await tx.query('DELETE FROM user_permissions WHERE id = $1', [req.params.permissionId])
       await writePlatformAudit({
         actorUserId: req.user.id,
         tenantId: perm.rows[0].tenant_id,
@@ -624,19 +722,19 @@ usersRouter.post(
     if (req.user.merchantId && String(req.user.merchantId) !== String(merchantId)) {
       return res.status(403).json({ message: 'You can only assign users to your merchant.' })
     }
-
-    const merchant = await query('SELECT tenant_id FROM merchants WHERE id = $1', [merchantId])
-    if (merchant.rows.length === 0) return res.status(404).json({ message: 'Merchant not found.' })
-    if (merchant.rows[0].tenant_id !== user.rows[0].tenant_id) {
-      return res.status(403).json({ message: 'Merchant does not belong to this tenant.' })
-    }
-
-    const { rows } = await query(
-      `UPDATE users SET merchant_id = $2 WHERE id = $1
-       RETURNING id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at`,
-      [req.params.userId, merchantId]
-    )
-    res.json(mapUser(rows[0]))
+    const result = await assignUserMerchant({
+      userId: req.params.userId,
+      tenantId: user.rows[0].tenant_id,
+      merchantId,
+      actor: req.user,
+      request: req
+    })
+    if (result.userMissing) return res.status(404).json({ message: 'User not found.' })
+    if (result.tenantMismatch) return res.status(403).json({ message: 'User does not belong to this tenant.' })
+    if (result.merchantMissing) return res.status(404).json({ message: 'Merchant not found.' })
+    if (result.merchantMismatch) return res.status(403).json({ message: 'Merchant does not belong to this tenant.' })
+    if (result.unchanged) return res.json({ message: 'User is already assigned to this merchant.' })
+    res.json(mapUser(result.user))
   })
 )
 
@@ -651,12 +749,17 @@ usersRouter.post(
     if (req.user.merchantId) return res.status(403).json({ message: 'Merchant-assigned users cannot make accounts tenant-wide.' })
     if (user.rows[0].role === 'TENANT_BRANCH_MANAGER') return res.status(409).json({ message: 'Change this user role before removing their merchant assignment.' })
 
-    const { rows } = await query(
-      `UPDATE users SET merchant_id = NULL WHERE id = $1
-       RETURNING id, tenant_id, merchant_id, first_name, last_name, email, phone_number, role, is_active, created_at, last_login_at`,
-      [req.params.userId]
-    )
-    res.json(mapUser(rows[0]))
+    const result = await unassignUserMerchant({
+      userId: req.params.userId,
+      tenantId: user.rows[0].tenant_id,
+      actor: req.user,
+      request: req
+    })
+    if (result.userMissing) return res.status(404).json({ message: 'User not found.' })
+    if (result.tenantMismatch) return res.status(403).json({ message: 'User does not belong to this tenant.' })
+    if (result.branchManagerConflict) return res.status(409).json({ message: 'Change this user role before removing their merchant assignment.' })
+    if (result.unchanged) return res.json({ message: 'User has no merchant assignment.' })
+    res.json(mapUser(result.user))
   })
 )
 

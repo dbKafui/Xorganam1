@@ -1,14 +1,5 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api/v1'
 
-function getToken() {
-  const legacyToken = localStorage.getItem('xorganam_token')
-  if (legacyToken) {
-    localStorage.removeItem('xorganam_token')
-    localStorage.removeItem('xorganam_user')
-  }
-  return sessionStorage.getItem('xorganam_token')
-}
-
 export class ApiError extends Error {
   constructor(message, status, details) {
     super(message)
@@ -28,13 +19,13 @@ async function request(path, { method = 'GET', body, isForm = false, params } = 
   }
 
   const headers = {}
-  const token = getToken()
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  headers['X-Xorganam-Request'] = '1'
   if (!isForm && body !== undefined) headers['Content-Type'] = 'application/json'
 
   const response = await fetch(url, {
     method,
     headers,
+    credentials: 'include',
     body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined
   })
 
@@ -81,7 +72,7 @@ export const api = {
   post: (path, body) => request(path, { method: 'POST', body }),
   put: (path, body) => request(path, { method: 'PUT', body }),
   patch: (path, body) => request(path, { method: 'PATCH', body }),
-  del: (path) => request(path, { method: 'DELETE' }),
+  del: (path, body) => request(path, { method: 'DELETE', body }),
   postForm: (path, formData) => request(path, { method: 'POST', body: formData, isForm: true })
 }
 

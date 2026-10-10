@@ -1,8 +1,7 @@
 import crypto from 'node:crypto'
 import { query, withTransaction } from '../db/pool.js'
 import { sendEmailVerificationEmail } from './notificationService.js'
-
-const TOKEN_TTL_MS = 30 * 60 * 1000
+import { authPolicy } from '../config/authPolicy.js'
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -26,7 +25,7 @@ export async function requestEmailVerification(email) {
 
   const token = makeEmailVerificationToken()
   const tokenHash = hashToken(token)
-  const expiresAt = new Date(Date.now() + TOKEN_TTL_MS).toISOString()
+  const expiresAt = new Date(Date.now() + authPolicy.emailVerificationTokenTtlMs).toISOString()
   const reservation = await withTransaction(async (client) => {
     const { rows } = await client.query(
       `SELECT id, first_name, last_name, email, email_verified_at
@@ -38,10 +37,10 @@ export async function requestEmailVerification(email) {
 
     const { rows: recent } = await client.query(
       `SELECT count(*)::int AS count FROM email_verification_tokens
-        WHERE user_id = $1 AND created_at > now() - interval '1 hour'`,
-      [user.id]
+        WHERE user_id = $1 AND created_at > now() - ($2::bigint * interval '1 millisecond')`,
+      [user.id, authPolicy.emailVerificationRateWindowMs]
     )
-    if (recent[0].count >= 3) return { send: false, throttled: true }
+    if (recent[0].count >= authPolicy.emailVerificationRequestLimit) return { send: false, throttled: true }
 
     await client.query(
       `UPDATE email_verification_tokens SET used_at = now()

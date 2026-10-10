@@ -6,8 +6,9 @@ import { transactionsApi } from '../../api/transactions'
 import StatusChip from '../../components/StatusChip'
 import { maskAccount } from '../../lib/mask'
 
+import { formatCurrencyAmount } from '../../../../shared/currency.js'
 function money(n) {
-  return Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatCurrencyAmount(n ?? 0, 'GHS')
 }
 
 export default function TransactionsList() {
@@ -15,6 +16,7 @@ export default function TransactionsList() {
   const [tenants, setTenants] = useState([])
   const [merchants, setMerchants] = useState([])
   const [tenantId, setTenantId] = useState(searchParams.get('tenantId') || '')
+  const [customerIdentifier, setCustomerIdentifier] = useState(searchParams.get('customerIdentifier') || '')
   const [merchantId, setMerchantId] = useState('')
   const [status, setStatus] = useState('')
   const [type, setType] = useState('')
@@ -37,11 +39,11 @@ export default function TransactionsList() {
     setLoading(true)
     setError('')
     transactionsApi
-      .list({ tenantId, merchantId: merchantId || undefined, status: status || undefined, type: type || undefined, page, pageSize: 20 })
+      .list({ tenantId, merchantId: merchantId || undefined, customerIdentifier: customerIdentifier || undefined, status: status || undefined, type: type || undefined, page, pageSize: 20 })
       .then(setResult)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
-  }, [tenantId, merchantId, status, type, page])
+  }, [tenantId, merchantId, customerIdentifier, status, type, page])
 
   return (
     <div>
@@ -71,6 +73,10 @@ export default function TransactionsList() {
                 <option key={m.id} value={m.id}>{m.displayName}</option>
               ))}
             </select>
+          </div>
+          <div className="field">
+            <label>Customer mobile number</label>
+            <input value={customerIdentifier} onChange={(event) => { setCustomerIdentifier(event.target.value); setPage(1) }} disabled={!tenantId} />
           </div>
           <div className="field">
             <label>Status</label>

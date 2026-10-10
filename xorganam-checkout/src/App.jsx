@@ -28,6 +28,7 @@ import CustomerOrders from './pages/CustomerOrders'
 import OperatorStorefront from './pages/operator/OperatorStorefront'
 import VerifyEmail from './pages/operator/VerifyEmail'
 import OperatorResetPassword from './pages/operator/OperatorResetPassword'
+import OperatorEmailSettings from './pages/operator/OperatorEmailSettings'
 
 export default function App() {
   useEffect(() => {
@@ -68,6 +69,7 @@ export default function App() {
             <Route path="reports" element={<OperatorReports />} />
             <Route path="team" element={<OperatorTeam />} />
             <Route path="account" element={<OperatorAccount />} />
+            <Route path="email-settings" element={<OperatorEmailSettings />} />
             <Route path="institutions" element={<OperatorInstitutions />} />
             <Route path="credit-plans" element={<OperatorCreditPlans />} />
             <Route path="settlements" element={<OperatorSettlements />} />

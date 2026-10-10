@@ -116,7 +116,7 @@ publicRouter.post(
 
     try {
       const result = await initiateCollection(merchantId, {
-        amount: Number(amount),
+        amount,
         msisdn,
         network,
         collectionMethod,

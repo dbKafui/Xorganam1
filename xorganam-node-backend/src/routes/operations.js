@@ -1,11 +1,21 @@
 import { Router } from 'express'
-import { authenticate, requireAnyRole, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
+import { authenticate, requireAnyRole, requirePlatformAdmin, resolveTenantScope, ForbiddenError } from '../middleware/auth.js'
 import { pool, query, withTransaction } from '../db/pool.js'
 import { getRedisConnection, getQueueHealth, getFailedQueueJobs } from '../queue/queue.js'
 import { buildOperationalHealthSummary } from '../services/operationalHealthService.js'
 import { writePlatformAudit } from '../services/auditService.js'
+import { searchGlobalRecords } from '../services/globalSearchService.js'
 
 export const operationsRouter = Router()
+
+operationsRouter.get('/search', authenticate, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const rows = await searchGlobalRecords(req.query.q)
+    res.json({ results: rows })
+  } catch (error) {
+    next(error)
+  }
+})
 
 operationsRouter.get('/health/failures', authenticate, requireAnyRole('TENANT_ADMIN', 'TENANT_MANAGER', 'TENANT_BRANCH_MANAGER', 'PLATFORM_ADMIN'), async (req, res) => {
   const requestedTenantId = req.query.tenantId

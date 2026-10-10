@@ -125,10 +125,11 @@ institutionOnboardingAdminRouter.post('/applications/:applicationId/approve', as
       )
       if (existingStaff.length) return { emailConflict: true }
 
+      const apiKeySalt = crypto.randomBytes(16).toString('hex')
       const { rows: institutionRows } = await tx.query(
-        `INSERT INTO institutions (name, institution_type, settlement_msisdn, settlement_account_name)
-         VALUES ($1, $2, $3, $4) RETURNING id`,
-        [application.institution_name, application.institution_type, application.settlement_msisdn, application.settlement_account_name]
+        `INSERT INTO institutions (name, institution_type, settlement_msisdn, settlement_account_name, api_key_salt)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [application.institution_name, application.institution_type, application.settlement_msisdn, application.settlement_account_name, apiKeySalt]
       )
       const institutionId = institutionRows[0].id
       const { rows: adminRows } = await tx.query(

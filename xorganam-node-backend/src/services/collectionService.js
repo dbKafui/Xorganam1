@@ -1,12 +1,14 @@
 import crypto from 'node:crypto'
 import { env } from '../config/env.js'
 import { query, withTransaction } from '../db/pool.js'
-import { createEganowClientForMerchant, normalizePaypartnerCode, normalizeEganowResponse } from './eganowClient.js'
+import { createEganowClientForMerchant, normalizeEganowResponse } from './eganowClient.js'
+import { resolveInstitutionMomoNetwork } from './institutionPaymentMethods.js'
 import { TenantCredentialsError } from './credentialsService.js'
 import { enqueueCollectionStatusPollJob } from '../queue/queue.js'
 import { computeFee } from './feeService.js'
 import { createVendorReference } from './referenceIds.js'
 import { updateTransactionStatus } from './transactionStateService.js'
+import { normalizeAmountMinorUnits } from './providerResultValidation.js'
 
 export class CollectionRejectedError extends Error {
   constructor(message, status = 400) {
@@ -25,7 +27,7 @@ export function collectionFingerprint({ merchantId, amount, collectionMethod, ne
     : null
   const payload = JSON.stringify({
     merchantId,
-    amountCents: Math.round(amount * 100),
+    amountCents: normalizeAmountMinorUnits(amount)?.toString() ?? 'invalid',
     currency: 'GHS',
     collectionMethod,
     network: network || null,
@@ -135,7 +137,7 @@ export async function findMerchantForCollection(merchantId) {
 
 /**
  * @param {string} merchantId
- * @param {{ amount: number, msisdn: string, network?: string, narration?: string, payoutMsisdn?: string }} input
+ * @param {{ amount: string|number, msisdn: string, network?: string, narration?: string, payoutMsisdn?: string }} input
  * @returns {Promise<{ transactionId: string, internalReference: string, status: string, tenantId: string }>}
  */
 export async function initiateCollection(merchantId, { amount, msisdn, network, narration, collectionMethod = 'MOMO', cardNumber = null, cardholderName = null, expiryDateMonth = null, expiryDateYear = null, cvv = null, payoutMsisdn = null, callback = null, creditPlanId = null, creditInstallmentId = null, orderId = null, idempotencyKey = null }) {
@@ -156,12 +158,13 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
   if (!merchant.eganow_enabled) {
     throw new CollectionRejectedError('Payments are not configured for this merchant yet.')
   }
-  if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(Math.round(amount * 100)) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
+  const amountMinorUnits = normalizeAmountMinorUnits(amount)
+  if (amountMinorUnits === null || amountMinorUnits <= 0n || amountMinorUnits > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new CollectionRejectedError('Amount must be a valid positive amount with at most two decimal places.')
   }
   const collectionFee = await computeFee(merchant.tenant_id, 'COLLECTION', amount)
   // Fees are recorded for reconciliation; Eganow applies any actual deduction.
-  const gatewayAmount = amount
+  const gatewayAmount = Number(amountMinorUnits) / 100
   const normalizedCollectionMethod = String(collectionMethod || 'MOMO').toUpperCase()
   if (!['MOMO', 'CARD'].includes(normalizedCollectionMethod)) throw new CollectionRejectedError('Choose Mobile Money or Card collection.')
   if (normalizedCollectionMethod === 'MOMO' && !msisdn) throw new CollectionRejectedError('A mobile number is required.')
@@ -226,7 +229,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
       if (installment.customer_identifier !== normalizedMsisdn) {
         throw new CollectionRejectedError('The mobile number must match the number on this credit plan.')
       }
-      if (Math.round(Number(amount) * 100) !== Math.round(Number(installment.amount_due) * 100)) {
+      if (amountMinorUnits !== normalizeAmountMinorUnits(installment.amount_due)) {
         throw new CollectionRejectedError('Installments must be paid in full.')
       }
       const { rows: activePayment } = await client.query(
@@ -246,10 +249,10 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
             FOR UPDATE OF p, o`, [creditPlanId, orderId, merchant.tenant_id, merchant.id]
         )
         const plan = rows[0]
-        if (!plan || plan.plan_status !== 'ACTIVE' || plan.order_status !== 'PENDING_PAYMENT' || Number(plan.down_payment) <= 0) {
+        if (!plan || plan.plan_status !== 'ACTIVE' || plan.order_status !== 'PENDING_PAYMENT' || (normalizeAmountMinorUnits(plan.down_payment) ?? 0n) <= 0n) {
           throw new CollectionRejectedError('The credit order down payment is not available.')
         }
-        if (Math.round(Number(amount) * 100) !== Math.round(Number(plan.down_payment) * 100)) {
+        if (amountMinorUnits !== normalizeAmountMinorUnits(plan.down_payment)) {
           throw new CollectionRejectedError('The collection amount must match the order down payment.')
         }
         if (plan.collection_transaction_id) throw new CollectionRejectedError('A payment has already been started for this order.')
@@ -267,7 +270,7 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
         if (!order || order.status !== 'PENDING_PAYMENT' || order.collection_transaction_id) {
           throw new CollectionRejectedError('This order is not available for payment.')
         }
-        if (Math.round(Number(amount) * 100) !== Math.round(Number(order.total_amount) * 100)) {
+        if (amountMinorUnits !== normalizeAmountMinorUnits(order.total_amount)) {
           throw new CollectionRejectedError('The collection amount must match the order total.')
         }
         validatedOrderId = orderId
@@ -327,13 +330,9 @@ export async function initiateCollection(merchantId, { amount, msisdn, network, 
     let paypartnerCode
     const inferredPaypartnerCode = normalizedCollectionMethod === 'CARD' ? 'CARDGATEWAY' : inferPaypartnerCodeFromMsisdn(normalizedMsisdn)
 
-    if (inferredPaypartnerCode) {
-      paypartnerCode = inferredPaypartnerCode
-    } else if (network) {
-      paypartnerCode = normalizePaypartnerCode(network)
-    } else {
-      paypartnerCode = normalizePaypartnerCode(merchant.network_provider)
-    }
+    paypartnerCode = normalizedCollectionMethod === 'CARD'
+      ? 'CARDGATEWAY'
+      : resolveInstitutionMomoNetwork(network, inferredPaypartnerCode, merchant.network_provider)
 
     if (!paypartnerCode) {
       throw new CollectionRejectedError('Payment network is not configured for this merchant. Contact support.')

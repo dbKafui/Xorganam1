@@ -4,8 +4,9 @@ import PageHeader from '../components/PageHeader.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import { EmptyState, ErrorMessage, LoadingState } from '../components/Feedback.jsx'
 import { normalizePaymentStatus } from '../lib/statusContract.js'
+import { formatCurrencyAmount } from '../../../shared/currency.js'
 
-const amount = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const amount = (value) => formatCurrencyAmount(value || 0, 'GHS')
 
 function describeFailure(row) {
   const statuses = [row.institution_leg_status, row.vendor_leg_status].filter(Boolean)
